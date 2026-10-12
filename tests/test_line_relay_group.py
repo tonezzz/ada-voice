@@ -330,6 +330,68 @@ class GroupEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(to, "G1")
         self.assertTrue(msgs[0]["text"].startswith("[ada->kk] "))
 
+    async def test_pin_routes_senders_followups(self):
+        """A member's mention pins the persona for THEIR follow-ups —
+        unaddressed messages keep routing until they name another."""
+        relay = _relay()
+        await relay.handle_event(_ev("kaewta, hi"))
+        await relay.handle_event(_ev("and what about tomorrow?"))
+        [sess] = _FakeSession.made  # same (chat, sender, persona) session
+        self.assertEqual(sess.ws_url, "ws://127.0.0.1:8007/ws")
+        self.assertEqual(sess.send_turn.await_count, 2)
+        self.assertIn("and what about tomorrow?",
+                      sess.send_turn.await_args.args[0])
+
+    async def test_pin_is_per_member_no_cross_leak(self):
+        """One member's mention must NOT route another member's
+        unaddressed chatter — the shared-room noise rule. kk pins
+        kaewta; tony's unaddressed message is still ignored."""
+        relay = _relay()
+        await relay.handle_event(_ev("kaewta, hi", user_id="Ukk1"))
+        await relay.handle_event(
+            _ev("anyone up for lunch?", user_id="Utony1"))
+        self.assertEqual(len(_FakeSession.made), 1)  # kk's turn only
+
+    async def test_other_members_mention_does_not_steal_pin(self):
+        """kk pins kaewta, tony mentions ada — kk's follow-up still goes
+        to kaewta (per-member pin, not last-room-mention-wins)."""
+        relay = _relay()
+        await relay.handle_event(_ev("kaewta, hi", user_id="Ukk1"))
+        await relay.handle_event(_ev("ada, lights", user_id="Utony1"))
+        await relay.handle_event(
+            _ev("and dinner plans?", user_id="Ukk1"))
+        kk_sess, tony_sess = _FakeSession.made
+        self.assertEqual(kk_sess.ws_url, "ws://127.0.0.1:8007/ws")
+        self.assertEqual(tony_sess.ws_url, "ws://127.0.0.1:8002/ws")
+        # kk's unaddressed follow-up reused HER kaewta session, not ada
+        self.assertEqual(kk_sess.send_turn.await_count, 2)
+        self.assertIn("dinner plans",
+                      kk_sess.send_turn.await_args.args[0])
+
+    async def test_new_mention_switches_sender_pin(self):
+        """Naming another persona re-pins that member."""
+        relay = _relay()
+        await relay.handle_event(_ev("kaewta, hi"))
+        await relay.handle_event(_ev("ada, never mind"))
+        await relay.handle_event(_ev("status?"))
+        kaewta_sess, ada_sess = _FakeSession.made
+        self.assertEqual(kaewta_sess.ws_url, "ws://127.0.0.1:8007/ws")
+        self.assertEqual(ada_sess.ws_url, "ws://127.0.0.1:8002/ws")
+        # the unaddressed follow-up re-pinned to ada, not kaewta
+        self.assertEqual(ada_sess.send_turn.await_count, 2)
+        self.assertIn("status?", ada_sess.send_turn.await_args.args[0])
+
+    async def test_offline_persona_not_pinned(self):
+        """Mentioning a known-but-offline persona ('chaba:') answers
+        isn't-home but does NOT pin — the member's next unaddressed
+        message is ignored, not routed to a dead backend."""
+        relay = _relay()
+        await relay.handle_event(_ev("chaba are you there?"))
+        await relay.handle_event(_ev("hello? anyone?"))
+        self.assertEqual(_FakeSession.made, [])
+        # only the isn't-home reply — the follow-up was ignored
+        self.assertEqual(len(self._sent(relay)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

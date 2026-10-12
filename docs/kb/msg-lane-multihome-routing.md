@@ -14,12 +14,23 @@ A message lane carries a message only when it is **addressed**.
   case-insensitive, optional `@`). The first configured persona name in
   the text wins; a leading `name,` / `@name:` is stripped as addressing
   noise before the turn ships.
-- **Unaddressed room chatter never reaches a persona.** This is the
-  noise rule: without it every member message would hit the default
-  backend. Escape hatch: `LINE_DEFAULT_PERSONA` names one catch-all
-  persona for unaddressed messages — off by default, and it must name
-  a persona in `LINE_NAME_BACKENDS` (an unknown name is logged and
-  treated as unset, never a crash).
+- **Sticky addressing (per member).** A member's mention pins that
+  persona to `(room, sender)` — their unaddressed follow-ups keep
+  routing to the persona they named until they mention another
+  (the switch). The pin is **per member**, not per room: one member's
+  mention must never route another member's chatter, and a pinned
+  member's follow-ups can't be stolen by someone else naming a
+  different persona. A persona with an empty backend URL (`chaba:`)
+  is never pinned — the isn't-home reply must not stick the member to
+  a dead backend. Group images and voice transcripts follow the same
+  rule (a member's photo follows their own pinned conversation).
+- **Unaddressed chatter from a member with no pin never reaches a
+  persona.** This is the noise rule: without it every member message
+  would hit the default backend. Escape hatch: `LINE_DEFAULT_PERSONA`
+  names one catch-all persona for unaddressed messages — off by
+  default, and it must name a persona in `LINE_NAME_BACKENDS` (an
+  unknown name is logged and treated as unset, never a crash). The
+  member's own pin beats the default.
 - **DMs are unchanged.** A 1:1 chat has no addressing problem — it
   defaults to `ada` (ADA_WS_URL), and an explicit mention still
   re-routes.

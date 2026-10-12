@@ -47,9 +47,14 @@ routing:
     Mention by name anywhere in the message (word-bounded,
     case-insensitive, optional '@'). First name in the text wins; a
     leading 'name,' / '@name:' is stripped before the turn ships.
+  sticky: >
+    A mention pins the persona to (room, sender) — that member's
+    unaddressed follow-ups keep routing to it until they name another.
+    Per member only: never per room, so one member's mention can't
+    route another's chatter. Empty-URL personas are never pinned.
   unaddressed: >
-    Ignored (noise rule — a shared room must not spam Ada). Optional
-    catch-all via LINE_DEFAULT_PERSONA.
+    Ignored when the sender has no pin (noise rule — a shared room
+    must not spam Ada). Optional catch-all via LINE_DEFAULT_PERSONA.
   reply_tag: "[persona->sender]"
   sessions: >
     One WS session per (group, sender, persona); sender identity resolves

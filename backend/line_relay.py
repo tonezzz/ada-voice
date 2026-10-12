@@ -9,9 +9,11 @@ Group rooms (docs/kb/msg-lane-multihome-routing.md): an allowed group's
 messages are MENTION-routed — a member addresses a persona by name
 ("ada, ..." / "@kaewta ...") and the turn goes to that persona's own
 backend over LINE_NAME_BACKENDS, answered "[persona->sender] ...".
-Unaddressed group chatter is ignored unless LINE_DEFAULT_PERSONA names a
-catch-all. Sender identity is the per-member LINE_USER_CALLERS key —
-there is no admin fallback in a room.
+A mention also pins that persona to (room, member) — the member's own
+unaddressed follow-ups keep routing to it until they name another.
+Unaddressed chatter from a member with no pin is ignored unless
+LINE_DEFAULT_PERSONA names a catch-all. Sender identity is the
+per-member LINE_USER_CALLERS key — there is no admin fallback in a room.
 
 Env:
     LINE_CHANNEL_ACCESS_TOKEN  — Messaging API channel token (outbound)
@@ -219,17 +221,21 @@ def _display_name(persona: str, text: str) -> str:
 
 
 def _route(text: str, is_group: bool, room: str = "",
-           pinned: dict | None = None) -> tuple[str | None, str]:
+           sender: str = "", pinned: dict | None = None
+           ) -> tuple[str | None, str]:
     """(persona, turn_text) for a message — None persona means ignore.
-    Groups need a mention, a room pin, or LINE_DEFAULT_PERSONA; DMs
-    default to ada. Interview-room rule: mentioning a persona pins it
-    to that room — subsequent unaddressed messages keep routing to the
-    pinned persona until another name is mentioned (switch). A default
-    naming no configured persona resolves to ignore — an env typo must
-    not crash the turn on _name_backends()[name]."""
+    Groups need a mention, the sender's own pin, or LINE_DEFAULT_PERSONA;
+    DMs default to ada. Sticky-address rule: mentioning a live persona
+    pins it to (room, sender) — that member's unaddressed follow-ups keep
+    routing to the persona they named until they mention another
+    (switch). The pin is per member: one member's mention must never
+    route another member's chatter (the shared-room noise rule), and a
+    persona with no backend configured (empty URL) is never pinned. A
+    default naming no configured persona resolves to ignore — an env
+    typo must not crash the turn on _name_backends()[name]."""
     persona = _mention_persona(text)
     if persona is None:
-        persona = ((pinned or {}).get(room)
+        persona = ((pinned or {}).get((room, sender))
                    or _default_persona()) if is_group else "ada"
         if persona is None:
             return None, text
@@ -237,10 +243,14 @@ def _route(text: str, is_group: bool, room: str = "",
             logger.warning("default persona %r not in LINE_NAME_BACKENDS"
                            " — ignoring", persona)
             return None, text
-    elif is_group and room and pinned is not None:
-        if pinned.get(room) != persona:
-            logger.info("room %s persona pin -> %s", room, persona)
-        pinned[room] = persona
+    elif is_group and room and sender and pinned is not None:
+        # Pin only a persona that can actually answer — 'chaba:' (empty
+        # URL) must not stick the member to a dead backend.
+        if _name_backends().get(persona):
+            if pinned.get((room, sender)) != persona:
+                logger.info("room %s member %s persona pin -> %s",
+                            room, sender, persona)
+            pinned[(room, sender)] = persona
     return persona, _strip_lead_mention(text, persona)
 
 
@@ -409,8 +419,11 @@ class LineRelay:
         # for /send when 'to' is empty. The old fallback (first allowed
         # user) pushed persona sends into the owner's DM.
         self._recent_chat: dict[str, tuple[str, float]] = {}
-        # Interview-room pins: room chat_id -> last-mentioned persona.
-        self._room_pin: dict[str, str] = {}
+        # Sticky-address pins: (room chat_id, sender userId) -> the
+        # persona that member last named — their unaddressed follow-ups
+        # keep routing to it. Per member so one person's mention never
+        # routes another member's chatter (interview-room + shared-room).
+        self._room_pin: dict[tuple[str, str], str] = {}
         self._names: dict[str, str] = {}  # userId -> display label cache
         self._refused: dict[tuple[str, str], float] = {}
 
@@ -817,7 +830,7 @@ class LineRelay:
             return
         await self._mark_read(ev)
         persona, turn = _route(transcript, is_group, chat_id,
-                                   self._room_pin)
+                                   user_id, self._room_pin)
         if persona is None:
             return
         disp = _display_name(persona, transcript)
@@ -895,7 +908,8 @@ class LineRelay:
         # Route: groups need a mention (or LINE_DEFAULT_PERSONA), DMs
         # default to ada. Group images have no caption — default persona.
         persona, turn = _route(text if mtype == "text" else "",
-                                   is_group, chat_id, self._room_pin)
+                                   is_group, chat_id, user_id,
+                                   self._room_pin)
         if persona is None:
             logger.info("ignored unaddressed %s msg from %s (no persona mention)",
                         src_type, user_id)

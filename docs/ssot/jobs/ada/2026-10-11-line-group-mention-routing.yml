@@ -68,6 +68,24 @@ hardening (dispatch 20261011-170000, attempt 3): |
     not a push message).
   - get_event_loop -> get_running_loop in the voice transcribe path.
 
+hardening (dispatch 20261012-221507, attempt 4): |
+  - Interview-room persona pin (24d6e3d) was room-scoped: ANY member's
+    mention pinned the whole room, so every member's unaddressed
+    chatter then routed to the last-named persona — the exact noise
+    leak the spec prohibits, plus pin theft (kk pins kaewta, tony
+    mentions ada, kk's follow-up lands on ada). Pins are now keyed
+    (room, sender): a member's unaddressed follow-ups stick to the
+    persona THEY named; members with no pin stay ignored.
+  - Empty-URL personas ('chaba:') are never pinned — an isn't-home
+    reply must not stick the member to a dead backend.
+  - tests/test_line_relay_group.py 23 -> 28 (pin stickiness,
+    per-member isolation, switch, offline not pinned, no cross-leak).
+    Note: sessions reuse per (chat, sender, persona) — assert on
+    send_turn call counts, not session count.
+  - Runner note: tony-macbook has no pip/venv — .teststubs/ (already
+    gitignored) holds minimal httpx/websockets stubs;
+    PYTHONPATH=.teststubs python3 -m unittest runs the suite.
+
 followups:
   - idc03 ada-line-relay unit env still needs LINE_ALLOWED_GROUP_IDS (the
     group id prints in the join greeting / logs), LINE_NAME_BACKENDS,
