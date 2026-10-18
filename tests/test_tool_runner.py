@@ -2714,8 +2714,11 @@ class TvInputMismatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_cast_to_screen_on_tv_verifies(self):
         self.ha_client.get_state.return_value = self._tv_state(
             "com.truedmp.idtv")
-        out = await self.runner.cast_to_screen(
-            1, "image", url="https://img.test/x.jpg")
+        with patch.object(ToolRunner, "_frame_check",
+                          staticmethod(lambda url:
+                                       {"content_type": "image/jpeg"})):
+            out = await self.runner.cast_to_screen(
+                1, "image", url="https://img.test/x.jpg")
         self.assertTrue(out.get("tv_input_mismatch"))
         self.ha_client.tv_action.assert_awaited_once()
 
