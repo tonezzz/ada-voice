@@ -2467,8 +2467,12 @@ class CastToScreenRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pubbed, [])
 
     async def test_image_interval_passes_through(self):
-        out = await self.runner.cast_to_screen(
-            1, "image", url="https://img.test/x.jpg", interval=15)
+        # action='image' is probe-covered like nav/play — stub the probe.
+        with patch.object(ToolRunner, "_frame_check",
+                          staticmethod(lambda url:
+                                       {"content_type": "image/jpeg"})):
+            out = await self.runner.cast_to_screen(
+                1, "image", url="https://img.test/x.jpg", interval=15)
         self.assertEqual(self.pubbed[-1]["msg"]["type"], "image")
         self.assertEqual(self.pubbed[-1]["msg"]["interval"], 15)
         self.assertNotIn("render_warn", out)
