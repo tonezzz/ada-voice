@@ -5130,6 +5130,27 @@ class GeminiLiveProvider(RealtimeProvider):
             and time.monotonic() - self._last_user_at > self._stall_timeout
         )
 
+    def upstream_close_code(self):
+        """Ws close code once the Gemini link has closed — None while open."""
+        sess = getattr(self, "_session", None)
+        ws = getattr(sess, "_ws", None) if sess is not None else None
+        return getattr(ws, "close_code", None) if ws is not None else None
+
+    def upstream_dead(self) -> bool:
+        """True when the upstream ws has closed while this provider still
+        looks attached — the silent-death shape is_stalled can't see (it
+        only arms after a user turn, and the notify path just logs into
+        the corpse). The session watchdog uses this to force teardown."""
+        if self._closed:
+            return True
+        ws = getattr(getattr(self, "_session", None), "_ws", None)
+        if ws is None:
+            return False
+        if getattr(ws, "close_code", None) is not None:
+            return True
+        return getattr(getattr(ws, "state", None), "name", "") in (
+            "CLOSING", "CLOSED")
+
     async def send_text_turn(self, text: str) -> None:
         if self._session is None:
             raise RuntimeError("provider is not connected")

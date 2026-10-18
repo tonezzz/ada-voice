@@ -1197,7 +1197,8 @@ async def voice_socket(ws: WebSocket) -> None:
     # when any assistant output reaches the client. stall_watchdog nudges
     # Ada with a one-line acknowledgement if speech never got a reply.
     speech_state: dict[str, float | None] = {
-        "burst_at": None, "pending_at": None, "nudged_until": 0.0
+        "burst_at": None, "pending_at": None, "nudged_until": 0.0,
+        "pump_alive_at": 0.0, "pump_reconnecting": False
     }
 
     # Speaker identification: non-blocking, runs in parallel with the
@@ -1767,6 +1768,7 @@ async def voice_socket(ws: WebSocket) -> None:
 
         try:
             while not closed.is_set():
+                speech_state["pump_alive_at"] = time.monotonic()
                 try:
                     await pump()
                 except Exception as exc:
@@ -1777,6 +1779,8 @@ async def voice_socket(ws: WebSocket) -> None:
                     break
                 # Gemini Live session ended (go_away or drop) — resume with the
                 # last resumption handle instead of killing the browser socket.
+                speech_state["pump_reconnecting"] = True
+                speech_state["pump_alive_at"] = time.monotonic()
                 old = provider_ref[0]
                 handle = old.resumption_handle
                 suppress_target = live_turn_text if handle else ""
@@ -1794,6 +1798,7 @@ async def voice_socket(ws: WebSocket) -> None:
                             {"type": "bark", "text": _rk}))
                 delay = 1.0
                 while not closed.is_set():
+                    speech_state["pump_alive_at"] = time.monotonic()
                     try:
                         new_provider = create_provider(
                             tool_runner=tool_runner, session_id=session_id,
@@ -1819,6 +1824,8 @@ async def voice_socket(ws: WebSocket) -> None:
                         new_provider.current_speaker_ha_person = (
                             old.current_speaker_ha_person)
                         provider_ref[0] = new_provider
+                        speech_state["pump_reconnecting"] = False
+                        speech_state["pump_alive_at"] = time.monotonic()
                         conversation.log_event(
                             "live_reconnect", resumed=bool(handle))
                         if not handle:
@@ -1874,9 +1881,38 @@ async def voice_socket(ws: WebSocket) -> None:
         reply within SPEECH_STALL_S — nudge her to voice a one-line
         acknowledgement; (2) provider stream completely silent — close it
         so the reconnect loop in provider_to_browser fires."""
+        zombie_since = None
         while not closed.is_set():
             await asyncio.sleep(2)
             p = provider_ref[0]
+            if (p is not None and p.upstream_dead()
+                    and not speech_state["pump_reconnecting"]):
+                # Silent upstream death (Gemini idle-kill, network drop)
+                # with no pending user turn — is_stalled can't see it and
+                # the deferred-notify path just logs into the corpse.
+                # close() ends the events() loop so the pump unwinds into
+                # the reconnect path; if the pump itself is parked (client
+                # send backpressure on a non-draining browser), drop the
+                # client link so the browser's reconnect rebuilds the
+                # whole session.
+                if zombie_since is None:
+                    zombie_since = time.monotonic()
+                    logger.warning(
+                        "session=%s provider ws dead (code=%s) — closing "
+                        "for reconnect", session_id, p.upstream_close_code())
+                    with suppress(Exception):
+                        await p.close()
+                elif (time.monotonic()
+                        - speech_state["pump_alive_at"] > 20):
+                    logger.warning(
+                        "session=%s pump parked with dead provider — "
+                        "dropping client link", session_id)
+                    with suppress(Exception):
+                        await ws.close(code=1012)
+                    closed.set()
+                    return
+                continue
+            zombie_since = None
             if p is not None and p.is_stalled():
                 logger.warning(
                     "session=%s provider stalled >%.0fs after user turn — "
