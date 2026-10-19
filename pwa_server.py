@@ -408,6 +408,27 @@ def _person_label(details: dict) -> str:
     return re.sub(r"^user-", "", name) or name
 
 
+def _owner_voice_label(owner: str | None, identifier) -> str:
+    """Speakable label for a session owner/caller identity in model-facing
+    notes — 'person.michael' renders as the enrolled speaker's display name
+    ('Michael'); a raw key name ('mn-ha-sidebar') is meaningless to a human
+    and MUST NOT be read aloud — fall back to the generic phrase.
+    2026-10-19: Kraut read 'mn ha sidebar' to a guest as if it were the
+    owner's name."""
+    if not owner:
+        return "the session owner"
+    if str(owner).startswith("person."):
+        try:
+            spk = identifier.speaker_for_person(owner)
+            label = identifier.get_display_name(spk) if spk else None
+            if label:
+                return label
+        except Exception:
+            pass
+        return str(owner)[len("person."):].replace("_", " ")
+    return "the session owner"
+
+
 def _invite_app_name(details: dict) -> str:
     return f"ADA-{_instance_tag()}({_person_label(details)})"
 
@@ -1278,27 +1299,31 @@ async def voice_socket(ws: WebSocket) -> None:
                 # session owner gets plain personalization.
                 if secondary:
                     owner = tr.session_owner_identity
+                    olabel = _owner_voice_label(owner, identifier)
                     note = (
                         f"(system) A different speaker is talking: {display_name} "
                         f"(confidence {confidence:.0%}). This session belongs to "
-                        f"{owner} — converse with {display_name} normally, but "
+                        f"{olabel} — converse with {display_name} normally, but "
                         "their requests cannot write memories, change personas, "
                         "enroll voices, search documents, or actuate devices. If "
                         f"they suggest something useful, propose it aloud and ask "
-                        f"{owner} to confirm — only the owner's voice approves. "
+                        f"{olabel} to confirm — only the owner's voice approves. "
                         "Do not re-greet or announce the speaker switch — "
                         "continue the conversation naturally."
                     )
                 else:
-                    caller = tr.session_caller_name if tr is not None else None
                     matched = (
                         " — matches the session owner"
                         if ha_person and ha_person == (
                             tr.session_owner_identity if tr else None)
                         else ""
                     )
+                    _caller_hp = (
+                        tr.session_caller_ha_person if tr is not None else None)
                     override = (
-                        f" — device identity is {caller}" if caller and not matched else ""
+                        " — device identity maps to "
+                        f"{_owner_voice_label(_caller_hp, identifier)}"
+                        if _caller_hp and not matched else ""
                     )
                     note = (
                         f"(system) Speaker identified: {display_name}"
