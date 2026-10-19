@@ -123,6 +123,8 @@ class HomeAssistantClientTests(unittest.IsolatedAsyncioTestCase):
             {"entity_id": "light.office", "state": "on", "attributes": {}},
         ])
         home = HomeAssistantClient(client=client)
+        # stub the cloud fallback: this test asserts the HA-path verdict
+        home._rk600_cloud_fallback = AsyncMock(return_value=None)
         out = await home.rk600_weather()
         self.assertFalse(out["ok"])
         self.assertEqual(out["sensors"], {})
@@ -157,10 +159,32 @@ class HomeAssistantClientTests(unittest.IsolatedAsyncioTestCase):
              "attributes": {"friendly_name": "RK600 Humidity"}},
         ])
         home = HomeAssistantClient(client=client)
+        home._rk600_cloud_fallback = AsyncMock(return_value=None)
         out = await home.rk600_weather()
         self.assertFalse(out["ok"])
         self.assertIn("offline", out["error"])
         self.assertEqual(len(out["sensors"]), 2)
+
+    async def test_rk600_weather_falls_back_to_cloud_when_ha_raises(self):
+        # mn lane quarantine (2026-10-19): HA unreachable made the tool
+        # raise; the model narrated 'station timed out' instead of
+        # serving the cloud path that was reachable the whole time.
+        client = AsyncMock()
+        client.get.side_effect = TimeoutError("ha unreachable")
+        home = HomeAssistantClient(client=client)
+        home._rk600_cloud_fallback = AsyncMock(return_value={
+            "ok": True, "wind_kt": 3.2, "source": "RikaCloud"})
+        out = await home.rk600_weather()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["source"], "RikaCloud")
+
+    async def test_rk600_weather_reraises_when_fallback_also_dead(self):
+        client = AsyncMock()
+        client.get.side_effect = TimeoutError("ha unreachable")
+        home = HomeAssistantClient(client=client)
+        home._rk600_cloud_fallback = AsyncMock(return_value=None)
+        with self.assertRaises(TimeoutError):
+            await home.rk600_weather()
 
     async def test_snapshot_discovers_plug_family_beyond_configured_list(self):
         # 2026-10-13 ada-kk repro: get_home_state's all_plugs dropped

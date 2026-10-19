@@ -854,8 +854,32 @@ class HomeAssistantClient:
                 out["available"][eid] = entry
         return out
 
+    async def _rk600_cloud_fallback(self, why: str) -> dict[str, Any] | None:
+        """HA path dead (quarantine/offline) — serve the same ask from
+        RikaCloud via the weather_station tools.d module. Returns None
+        when the fallback is unavailable or also fails."""
+        try:
+            from backend import tools_loader
+            tool = tools_loader.registry().tools.get("weather_station")
+            if tool is None:
+                return None
+            out = await tool.run(None)
+            if not out.get("ok"):
+                return None
+            note = f"Served from RikaCloud (HA path {why})."
+            out["note"] = f"{out.get('note', '')} {note}".strip()
+            return out
+        except Exception:
+            return None
+
     async def rk600_weather(self) -> dict[str, Any]:
-        states = await self._states()
+        try:
+            states = await self._states()
+        except Exception as exc:
+            fb = await self._rk600_cloud_fallback(f"unreachable: {exc}")
+            if fb is not None:
+                return fb
+            raise
         out = {
             "source": "Rika RK600-07B weather station",
             "note": (
@@ -892,6 +916,11 @@ class HomeAssistantClient:
                 "exist but all report unavailable/unknown. Do not retry; "
                 "tell the user the station appears offline instead."
             )
+        if out.get("ok") is False:
+            fb = await self._rk600_cloud_fallback(
+                "sensors unavailable" if out["sensors"] else "no rk600 entities")
+            if fb is not None:
+                return fb
         return out
 
     async def lovelace_config(self, url_path: str | None = None) -> dict[str, Any]:
