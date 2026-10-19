@@ -756,3 +756,11 @@ cpt_post: >-
   fields need the plugin update; never claim fields that were dropped.
   If ok:false mentions missing credentials, the site key isn't
   configured — don't retry.
+
+weather_station: >-
+  Live readings from the RK600 station at Michael's site via RikaCloud —
+  'how windy / weather at Michael's / at the site' routes HERE (not a
+  forecast). Fields: wind_kt, wind_dir (compass), temp_c, humidity_pct,
+  rain + raining flag. Check stale/age_min BEFORE quoting numbers — if
+  stale, narrate the age ('station data is N min old, upload may be
+  down'), never present old readings as current.

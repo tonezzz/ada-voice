@@ -89,3 +89,8 @@ tools:
     policy: read
     secondary_allowed: true
     timeout_s: 60
+  weather_station:
+    module: weather_station
+    policy: read
+    secondary_allowed: true
+    timeout_s: 20
