@@ -51,6 +51,12 @@ SILENCE_RMS = 0.01
 # far-field/satellite mics score ~0.1-0.2 below clean enrollment captures —
 # on ada-ha-tony 0.45 sat above Tony's live voice even with a clean profile.
 DEFAULT_THRESHOLD = float(os.environ.get("ADA_SPEAKER_THRESHOLD", "0.45"))
+# Own-voice merge bar for an EXISTING profile — deliberately below the
+# identify threshold: the contamination guard already refuses clips near a
+# foreign profile, so a sparse (1-print) profile must be able to grow.
+# 2026-10-19: Michael's real corpus clips at 0.42/0.44 were refused at
+# 0.45 and his profile could never accumulate prints (OPS-0746).
+MERGE_MIN = float(os.environ.get("ADA_SPEAKER_MERGE_MIN", "0.30"))
 # Drop the buffer if it grows beyond this (prevents unbounded growth when
 # identification is slower than audio arrival).
 MAX_BUFFER_BYTES = SAMPLE_RATE * 6 * 2  # 6 s
@@ -783,10 +789,11 @@ class SpeakerIdentifier:
             own = max(
                 _cosine_similarity(emb, p) for p in self._prints[name]
             )
-            if own < DEFAULT_THRESHOLD:
+            if own < MERGE_MIN or own <= best_other_score:
                 raise ValueError(
                     f"this voice does not match the existing '{name}' profile "
-                    f"({own:.0%}) — refusing to merge a foreign voice. If this "
+                    f"({own:.0%}, best other {best_other_score:.0%}) — "
+                    "refusing to merge a foreign voice. If this "
                     f"really is {name}, the stored print may be stale; remove "
                     "it first, then enroll fresh."
                 )

@@ -251,6 +251,34 @@ class MultiPrintTest(unittest.TestCase):
         self.assertTrue(all(s < 0.5 for s in sims))
         self.assertEqual(len(self.ident._prints["Tony"]), 3)
 
+    def _orth(self, n: int = 3, dim: int = 192):
+        q, _ = np.linalg.qr(np.random.default_rng(50).standard_normal((dim, n)))
+        return [q[:, i].astype(np.float32) for i in range(n)]
+
+    def test_merge_below_identify_threshold_ok(self):
+        # OPS-0746: a genuine clip at ~0.4 vs a sparse 1-print profile must
+        # merge — the old 0.45 own-voice bar starved sparse profiles.
+        a, b, _ = self._orth(3)
+        self.ident._enrolled = {"Tony": a}
+        self.ident._prints = {"Tony": [a]}
+        self.ident._metadata = {"Tony": {"samples": 1}}
+        clip = 0.40 * a + (1 - 0.40 ** 2) ** 0.5 * b
+        self._enroll_with("Tony", clip)
+        self.assertEqual(len(self.ident._prints["Tony"]), 2)
+        self.assertEqual(self.ident._metadata["Tony"]["samples"], 2)
+
+    def test_merge_refuses_when_closer_to_other(self):
+        # The lowered bar must not absorb a clip that is nearer a foreign
+        # print than the speaker's own — own must beat best_other.
+        a, k, z = self._orth(3)
+        self.ident._enrolled = {"Tony": a, "KK": k}
+        self.ident._prints = {"Tony": [a], "KK": [k]}
+        self.ident._metadata = {"Tony": {"samples": 1}, "KK": {"samples": 1}}
+        clip = 0.35 * a + 0.42 * k + (1 - 0.35 ** 2 - 0.42 ** 2) ** 0.5 * z
+        with self.assertRaises(ValueError):
+            self._enroll_with("Tony", clip)
+        self.assertEqual(len(self.ident._prints["Tony"]), 1)
+
     def test_score_modes(self):
         a, b = _vec(40), _vec(41)
         self.ident._enrolled = {"Tony": speaker_id._centroid([a, b])}
