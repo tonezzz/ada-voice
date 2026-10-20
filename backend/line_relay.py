@@ -1185,10 +1185,27 @@ class LineRelay:
             return [{"type": "text",
                      "text": f"(video: {caption or url})"}]
 
+    async def _video_link_msg(self, url: str, caption: str) -> dict:
+        """ADA-0512 (decided 2026-10-15): LINE lanes get the clip LINK, not
+        the file — sidesteps LINE's size cap and re-encode. TG lanes still
+        get the file via their own relay. _video_msgs stays for the file
+        path if policy flips back."""
+        url = await self._resolve_doc_media(url)
+        if url.startswith("/"):
+            m = re.search(r"https?://\S+", url)
+            if m:
+                url = m.group(0)
+            else:
+                base = os.environ.get(
+                    "LINE_URL_BASE", "http://100.102.134.91:11023")
+                url = base.rstrip("/") + url
+        text = f"{caption}\n{url}".strip() if caption else url
+        return {"type": "text", "text": text[:4900]}
+
     async def _media_msgs(self, url: str, caption: str, kind: str
                           ) -> list[dict]:
         if kind == "video":
-            return await self._video_msgs(url, caption)
+            return [await self._video_link_msg(url, caption)]
         return await self._image_msgs(url, caption)
 
     async def _image_msgs(self, url: str, caption: str,
@@ -2021,8 +2038,8 @@ class LineRelay:
                 msgs += await self._image_msgs(
                     str(body["image_url"]), str(body.get("caption") or ""))
             if body.get("video_url"):
-                msgs += await self._video_msgs(
-                    str(body["video_url"]), str(body.get("caption") or ""))
+                msgs.append(await self._video_link_msg(
+                    str(body["video_url"]), str(body.get("caption") or "")))
             msgs += await self._mined_msgs(
                 str(body.get("text") or ""),
                 {str(body.get("image_url") or ""),
