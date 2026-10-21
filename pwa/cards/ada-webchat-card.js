@@ -187,6 +187,7 @@ class AdaWebchatCard extends HTMLElement {
     switch (ev.type) {
       case "ready":
         this._retry = 0;
+        this._enter();
         this._status("");
         this._setComposer(true);
         this.shadowRoot.getElementById("wc-input").focus();
