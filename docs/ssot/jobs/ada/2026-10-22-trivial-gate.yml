@@ -1,0 +1,100 @@
+# SSOT Job: trivial-answer gate on the TG relay cascade
+# Card: ada-nest-trivial-gate (kanban). Dispatch 20261022-103056.
+
+title: Trivial-answer gate — adaptive-depth cascade on tg_relay
+subtitle: A last cheap stage answers greetings/acks/time-date locally so
+  confident small talk never spends a provider turn
+
+planning:
+  goal: |
+    tg_relay.py already ran a coarse-to-fine cascade — silence detection,
+    STT call, trivial-transcript filter (_is_trivial), then an Ada text
+    turn (provider cost + latency). NCM (OPS-0750 / Education 1588)
+    demonstrates the general principle: adaptive depth per input — stop
+    when a cheap stage suffices. This card adds the missing last stage:
+    a trivial-answer gate that serves greetings, farewells, thanks,
+    acknowledgements, time/date asks, and persona small talk locally in
+    <2s with zero provider calls, and formalizes the cascade as a named
+    Nest pattern. Scope: TG relay first, LINE relay later.
+  design: |
+    backend/trivial_gate.py is the authority; tg_relay.py calls
+    trivial_gate.check() on voice transcripts (after the _is_trivial
+    noise filter and transcript echo) and on text turns (after /start,
+    skipped for forwarded messages). A deflect returns a canned reply
+    through the normal send path (reply tag, reply_to preserved); a pass
+    returns None and the turn is untouched.
+    Depth:
+    - L0 rules — anchored fullmatch intent patterns over the normalized
+      text (EN + TH), persona name is a legal suffix. Replies are
+      deterministic/canned; time/date is computed. Rules only fire on a
+      full match, so "thanks can you open the gate" still reaches Ada.
+    - L1 model — optional /v1/systemone intent classifier on the local
+      model shelf (ADA_TRIVIAL_LLM_URL, falls back to
+      ADA_COMMAND_LLM_URL — the existing gemma-3-1b fleet lane). The
+      model only picks a canned intent, never free-generates; deflects
+      require conf >= ADA_TRIVIAL_MIN_CONF (0.75). 'time' is deliberately
+      absent from L1 criteria — "what time is it in Bangkok" wants a
+      timezone answer; the anchored L0 rule covers canonical asks only.
+    Hot-session suppression: answer-shaped acks ("yes"/"ok"/"sure"/"👍")
+    are often replies to a question Ada just asked. When the peer's
+    session ws is open and active within ADA_TRIVIAL_QUIET_S (90s),
+    answerish intents are suppressed and pass through.
+    Measurability: every evaluation appends a corpus row
+    (ADA_TRIVIAL_CORPUS, default
+    ~/.local/share/ada/trivial-gate-corpus.jsonl — ts, surface, chat,
+    session, text, mode, action, intent, layer, conf, ms, hot, reason)
+    and each decision logs the running deflection rate
+    ("trivial_gate text: deflect intent=greeting layer=rules ms=0 |
+    deflected 3/10 (30%)").
+  modes: |
+    ADA_TRIVIAL_GATE=off disables. =enforce (default) answers confident
+    trivial turns locally — rules-only when no LLM URL is configured,
+    which is the safe out-of-box behavior. =shadow evaluates
+    fire-and-forget, records would-deflect rows and logs, never answers
+    — zero added latency, for pre-promotion measurement.
+  env: |
+    ADA_TRIVIAL_GATE=off|enforce|shadow   (default enforce)
+    ADA_TRIVIAL_LLM_URL                   optional shelf endpoint;
+                                          falls back to ADA_COMMAND_LLM_URL
+    ADA_TRIVIAL_MIN_CONF=0.75             L1 deflect floor (rules = 1.0)
+    ADA_TRIVIAL_TIMEOUT_S=2               L1 hop bound (<2s done-budget)
+    ADA_TRIVIAL_MAX_WORDS=20              L1 candidate cap
+    ADA_TRIVIAL_QUIET_S=90                hot-session suppression window
+    ADA_TRIVIAL_CORPUS                    decision log JSONL path
+  scope_notes: |
+    - Voice transcripts AND text turns are gated; photos and forwarded
+      messages always pass through verbatim.
+    - Deflected voice turns keep the transcript echo so the user sees
+      what STT heard.
+    - Model-shelf provisioning on idc02 (a small CPU instruct lane next
+      to ada-stt, e.g. qwen3-1.7b/gemma-3-1b via llama.cpp serving
+      /v1/systemone) is a host-ops step outside this worktree — the L1
+      hook already rides any existing systemone endpoint.
+    - LINE relay adoption is a later card; the module is lane-agnostic
+      (neutral ADA_TRIVIAL_* env names, persona passed per call).
+
+implementation:
+  files:
+    - backend/trivial_gate.py      (new — gate, ~380 lines)
+    - backend/tg_relay.py          (import, _gate_hot, voice+text call
+                                    sites, docstring env block)
+    - .env.example                 (documented ADA_TRIVIAL_* knobs)
+    - tests/test_trivial_gate.py   (new — 24 tests)
+    - docs/ssot/jobs/ada/2026-10-22-trivial-gate.yml (this trail)
+
+verification:
+  - python3 -m pytest tests/test_trivial_gate.py — 24 passed
+  - python3 -m pytest tests/ -x -q — 1614 passed, 7 skipped (full suite)
+  - python3 scripts/tool-lint.py — clean (61 pre-existing warnings)
+  - python3 -m py_compile backend/trivial_gate.py backend/tg_relay.py
+  - standalone import verified: `cd backend && python -c "import tg_relay"`
+    resolves trivial_gate via the fallback import (relay runs as a script)
+
+followups:
+  - Provision the dedicated shelf lane on idc02 (next to ada-stt) and set
+    ADA_TRIVIAL_LLM_URL per relay unit; until then L1 can ride
+    ADA_COMMAND_LLM_URL or stay rules-only.
+  - Watch the corpus deflection mix on idc02 staging; promote tuning via
+    ADA_TRIVIAL_MIN_CONF / rule additions if real asks leak into deflect.
+  - LINE relay: same two call sites in line_relay.py behind the shared
+    module when the pattern proves out on TG.
