@@ -119,6 +119,12 @@ class MemoryBank:
     # (ops-scenarios reports: every doc was dropped as non-'active',
     # 2026-10-05.)
     status_outcome: bool = False
+    # instances_readonly mount — this instance mirrors read_as's view:
+    # {instance} expanded to the mapped prod id, writable/allowed_tools
+    # forced off at load.
+    readonly: bool = False
+    env: str | None = None  # provenance marker (staging); prod banks stay unset
+    read_as: str | None = None  # prod instance a readonly mount mirrors
 
     def notebook(self, notebook_ids: dict[str, str]) -> str | None:
         """Resolve the deep-tier notebook id: literal id wins, else group."""
@@ -189,17 +195,17 @@ class MemoryBankRegistry:
     def _add(self, name: str, spec: dict[str, Any]) -> None:
         instances = spec.get("instances") or []
         ro_map = spec.get("instances_readonly") or {}
-        readonly = self.instance not in instances and self.instance in ro_map
-        if self.instance not in instances and not readonly:
+        read_as = ro_map.get(self.instance) if isinstance(ro_map, dict) else None
+        if self.instance not in instances and not read_as:
             return  # not assigned to this instance — silently skipped by design
         # Read-only mount (card ada-memory-dev-lane-runtime): a dev twin
         # loads the bank exactly as its mapped prod instance — {instance}
         # expands to the mapped ID, never the dev ID — but writable and
         # allowed_tools are forced off so a dev-lane read can never
         # become a dev-lane write.
-        eff_instance = ro_map.get(self.instance, self.instance)
+        readonly = bool(read_as)
         collection = str(spec.get("mddb_collection") or "").replace(
-            "{instance}", eff_instance
+            "{instance}", read_as or self.instance
         )
         if not _NAME_RE.match(name):
             self._error(f"bank {name!r}: invalid bank name")
@@ -238,6 +244,9 @@ class MemoryBankRegistry:
             key_scope=list(spec.get("key_scope") or []),
             prompt_hidden=bool(spec.get("prompt_hidden")),
             status_outcome=bool(spec.get("status_outcome")),
+            readonly=readonly,
+            env=str(spec["env"]) if spec.get("env") else None,
+            read_as=read_as,
         )
 
     @property
@@ -525,8 +534,18 @@ class MemoryBankRegistry:
                         "policy imposes no restriction on this bank")
 
         if not bank.writable:
-            return done(False, "bank.writable", "read_only",
-                        f"memory bank '{name}' is read-only")
+            reason = f"memory bank '{name}' is read-only"
+            if bank.readonly:
+                reason = (
+                    f"memory bank '{name}' is read-only-mounted on "
+                    f"instance '{self.instance}'"
+                    + (f" (mirroring '{bank.read_as}')"
+                       if bank.read_as else "")
+                )
+                scratch = self._banks.get("dev-scratch")
+                if scratch is not None and scratch.writable:
+                    reason += " — write to the 'dev-scratch' bank instead"
+            return done(False, "bank.writable", "read_only", reason)
         # Bank configs may name an absorbed (pre-merge) tool — the runner
         # resolves entries through its alias table so the canonical tool
         # inherits the same authorization.

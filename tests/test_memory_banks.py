@@ -181,6 +181,129 @@ class RegistryTests(unittest.TestCase):
         # An unlisted dev instance is skipped like any unassigned instance.
         self.assertNotIn("unassigned", banks)
 
+    def _dev_lane_spec(self):
+        """Every tony bank mirrors to the dev twins read-only; dev-scratch
+        is the staging write lane assigned to the dev instances."""
+        spec = json.loads(json.dumps(REGISTRY))
+        for bank in spec["banks"].values():
+            if "tony" in (bank.get("instances") or []):
+                bank["instances_readonly"] = {
+                    "tony-dev": "tony", "ada-dev": "tony"}
+        spec["banks"]["dev-scratch"] = {
+            "scope": "instance",
+            "instances": ["dev", "tony-dev"],
+            "mddb_collection": "ada-dev-bank-scratch-{instance}",
+            "kinds": ["note"],
+            "writable": True,
+            "write_policy": "direct",
+            "allowed_tools": ["ada_remember"],
+            "env": "staging",
+            "status": "active",
+        }
+        return spec
+
+    def test_tony_dev_mirrors_tony_bank_set_readonly(self):
+        spec = self._dev_lane_spec()
+        prod = _registry(instance="tony", spec=spec)
+        dev = _registry(instance="tony-dev", spec=spec)
+        # Same bank set as prod, plus the dev-lane write bank.
+        self.assertEqual(set(dev.banks()) - {"dev-scratch"}, set(prod.banks()))
+        for name, b in dev.banks().items():
+            if name == "dev-scratch":
+                continue
+            self.assertTrue(b.readonly, name)
+            self.assertEqual(b.read_as, "tony", name)
+            self.assertFalse(b.writable, name)
+            self.assertEqual(b.allowed_tools, [], name)
+        # {instance} expands to the mapped prod id — never -tony-dev.
+        self.assertEqual(
+            dev.bank("personal").mddb_collection, "ada-ha-bank-personal-tony")
+
+    def test_dev_instance_isolated_to_dev_scratch(self):
+        # ada-dev.service runs ADA_INSTANCE_ID=dev — instances_readonly
+        # maps 'ada-dev', not 'dev', so nothing mirrors and only the
+        # scratch lane loads. Isolation is unchanged.
+        dev = _registry(instance="dev", spec=self._dev_lane_spec())
+        self.assertEqual(set(dev.banks()), {"dev-scratch"})
+        scratch = dev.bank("dev-scratch")
+        self.assertTrue(scratch.writable)
+        self.assertFalse(scratch.readonly)
+        self.assertIsNone(scratch.read_as)
+        self.assertEqual(scratch.env, "staging")
+        self.assertEqual(scratch.mddb_collection, "ada-dev-bank-scratch-dev")
+
+    def test_kk_allowlist_on_tony_dev(self):
+        spec = self._dev_lane_spec()
+        spec["banks"]["personal-kk"] = {
+            "scope": "person",
+            "instances": ["kk"],  # kk-instance-only — not mirrored
+            "mddb_collection": "ada-ha-bank-personal-kk",
+            "writable": True,
+            "allowed_tools": ["ada_remember"],
+            "person_scope": "person.kk",
+            "status": "active",
+        }
+        spec["person_policies"] = {
+            "person.kk": {"allow": ["general", "personal-kk", "dev-scratch"]},
+        }
+        reg = _registry(instance="tony-dev", spec=spec)
+        self.assertNotIn("personal-kk", reg.banks())
+        visible = reg.banks_for_person("person.kk")
+        # Her allow-list still intersects the mounted set — personal-kk
+        # drops out because it isn't mounted here.
+        self.assertEqual(set(visible), {"general", "dev-scratch"})
+        # dev-scratch is her sole writable bank on the dev twin.
+        self.assertEqual(
+            {n for n, b in visible.items() if b.writable}, {"dev-scratch"})
+
+    def test_unknown_spec_fields_tolerated(self):
+        spec = {
+            "banks": {
+                "general": {
+                    "scope": "shared",
+                    "instances": ["tony"],
+                    # wrong type — must be ignored, not crash older worlds
+                    "instances_readonly": ["tony-dev"],
+                    "mddb_collection": "ada-ha-bank-general",
+                    "future_knob": {"nested": True},
+                    "writable": True,
+                    "status": "active",
+                },
+            },
+            "future_section": {"anything": 1},
+        }
+        reg = _registry(instance="tony", spec=spec)
+        self.assertEqual(reg.errors, [])
+        self.assertTrue(reg.bank("general").writable)
+        dev = _registry(instance="tony-dev", spec=spec)
+        self.assertNotIn("general", dev.banks())
+
+    def test_env_meta_marker(self):
+        from backend.memory_ops import memory_meta
+        reg = _registry(instance="tony-dev", spec=self._dev_lane_spec())
+        meta = memory_meta(reg.bank("dev-scratch"), "tony-dev",
+                           "2026-10-22", "note", None, None, None, [])
+        self.assertEqual(meta["env"], ["staging"])
+        # Prod banks carry no env marker — their docs stay field-free.
+        meta = memory_meta(reg.bank("general"), "tony",
+                           "2026-10-22", "note", None, None, None, [])
+        self.assertNotIn("env", meta)
+
+    def test_readonly_mount_refusal_names_dev_scratch(self):
+        reg = _registry(instance="tony-dev", spec=self._dev_lane_spec())
+        d = reg.acl_decision("person.tony", bank="general",
+                             tool="ada_remember")
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["decided_by"], "bank.writable")
+        self.assertIn("read-only-mounted", d["reason"])
+        self.assertIn("dev-scratch", d["reason"])
+        # A plain (non-mounted) read-only bank keeps the classic message.
+        prod = _registry(instance="tony", spec=self._dev_lane_spec())
+        d = prod.acl_decision("person.tony", bank="readonly",
+                              tool="ada_remember")
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "memory bank 'readonly' is read-only")
+
     def test_unknown_bank_error_lists_available(self):
         reg = _registry(instance="tony")
         with self.assertRaises(KeyError) as ctx:
@@ -643,6 +766,25 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
             await self.runner.execute(
                 "ada_remember", {"bank": "readonly", "text": "x"}
             )
+
+    async def test_readonly_mount_denial_names_dev_scratch(self):
+        spec = json.loads(json.dumps(REGISTRY))
+        spec["banks"]["general"]["instances_readonly"] = {"tony-dev": "tony"}
+        spec["banks"]["dev-scratch"] = {
+            "scope": "instance", "instances": ["dev", "tony-dev"],
+            "mddb_collection": "ada-dev-bank-scratch-{instance}",
+            "kinds": ["note"], "writable": True, "write_policy": "direct",
+            "allowed_tools": ["ada_remember"], "env": "staging",
+            "status": "active",
+        }
+        self.runner._banks = _registry(instance="tony-dev", spec=spec)
+        with self.assertRaises(PermissionError) as ctx:
+            await self.runner.execute(
+                "ada_remember", {"bank": "general", "text": "x"}
+            )
+        self.assertIn("read-only-mounted", str(ctx.exception))
+        self.assertIn("dev-scratch", str(ctx.exception))
+        self.runner.mddb.add_document.assert_not_called()
 
     async def test_tool_not_in_allowed_tools_denied(self):
         with self.assertRaises(PermissionError):

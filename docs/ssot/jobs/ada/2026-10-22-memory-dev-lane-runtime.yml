@@ -1,0 +1,78 @@
+# SSOT Job: memory dev-lane runtime — readonly mounts, env meta, refusal
+# Card: ada-memory-dev-lane-runtime (chaba kanban).
+# Dispatch 20261022-193424 — contract lives in chaba
+# docs/ssot/apps/ssot.apps.ada-memory-banks.yml (rendered verbatim into
+# ~/.config/ada/memory-banks.json).
+
+title: Dev-lane memory banks — instances_readonly mounts expose read_as,
+  env provenance reaches doc meta, refusals name dev-scratch
+subtitle: >
+  Completes the runtime half of the dev-lane contract on top of b453314:
+  MemoryBank now records readonly/env/read_as, staging banks stamp
+  meta.env on writes, and the writable-gate refusal tells the model the
+  bank is read-only-mounted and where the write lane is.
+
+planning:
+  goal: |
+    A dev twin (tony-dev, ada-dev) mounts every prod bank read-only with
+    {instance} expanded to the mapped prod id, writes only to
+    dev-scratch, and stamps staging provenance on docs it creates — so a
+    dev-lane read can never become a prod write and staging docs stay
+    distinguishable in recall/audit.
+  decisions: |
+    - read_as = instances_readonly[self.instance] computed BEFORE the
+      instances check (isinstance-guarded so a malformed map in an older
+      registry can't crash _add). Bank kept when instance in
+      spec.instances OR read_as; {instance} expands with
+      read_as or self.instance; read_as forces writable=False and
+      allowed_tools=[]. An instance listed in both maps is read-only —
+      the safe direction.
+    - scope=instance multi-instance guard still evaluates
+      spec["instances"], never the readonly mounts.
+    - env is a bank-level provenance marker (dev-scratch: staging);
+      memory_meta emits meta["env"] only when set, so prod docs stay
+      field-free (meta env enum [prod, staging] is in
+      ssot.apps.ada-memory-schema.yml).
+    - Refusal wording lives in acl_decision's bank.writable layer:
+      mounted banks say "read-only-mounted on instance '<id>'
+      (mirroring '<prod>')" and name dev-scratch as the write lane when
+      a writable dev-scratch is assigned; the runner's
+      _check_memory_write_allowed now surfaces decision["reason"] for
+      that layer (identical text for plain read-only banks).
+  prior_art: |
+    b453314 landed the mount mechanics (instances_readonly expansion +
+    forced-off write path) and test_instances_readonly_mount. This job
+    adds the dataclass fields, the env meta stamp, the richer refusal,
+    and the contract's edge-case coverage.
+
+processing:
+  - backend/memory_banks.py — MemoryBank +{readonly, env, read_as};
+    _add read_as/isinstance refactor; _acl_bank writable-layer reason.
+  - backend/memory_ops.py — memory_meta: meta["env"] = [bank.env] when
+    set (~3 lines).
+  - backend/tool_runner/__init__.py — bank.writable PermissionError
+    carries decision reason.
+  - tests/test_memory_banks.py — _dev_lane_spec helper + 6 tests.
+
+verification:
+  - .venv-dispatch/bin/python -m pytest tests/ -x -q → 1621 passed,
+    7 skipped (dispatch venv: pytest, httpx, pyyaml, websockets, pillow,
+    numpy, uvicorn[standard], fastapi==0.116.1; dep_stubs covers the
+    rest). The worktree has no .venv — the deploy gate's venv lives on
+    idc02/idc03.
+  - python3 scripts/tool-lint.py → clean.
+  edge_cases:
+    - tony-dev mounts tony's full bank set readonly; personal resolves
+      ada-ha-bank-personal-tony (mapped expansion, never -tony-dev).
+    - ada-dev.service (ADA_INSTANCE_ID=dev) mounts ONLY dev-scratch —
+      instances_readonly keys are 'ada-dev', not 'dev', so no mirror;
+      isolation unchanged.
+    - person.kk on tony-dev: personal-kk (instances=["kk"]) not mounted;
+      allow-list intersects to {general, dev-scratch}; dev-scratch is
+      her sole writable bank.
+    - unknown spec fields and non-dict instances_readonly tolerated.
+    - staging bank stamps meta.env=["staging"]; prod banks emit no env.
+
+followups:
+  - Deploy is manual per card: render-memory-banks.py --host idc03, then
+    restart ada-dev + ada-ha-* — requires explicit approval, not done.

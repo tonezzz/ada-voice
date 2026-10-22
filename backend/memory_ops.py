@@ -256,6 +256,8 @@ def memory_meta(
         meta["session_id"] = [session_id]
     if prime:
         meta["prime"] = ["true"]
+    if bank.env:
+        meta["env"] = [bank.env]
     return meta
 
 
