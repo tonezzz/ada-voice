@@ -1155,8 +1155,9 @@ class ToolRunner(
                         + (f" — allowed banks: {allowed}" if allowed else "")
                     )
                 if layer == "bank.writable":
-                    raise PermissionError(
-                        f"memory bank '{bank_name}' is read-only")
+                    raise PermissionError(str(
+                        decision.get("reason")
+                        or f"memory bank '{bank_name}' is read-only"))
                 if layer == "bank.allowed_tools":
                     raise PermissionError(
                         f"tool {name} is not allowed on memory bank "
