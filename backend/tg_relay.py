@@ -31,6 +31,20 @@ Env:
                             senders land here (one dir per sender slug,
                             manifest.jsonl at the root). Local disk only:
                             clips are never forwarded to Ada or elsewhere.
+
+Trivial-answer gate (backend/trivial_gate.py — adaptive-depth cascade):
+transcripts and text turns pass through the gate before an Ada turn;
+confident small talk (greetings/acks/time/date) is answered locally.
+  ADA_TRIVIAL_GATE        off|enforce|shadow — default enforce
+  ADA_TRIVIAL_LLM_URL     optional /v1/systemone intent classifier on
+                          the model shelf (falls back to
+                          ADA_COMMAND_LLM_URL); unset = rules only
+  ADA_TRIVIAL_MIN_CONF    L1 deflect floor, default 0.75
+  ADA_TRIVIAL_TIMEOUT_S   L1 hop bound, default 2
+  ADA_TRIVIAL_QUIET_S     hot-session window suppressing answer-shaped
+                          acks ("yes"/"ok"), default 90
+  ADA_TRIVIAL_CORPUS      decision log JSONL — the deflection-rate
+                          measurement
 """
 
 from __future__ import annotations
@@ -48,6 +62,11 @@ from typing import Any
 
 import httpx
 import websockets
+
+try:
+    from backend import trivial_gate
+except ImportError:  # launched as `python backend/tg_relay.py`
+    import trivial_gate
 
 logger = logging.getLogger("tg_relay")
 
@@ -672,6 +691,16 @@ class TgRelay:
             await self.send_text(chat_id,
                                  f"(video: {caption or url})")
 
+    def _gate_hot(self, skey: Any) -> bool:
+        """True when this peer has a live Ada session that saw traffic
+        inside the gate's quiet window — suppresses deflection of
+        answer-shaped acks ("yes"/"ok") that may be replying to Ada."""
+        sess = self.sessions.get(skey)
+        return bool(
+            sess is not None and sess.ws is not None
+            and time.monotonic() - sess.last_active
+            < trivial_gate.quiet_s())
+
     async def send_media(self, chat_id: int, url: str, caption: str,
                          kind: str) -> None:
         if kind == "video":
@@ -885,6 +914,16 @@ class TgRelay:
             await self.send_text(
                 chat_id, '\U0001f399 "' + transcript + '"',
                 reply_to=reply_to)
+            gate = await trivial_gate.check(
+                transcript, surface="voice", chat=str(chat_id),
+                session=str(skey), persona=_persona(),
+                hot=self._gate_hot(skey))
+            if gate:
+                stop.set(); pulse.cancel()
+                await self.send_text(
+                    chat_id, _reply_tag() + gate["reply"],
+                    reply_to=reply_to)
+                return
             sess = self.sessions.setdefault(
                 skey, ChatSession(chat_id, self, caller=caller))
             try:
@@ -950,6 +989,18 @@ class TgRelay:
             await self.send_text(
                 chat_id, _persona() + f" relay online. chat_id={chat_id}")
             return
+        if not fwd[0]:
+            # Forwarded content always reaches Ada verbatim — the gate
+            # only sits on the sender's own words.
+            gate = await trivial_gate.check(
+                text, surface="text", chat=str(chat_id),
+                session=str(skey), persona=_persona(),
+                hot=self._gate_hot(skey))
+            if gate:
+                await self.send_text(
+                    chat_id, _reply_tag() + gate["reply"],
+                    reply_to=reply_to)
+                return
         sess = self.sessions.setdefault(
             skey, ChatSession(chat_id, self, caller=caller))
         try:
