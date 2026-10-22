@@ -17,7 +17,7 @@ Usage:
       ada-ha-scenario-reports (auto-report picks up regressions)
     --report-cms                  → updates 'bench-jev' CMS page
 """
-import argparse, json, sys, time, urllib.request
+import argparse, json, os, sys, time, urllib.request
 from datetime import datetime
 
 parser = argparse.ArgumentParser()
@@ -26,6 +26,8 @@ parser.add_argument("--mddb", default="")
 parser.add_argument("--report-cms", action="store_true")
 ARGS = parser.parse_args()
 BASE = ARGS.base_url
+MDDB_CMS = os.environ.get(
+    "MDDB_CMS_URL", "http://100.102.134.91:11027/v1").rstrip("/")
 
 CONFIRM_STATE = (
     'Ada, a voice assistant, asked the user to confirm a memory write. '
@@ -164,7 +166,7 @@ def _report(score: float, correct: int, total: int, med: float) -> None:
         "key": f"bench/jev-{ts}", "lang": "en",
         "contentMd": md, "meta": meta})
     if ARGS.report_cms:
-        _post(f"{ARGS.mddb.rstrip('/')}/add", {
+        _post(f"{MDDB_CMS}/add", {
             "collection": "ada-cms-pages", "key": "bench-jev",
             "lang": "en", "contentMd": md,
             "meta": {"kind": ["page"], "slug": ["bench-jev"],

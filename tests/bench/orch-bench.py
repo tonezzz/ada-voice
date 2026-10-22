@@ -47,7 +47,7 @@ Usage:
   --mddb        write a kind:benchmark doc to ada-ha-scenario-reports
   --report-cms  also refresh the 'bench-orch' CMS page
 """
-import argparse, ast, glob, json, sys, time, urllib.request
+import argparse, ast, glob, json, os, sys, time, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -91,6 +91,9 @@ parser.add_argument("--json-out", default="",
                     help="write the full result rows to this path")
 parser.add_argument("--timeout", type=int, default=90)
 ARGS = parser.parse_args()
+
+MDDB_CMS = os.environ.get(
+    "MDDB_CMS_URL", "http://100.102.134.91:11027/v1").rstrip("/")
 
 _HERE = Path(__file__).resolve().parent
 REPO = _HERE.parent.parent
@@ -596,8 +599,9 @@ def _report(results: list[dict]) -> None:
     key = f"bench/orch-{now:%Y%m%d-%H%M%S}"
 
     def _post(coll, k, m):
+        base = MDDB_CMS if coll.startswith("ada-cms-") else ARGS.mddb.rstrip("/")
         req = urllib.request.Request(
-            ARGS.mddb.rstrip("/") + "/add",
+            base + "/add",
             data=json.dumps({"collection": coll, "key": k, "lang": "en",
                              "contentMd": md, "meta": m}).encode(),
             headers={"Content-Type": "application/json"})

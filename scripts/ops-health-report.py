@@ -6,14 +6,17 @@ Checks: mddb http+vector, ada-ha-tony ws, jev-student (8778), open-jev-4b on idc
 systemone, embed proxy. Counts systemd restart churn (restarts in 24h —
 the crash-loop signal a single is-active check misses).
 """
-import json, subprocess, sys, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend.report_meta import validate_report_meta  # noqa: E402
+from backend.mddb_client import is_cms_collection  # noqa: E402
 
 MDDB = "http://idc03.taila0626a.ts.net:11023/v1"
+MDDB_CMS = os.environ.get(
+    "MDDB_CMS_URL", "http://100.102.134.91:11027/v1").rstrip("/")
 NOW = datetime.now().astimezone()
 
 def probe(name, fn):
@@ -54,6 +57,8 @@ def is_active(unit):
 checks = [
     probe("mddb", lambda: get("http://idc03.taila0626a.ts.net:11023/health")),
     probe("mddb-vector", lambda: get(MDDB + "/vector-search", 15, {
+        "collection": "ada-ha-bank-general", "query": "health", "topK": 1})),
+    probe("mddb-cms-vector", lambda: get(MDDB_CMS + "/vector-search", 15, {
         "collection": "ada-cms-pages", "query": "health", "topK": 1})),
     probe("ada-ha-tony-http", lambda:
             urllib.request.urlopen("http://127.0.0.1:8002/", timeout=8).status),
@@ -106,7 +111,8 @@ for s in svc_rows:
 md = "\n".join(lines)
 
 def post(path, payload):
-    req = urllib.request.Request(MDDB + path, data=json.dumps(payload).encode(),
+    base = MDDB_CMS if is_cms_collection(str(payload.get("collection", ""))) else MDDB
+    req = urllib.request.Request(base + path, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     return json.loads(urllib.request.urlopen(req, timeout=60).read())
 
