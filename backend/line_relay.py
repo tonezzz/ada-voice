@@ -74,7 +74,16 @@ Env:
                                  (local only — like tg_relay's voice rule)
     LINE_VOICE_TRANSCRIBE      — "1" transcribes clips (faster-whisper) and
                                  routes the transcript like a text turn
-    LINE_WHISPER_MODEL         — default base
+    LINE_WHISPER_URL           — remote whisper endpoint (ada-whisper on
+                                 omen GPU — OpenAI-style
+                                 /v1/audio/transcriptions); unset = local
+                                 faster-whisper only, which stays the
+                                 fallback when the remote call fails
+    LINE_WHISPER_REMOTE_MODEL  — model field sent to the remote endpoint,
+                                 default large-v3
+    LINE_WHISPER_PROMPT        — optional prompt hint sent to the remote
+                                 endpoint
+    LINE_WHISPER_MODEL         — local faster-whisper size, default base
     LINE_VOICE_ENROLL          — default 1: an unknown speaker on a
                                  caller-mapped lane arms a pending
                                  enrollment — the next
@@ -614,11 +623,76 @@ def _voice_context(match: dict, pending: dict | None = None,
     return ctx + "]"
 
 
+_SILENT_PEAK = 0.01  # decoded 16k PCM peak below this = dead-mic clip
+
+
+def _decode_wav16k(src_path, dst_path) -> float:
+    """m4a/ogg → 16 kHz mono WAV via av + soundfile (venv deps — no
+    ffmpeg on this host). Returns peak amplitude; -1 on decode failure."""
+    try:
+        import av
+        import numpy as np
+        import soundfile as sf
+        resampler = av.audio.resampler.AudioResampler(
+            format="s16", layout="mono", rate=16000)
+        chunks = []
+        with av.open(str(src_path)) as container:
+            for frame in container.decode(audio=0):
+                for f in resampler.resample(frame):
+                    chunks.append(f.to_ndarray().reshape(-1))
+        if not chunks:
+            return -1.0
+        pcm = np.concatenate(chunks)
+        sf.write(str(dst_path), pcm, 16000, subtype="PCM_16")
+        return float(np.abs(pcm).max()) / 32768.0
+    except Exception:
+        logger.exception("voice decode failed for %s", src_path)
+        return -1.0
+
+
+def _transcribe_remote(url: str, path) -> str:
+    """POST the clip (decoded to wav) to an OpenAI-style
+    /v1/audio/transcriptions endpoint — ada-whisper on tony-omen
+    (large-v3 GPU) or audio.cpp qwen3-asr. Silent clips short-circuit
+    before the HTTP call."""
+    wav = Path(str(path) + ".16k.wav")
+    try:
+        peak = _decode_wav16k(path, wav)
+        if peak < 0:
+            raise RuntimeError("clip→wav decode failed")
+        if peak < _SILENT_PEAK:
+            return ""
+        data = {"model": os.environ.get(
+            "LINE_WHISPER_REMOTE_MODEL", "large-v3")}
+        prompt = os.environ.get("LINE_WHISPER_PROMPT")
+        if prompt:
+            data["prompt"] = prompt
+        with open(wav, "rb") as fh:
+            resp = httpx.post(
+                url,
+                files={"file": (wav.name, fh, "audio/wav")},
+                data=data,
+                timeout=120)
+        resp.raise_for_status()
+        return (resp.json().get("text") or "").strip()
+    finally:
+        wav.unlink(missing_ok=True)
+
+
 def _transcribe(path) -> str:
-    """Free-first voice transcription — faster-whisper locally, model via
-    LINE_WHISPER_MODEL (default base). Gated by LINE_VOICE_TRANSCRIBE=1."""
+    """Voice transcription — remote endpoint first when LINE_WHISPER_URL
+    is set (ada-whisper on omen GPU, large-v3), local faster-whisper
+    (LINE_WHISPER_MODEL, default base) as fallback. Gated by
+    LINE_VOICE_TRANSCRIBE=1."""
     if os.environ.get("LINE_VOICE_TRANSCRIBE") != "1":
         return ""
+    url = os.environ.get("LINE_WHISPER_URL", "").strip()
+    if url:
+        try:
+            return _transcribe_remote(url, path)
+        except Exception:
+            logger.exception("remote whisper %s failed — local fallback",
+                             url)
     global _whisper_model
     if _whisper_model is None:
         from faster_whisper import WhisperModel
