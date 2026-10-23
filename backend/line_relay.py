@@ -55,6 +55,20 @@ Env:
                                  LINE call for this long (msgs stay
                                  parked); urgent pushes still attempt and
                                  a 200 clears the block early
+    LINE_QUOTA_POLL_S          — default 3600: poll LINE's free quota
+                                 endpoints this often — the headroom lands
+                                 in the journal + a 'quota_status' ops
+                                 event, and 'quota_low' fires while the
+                                 month is nearly spent (before the wall);
+                                 0 disables
+    LINE_QUOTA_WARN            — default 30: remaining-messages threshold
+                                 for the 'quota_low' warn event
+    LINE_SEND_LEDGER           — default ~/.local/share/ada/
+                                 line-send-ledger.json: the relay's own
+                                 per-day push-vs-reply message counters —
+                                 day rollover emits 'send_rollup' to the
+                                 ops ledger so the monthly burn is
+                                 visible without querying LINE
     LINE_VOICE_CORPUS_DIR      — default ~/.local/share/ada-voice-corpus/line;
                                  audio clips from enrolled senders land here
                                  (local only — like tg_relay's voice rule)
@@ -196,6 +210,15 @@ PARKED_DIR = Path(os.environ.get(
 # so a spent month stops generating doomed bulk calls.
 LINE_BULK_COALESCE_S = float(os.environ.get("LINE_BULK_COALESCE_S", "300"))
 LINE_QUOTA_RETRY_S = float(os.environ.get("LINE_QUOTA_RETRY_S", "21600"))
+# Proactive-send audit (card line-push-quota-resilience): the relay keeps
+# its own per-day push-vs-reply counters in SEND_LEDGER_FILE and polls
+# LINE's free quota endpoints every LINE_QUOTA_POLL_S so the monthly burn
+# shows in ops BEFORE the 429 wall — today the first signal is the wall.
+LINE_QUOTA_POLL_S = float(os.environ.get("LINE_QUOTA_POLL_S", "3600"))
+LINE_QUOTA_WARN = int(os.environ.get("LINE_QUOTA_WARN", "30"))
+SEND_LEDGER_FILE = Path(os.environ.get(
+    "LINE_SEND_LEDGER",
+    str(Path.home() / ".local" / "share" / "ada" / "line-send-ledger.json")))
 
 
 def _bulk_lanes() -> set[str]:
@@ -802,6 +825,12 @@ class LineRelay:
         self._quota_blocked = 0.0
         # Per-chat debounce tasks flushing parked class=bulk payloads.
         self._bulk_flush: dict[str, asyncio.Task] = {}
+        # Per-day send ledger (card line-push-quota-resilience): the
+        # relay's own push-vs-reply message counts so quota burn shows
+        # in the ops ledger before LINE's monthly wall. {day: {field:n}};
+        # write-through to SEND_LEDGER_FILE so a restart loses nothing.
+        self._ledger: dict[str, dict[str, int]] = {}
+        self._ledger_day = ""
 
     def _verify(self, body: bytes, signature: str) -> bool:
         mac = hmac.new(CHANNEL_SECRET.encode(), body, hashlib.sha256)
@@ -899,6 +928,61 @@ class LineRelay:
         except Exception as exc:
             logger.info("markAsRead failed: %s", exc)
 
+    def _ledger_load(self) -> None:
+        try:
+            if SEND_LEDGER_FILE.is_file():
+                data = json.loads(SEND_LEDGER_FILE.read_text())
+                if isinstance(data, dict):
+                    self._ledger = {
+                        str(d): {str(k): int(v) for k, v in c.items()}
+                        for d, c in data.items() if isinstance(c, dict)}
+        except Exception:
+            logger.exception("send-ledger load failed")
+            self._ledger = {}
+
+    def _ledger_save(self) -> None:
+        try:
+            SEND_LEDGER_FILE.parent.mkdir(parents=True, exist_ok=True)
+            SEND_LEDGER_FILE.write_text(
+                json.dumps(self._ledger, sort_keys=True))
+        except Exception:
+            logger.info("send-ledger save failed")
+
+    def _ledger_rollup(self, day: str) -> None:
+        """Emit the completed day's push-vs-reply counts to the ops
+        ledger — one 'send_rollup' event per nonzero day."""
+        row = self._ledger.get(day) or {}
+        if any(row.get(k) for k in
+               ("push_msgs", "reply_msgs", "parked_msgs", "push_failed")):
+            _ops_event("send_rollup", "info", day=day, **row)
+
+    def _ledger_rollover_check(self) -> None:
+        day = datetime.now().strftime("%Y-%m-%d")
+        if self._ledger_day != day:
+            if self._ledger_day:
+                self._ledger_rollup(self._ledger_day)
+            self._ledger_day = day
+
+    def _ledger_add(self, **kw: int) -> None:
+        """Bump counters on today's row; a day change rolls the finished
+        day out as a send_rollup event first."""
+        self._ledger_rollover_check()
+        day = datetime.now().strftime("%Y-%m-%d")
+        self._ledger_day = day
+        row = self._ledger.setdefault(day, {})
+        for k, n in kw.items():
+            row[k] = row.get(k, 0) + n
+        self._ledger_save()
+
+    def _month_push_msgs(self) -> int:
+        """Month-to-date pushed message bubbles — the relay's own burn
+        count against the monthly cap (LINE's consumption counter stays
+        authoritative; this one needs no API read)."""
+        prefix = datetime.now().strftime("%Y-%m")
+        return sum(r.get("push_msgs") or 0
+                   for d, r in self._ledger.items()
+                   if d.startswith(prefix))
+
     async def send_text(self, user_id: str, text: str,
                         reply_token: str | None = None) -> None:
         if not text:
@@ -925,6 +1009,8 @@ class LineRelay:
                 r = await self.line("reply", {
                     "replyToken": reply_token, "messages": send})
                 if r.status_code == 200:
+                    self._ledger_add(reply_calls=1,
+                                     reply_msgs=len(send))
                     if overflow:
                         _parked_add(user_id, overflow)
                         logger.info("deliver to %s: %d msgs re-parked "
@@ -950,6 +1036,7 @@ class LineRelay:
             # Spent month: don't burn a doomed API call — the next inbound
             # replyToken (or quota reset) flushes the queue for free.
             _parked_add(user_id, msgs)
+            self._ledger_add(parked_msgs=len(msgs))
             logger.info("bulk push to %s parked — quota depleted "
                         "(%d msgs)", user_id, len(msgs))
             return "parked"
@@ -957,6 +1044,7 @@ class LineRelay:
         req_id = (getattr(r, "headers", None) or {}).get(
             "x-line-request-id", "")
         if r.status_code == 200:
+            self._ledger_add(push_calls=1, push_msgs=len(msgs[:5]))
             if self._quota_blocked:
                 self._quota_blocked = 0.0
                 logger.info("push to %s landed — monthly quota block "
@@ -966,6 +1054,7 @@ class LineRelay:
             return "delivered"
         if r.status_code == 429:
             _parked_add(user_id, msgs)
+            self._ledger_add(push_calls=1, parked_msgs=len(msgs))
             if _is_monthly_limit(r):
                 if not self._quota_blocked:
                     asyncio.create_task(self._quota_alert(user_id))
@@ -979,6 +1068,7 @@ class LineRelay:
             return "parked"
         logger.warning("push to %s failed: %s %s (req %s)",
                        user_id, r.status_code, r.text[:200], req_id)
+        self._ledger_add(push_calls=1, push_failed=1)
         _ops_event("push_failed", "error", chat_id=user_id,
                    http=r.status_code, detail=r.text[:200], req_id=req_id)
         return "failed"
@@ -1026,6 +1116,37 @@ class LineRelay:
             "pushes park until reset or a successful send",
             q.get("used"), q.get("limit"))
         _ops_event("quota_depleted", "error", chat_id=chat_id, **q)
+
+    async def _quota_poll_once(self) -> dict:
+        """One free quota probe — the 'before the wall' half of the
+        audit: headroom lands in the journal + a quota_status ops event
+        each poll, quota_low warns once remaining <= LINE_QUOTA_WARN, and
+        an already-spent month (re)arms the block the same way the boot
+        probe does. Also runs the day-rollover check so an idle relay
+        still emits its send_rollup."""
+        q = await self._quota_probe()
+        logger.info("LINE quota poll: used=%s/%s remaining=%s",
+                    q.get("used"), q.get("limit"), q.get("remaining"))
+        self._ledger_rollover_check()
+        limit, used, rem = q.get("limit"), q.get("used"), q.get("remaining")
+        if limit is not None and (used or 0) >= (limit or 0):
+            if self._quota_blocked <= time.time():
+                self._quota_blocked = time.time() + LINE_QUOTA_RETRY_S
+                _ops_event("quota_depleted", "error", poll=True, **q)
+        elif limit is not None and isinstance(rem, (int, float)) \
+                and rem <= LINE_QUOTA_WARN:
+            _ops_event("quota_low", "warn", **q)
+        else:
+            _ops_event("quota_status", "info", **q)
+        return q
+
+    async def _quota_poller(self) -> None:
+        while True:
+            await asyncio.sleep(LINE_QUOTA_POLL_S)
+            try:
+                await self._quota_poll_once()
+            except Exception:
+                logger.exception("quota poll failed")
 
     def _bulk_arm(self, chat_id: str) -> None:
         """Schedule the debounced bundled flush of this chat's parked
@@ -2065,6 +2186,7 @@ class LineRelay:
                         inst or "-", uid, cls, len(msgs))
             if cls == "bulk":
                 _parked_add(uid, msgs[:5])
+                self._ledger_add(parked_msgs=len(msgs[:5]))
                 if self._quota_blocked > time.time():
                     return JSONResponse({"ok": True, "to": uid,
                                          "parked": True,
@@ -2131,7 +2253,10 @@ class LineRelay:
                 "ok": True, "quota": await self._quota_probe(),
                 "quota_blocked": self._quota_blocked > time.time(),
                 "quota_blocked_until": self._quota_blocked or None,
-                "parked": parked})
+                "parked": parked,
+                "ledger_today": self._ledger.get(
+                    datetime.now().strftime("%Y-%m-%d")) or {},
+                "month_push_msgs": self._month_push_msgs()})
 
         app = Starlette(routes=[
             Route(LINE_PATH, webhook, methods=["POST"]),
@@ -2153,6 +2278,10 @@ class LineRelay:
     async def run(self) -> None:
         self.http = httpx.AsyncClient(timeout=40)
         asyncio.create_task(self.sweeper())
+        self._ledger_load()
+        self._ledger_rollover_check()
+        if LINE_QUOTA_POLL_S > 0:
+            asyncio.create_task(self._quota_poller())
         # Free quota probe at boot — headroom lands in the journal, and
         # an already-spent month skips the doomed-push discovery pass.
         q = await self._quota_probe()

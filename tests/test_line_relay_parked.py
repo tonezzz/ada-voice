@@ -22,6 +22,7 @@ class _R:
 
 def _relay(tmp):
     line_relay.PARKED_DIR = Path(tmp)
+    line_relay.SEND_LEDGER_FILE = Path(tmp) / "send-ledger.json"
     relay = line_relay.LineRelay()
     return relay
 
