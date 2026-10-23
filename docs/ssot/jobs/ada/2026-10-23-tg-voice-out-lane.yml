@@ -1,0 +1,106 @@
+# SSOT Job: TG relay voice-out — spoken replies via Gemini TTS -> /send
+# Card: tg-voice-out-lane (kanban). Dispatch 20261023-083045.
+
+title: tg voice replies — synth completed turns and push voice bubbles
+subtitle: TG_VOICE_REPLY lanes speak Ada's reply by POSTing audio_b64 to
+  their own loopback /send — the chat_send say= contract
+
+planning:
+  goal: |
+    Michael asked for a voice reply in-session and got text — the relay
+    had every piece (send_voice, /send audio_b64, backend/tts.synth_pcm
+    proven by vcast) except the bridge. After a completed Ada turn,
+    synthesize the reply and push it through the relay's own /send
+    listener so wav->ogg->sendVoice stays a single code path.
+  context: |
+    backend/tg_relay.py runs per-lane as `python backend/tg_relay.py`
+    (script mode — backend/ is sys.path[0]); backend/tts.py needed
+    dual-mode imports before the relay could load it. Polling-mode
+    /send lacked audio_b64 despite claiming webhook contract parity —
+    both modes now share one _send_endpoint() handler.
+  scope: |
+    In scope:
+      - TG_VOICE_REPLY per-lane opt-in: off (default) | voice | 1|all
+      - voice = only replies to voice/audio inbound; 1|all = every
+        completed turn (text, voice-transcript, photo turns)
+      - reply scrubbed via speech_sanitize.sanitize_speech before TTS
+        (markdown/entity tails are never spoken; vcast pattern)
+      - send URL derived from TG_WEBHOOK_LISTEN (TG_VOICE_SEND_URL
+        override) — each lane voices through its OWN bot;
+        ADA_TG_SEND_URL deliberately NOT honored (it's the tools' env
+        and may name another lane's bot on a shared host)
+      - /send dedupe: one _send_endpoint() for webhook + polling modes,
+        audio_b64 (WAV) -> _wav_to_ogg -> sendVoice in both
+    Out of scope:
+      - LINE voice replies (line_relay has its own audio_b64 path)
+      - reply_to threading on voice bubbles (/send has no reply_to)
+      - voicing trivial-gate deflections (cheap local path stays cheap)
+  success_criteria:
+    - 'unset TG_VOICE_REPLY: text-only, no TTS call'
+    - 'TG_VOICE_REPLY=1: completed text turn posts audio_b64 WAV to own
+      /send with chat_id + duration_ms'
+    - 'TG_VOICE_REPLY=voice: text inbound stays text, voice inbound
+      gets a voice bubble'
+    - 'tts failure / failed turn / gate deflection: no voice, text still
+      delivered'
+    - '/send accepts audio_b64 in polling mode (was webhook-only)'
+  owner: tony
+
+processing:
+  status: done
+  started_at: "2026-10-23"
+  steps:
+    - id: 1
+      label: "tts.py dual-mode imports"
+      status: done
+      notes: "gemini_pool + voice_config resolve via `from backend
+        import` with `import` fallback so script-mode tg_relay can load
+        tts (siblings on sys.path[0])."
+    - id: 2
+      label: "_voice_reply bridge + _send_url"
+      status: done
+      notes: "TgRelay._voice_reply(chat_id, reply, voice_inbound) gates
+        on TG_VOICE_REPLY, sanitizes+truncates
+        (TG_VOICE_REPLY_MAX_CHARS, default 2000), synth_pcm(tool=
+        tg_voice_reply, session_id=tg-<chat_id>), POSTs
+        {chat_id, audio_b64: wav, audio_mime: audio/wav, duration_ms}
+        to _send_url() (TG_LISTEN-derived, 0.0.0.0/:: -> 127.0.0.1).
+        Called after send_text in all three turn paths behind turn_ok —
+        failure-sentinel replies are never voiced. All failures
+        warn-and-continue; voice is strictly additive."
+    - id: 3
+      label: "/send parity dedupe"
+      status: done
+      notes: "Extracted the shared loopback handler _send_endpoint();
+        webhook and polling routes both mount it. Adds audio_b64 to
+        polling mode (previously silently 400 'nothing to send')."
+    - id: 4
+      label: "tests"
+      status: done
+      notes: "tests/test_tg_relay_voice_reply.py — 9 tests: gate modes,
+        payload shape (RIFF wav b64, duration_ms), voice-only mode,
+        tts-fail/failed-turn/gate-deflection non-voicing, /send
+        audio_b64 conversion, _send_url derivation."
+  files:
+    - backend/tg_relay.py
+    - backend/tts.py
+    - tests/test_tg_relay_voice_reply.py
+    - .env.example
+
+results:
+  outcome: |
+    Opted-in lanes now speak every completed reply (or only
+    voice-inbound replies with TG_VOICE_REPLY=voice): text lands first,
+    a native Telegram voice bubble follows a few seconds later. Michael's
+    lane needs TG_VOICE_REPLY=1 (or =voice) in its relay env — unset
+    lanes are unchanged.
+    Note: TTS uses the relay process env — GEMINI_API_KEY* must reach the
+    relay service (gemini_pool) and ADA_VOICE_FILE/ADA_INSTANCE_ID pick
+    the voice, same as vcast.
+  verify:
+    - ".venv/bin/python -m pytest tests/test_tg_relay_voice_reply.py -q"
+    - ".venv/bin/python -m pytest tests/ -x -q  # 1630 passed, 7 skipped"
+    - "python3 scripts/tool-lint.py  # clean"
+    - "cd backend && python -c 'import tg_relay, tts'  # script-mode"
+    - "live: TG_VOICE_REPLY=1 on a lane -> send a message -> text reply
+      then voice bubble in the same chat"

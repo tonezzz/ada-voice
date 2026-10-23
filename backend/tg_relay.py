@@ -31,6 +31,19 @@ Env:
                             senders land here (one dir per sender slug,
                             manifest.jsonl at the root). Local disk only:
                             clips are never forwarded to Ada or elsewhere.
+  TG_VOICE_REPLY            off|voice|1|all — spoken replies (default
+                            off). After a completed Ada turn the reply
+                            is synthesized with Gemini TTS
+                            (backend/tts.py, same voice as the live
+                            session) and POSTed as audio_b64 to this
+                            relay's own /send listener — the chat_send
+                            say= contract, one wav->ogg->sendVoice path.
+                            'voice' voices only replies to voice/audio
+                            inbound; '1'/'all' every completed turn.
+                            Locally gated (trivial-gate) and failed
+                            turns stay text. Adds a few seconds/turn.
+  TG_VOICE_REPLY_MAX_CHARS  default 2000 — TTS input cap
+  TG_VOICE_SEND_URL         /send override; default http://<TG_LISTEN>/send
 
 Trivial-answer gate (backend/trivial_gate.py — adaptive-depth cascade):
 transcripts and text turns pass through the gate before an Ada turn;
@@ -746,6 +759,75 @@ class TgRelay:
         inp.close()
         return buf.getvalue()
 
+    def _send_url(self) -> str:
+        """This relay's own loopback /send — derived from TG_LISTEN so
+        every lane voices through its own bot (ADA_TG_SEND_URL is the
+        tools' env and may name another lane's listener, so it is NOT
+        honored here). TG_VOICE_SEND_URL overrides for tests/edges."""
+        ep = os.environ.get("TG_VOICE_SEND_URL", "").strip()
+        if ep:
+            return ep
+        host, _, port = TG_LISTEN.rpartition(":")
+        if host in ("", "0.0.0.0", "::", "[::]"):
+            host = "127.0.0.1"
+        return f"http://{host}:{port or '8911'}/send"
+
+    async def _voice_reply(self, chat_id: int, reply: str,
+                           voice_inbound: bool) -> None:
+        """TG_VOICE_REPLY bridge: after a completed Ada turn, synthesize
+        the reply with Gemini TTS and POST it as audio_b64 to this
+        relay's own /send listener — the same contract chat_send say=
+        rides, so wav->ogg->sendVoice stays a single path. The text
+        reply has already gone out; any failure here only logs —
+        voice is strictly additive."""
+        mode = os.environ.get("TG_VOICE_REPLY", "").strip().lower()
+        if mode in ("", "0", "off", "false", "no"):
+            return
+        if mode == "voice" and not voice_inbound:
+            return
+        reply = (reply or "").strip()
+        if not reply:
+            return
+        try:
+            from backend import speech_sanitize, tts as ada_tts
+        except ImportError:  # launched as `python backend/tg_relay.py`
+            import speech_sanitize
+            import tts as ada_tts
+        # Truncate before sanitize so a cut-off partial entity/markup at
+        # the tail gets dropped rather than spoken (vcast pattern).
+        max_chars = int(os.environ.get(
+            "TG_VOICE_REPLY_MAX_CHARS", "2000"))
+        text = speech_sanitize.sanitize_speech(reply[:max_chars]).strip()
+        if not text:
+            return
+        try:
+            pcm = await ada_tts.synth_pcm(
+                text, tool="tg_voice_reply", session_id=f"tg-{chat_id}")
+        except Exception:
+            logger.exception("chat %s voice reply: tts raised", chat_id)
+            return
+        if not pcm:
+            logger.warning("chat %s voice reply: tts returned no audio",
+                           chat_id)
+            return
+        payload = {
+            "chat_id": chat_id,
+            "audio_b64": base64.b64encode(
+                ada_tts.pcm_to_wav(pcm)).decode(),
+            "audio_mime": "audio/wav",
+            "duration_ms": ada_tts.pcm_duration_ms(pcm),
+        }
+        try:
+            r = await self.http.post(
+                self._send_url(), json=payload, timeout=60)
+            res = r.json()
+            if not res.get("ok"):
+                logger.warning("chat %s voice reply /send failed: %s",
+                               chat_id, res)
+        except Exception as exc:
+            logger.warning("chat %s voice reply send failed: %s",
+                           chat_id, exc)
+
     async def _download_file(self, file_id: str) -> tuple[bytes, str]:
         """TG media messages carry file_ids — resolve via getFile, then
         download from the file host. Returns (bytes, file_path)."""
@@ -924,12 +1006,14 @@ class TgRelay:
                 return
             sess = self.sessions.setdefault(
                 skey, ChatSession(chat_id, self, caller=caller))
+            turn_ok = False
             try:
                 meta = f"voice clip saved: {clip_path}"
                 if fwd[0]:
                     meta += f"; forwarded clip from {fwd[0]}"
                 reply, images = await sess.send_turn(
                     f"[{meta}] {transcript}")
+                turn_ok = True
             except Exception as exc:
                 logger.warning("chat %s voice turn failed: %s", chat_id, exc)
                 reply, images = ("(failed: session dropped)", [])
@@ -939,6 +1023,8 @@ class TgRelay:
                 stop.set(); pulse.cancel()
             await self.send_text(chat_id, _reply_tag() + (reply or "(no reply)"),
                                  reply_to=reply_to)
+            if turn_ok:
+                await self._voice_reply(chat_id, reply, voice_inbound=True)
             for url, cap, kind in images[:3]:
                 await self.send_media(chat_id, url, cap, kind)
             return
@@ -953,6 +1039,7 @@ class TgRelay:
             stop = asyncio.Event()
             pulse = asyncio.ensure_future(
                 self._turn_progress(chat_id, reply_to, stop))
+            turn_ok = False
             try:
                 img, mime = await self._fetch_photo(photos[-1]["file_id"])
                 cap = (msg.get("caption") or "").strip()
@@ -963,6 +1050,7 @@ class TgRelay:
                     + "The user sent this photo — describe it and "
                     "respond naturally."
                     + (f" Their caption: {cap}" if cap else ""))
+                turn_ok = True
             except Exception as exc:
                 logger.warning("chat %s photo turn failed: %s",
                                chat_id, exc)
@@ -978,6 +1066,8 @@ class TgRelay:
             except Exception as exc:
                 logger.warning("chat %s reply send failed: %s",
                                chat_id, exc)
+            if turn_ok:
+                await self._voice_reply(chat_id, reply, voice_inbound=False)
             for url, cap2, kind in images[:3]:
                 await self.send_media(chat_id, url, cap2, kind)
             return
@@ -1008,9 +1098,11 @@ class TgRelay:
         stop = asyncio.Event()
         pulse = asyncio.ensure_future(
             self._turn_progress(chat_id, reply_to, stop))
+        turn_ok = False
         try:
             reply, images = await sess.send_turn(
                 f"(forwarded from {fwd[0]}): {text}" if fwd[0] else text)
+            turn_ok = True
         except Exception as exc:
             logger.warning("chat %s turn failed: %s", chat_id, exc)
             reply, images = (_persona() + " didn't answer that turn — "
@@ -1026,6 +1118,8 @@ class TgRelay:
                                  reply_to=reply_to)
         except Exception as exc:
             logger.warning("chat %s reply send failed: %s", chat_id, exc)
+        if turn_ok:
+            await self._voice_reply(chat_id, reply, voice_inbound=False)
         for url, cap, kind in images[:3]:
             await self.send_media(chat_id, url, cap, kind)
 
@@ -1057,34 +1151,17 @@ class TgRelay:
                 logger.warning("poll error: %s", exc)
                 await asyncio.sleep(5)
 
-    async def _webhook_server(self) -> None:
-        """Receive pushed updates on TG_LISTEN. Requires TG_SECRET_TOKEN —
-        Telegram sends it as X-Telegram-Bot-Api-Secret-Token on every POST."""
-        if not TG_SECRET_TOKEN:
-            raise SystemExit("webhook mode requires TG_SECRET_TOKEN")
-        import uvicorn
-        from starlette.applications import Starlette
+    def _send_endpoint(self):
+        """The loopback /send contract shared by webhook and polling
+        modes — chat_send's path. Accepts {chat_id?, text?,
+        photo_url|image_url?, video_url?, audio_b64?, audio_mime?,
+        caption?, duration_ms?}; audio_b64 is WAV bytes that get
+        converted to OGG/Opus and pushed as a native voice bubble.
+        TG_PUSH_DENY refuses listed chats with 403 — replies inside a
+        real inbound turn don't come through here."""
         from starlette.responses import JSONResponse
-        from starlette.routing import Route
-
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def webhook(request):
-            if request.headers.get("x-telegram-bot-api-secret-token") != TG_SECRET_TOKEN:
-                return JSONResponse({"ok": True}, status_code=200)
-            try:
-                upd = await request.json()
-            except Exception:
-                return JSONResponse({"ok": True}, status_code=200)
-            await queue.put(upd)
-            return JSONResponse({"ok": True}, status_code=200)
-
-        async def health(request):
-            return JSONResponse({"ok": True, "mode": "webhook"})
 
         async def send(request):
-            """Outbound push API for Ada's chat_send tool — loopback only.
-            {chat_id?, text?, photo_url|image_url?, caption?}"""
             try:
                 body = await request.json()
             except Exception:
@@ -1121,7 +1198,6 @@ class TgRelay:
                     await self.send_video(cid, video,
                                           str(body.get("caption") or ""))
                 if audio_b64:
-                    import base64
                     ogg = await asyncio.to_thread(
                         self._wav_to_ogg, base64.b64decode(audio_b64))
                     await self.send_voice(
@@ -1132,10 +1208,37 @@ class TgRelay:
                 return JSONResponse({"ok": False, "error": str(exc)},
                                     status_code=502)
 
+        return send
+
+    async def _webhook_server(self) -> None:
+        """Receive pushed updates on TG_LISTEN. Requires TG_SECRET_TOKEN —
+        Telegram sends it as X-Telegram-Bot-Api-Secret-Token on every POST."""
+        if not TG_SECRET_TOKEN:
+            raise SystemExit("webhook mode requires TG_SECRET_TOKEN")
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def webhook(request):
+            if request.headers.get("x-telegram-bot-api-secret-token") != TG_SECRET_TOKEN:
+                return JSONResponse({"ok": True}, status_code=200)
+            try:
+                upd = await request.json()
+            except Exception:
+                return JSONResponse({"ok": True}, status_code=200)
+            await queue.put(upd)
+            return JSONResponse({"ok": True}, status_code=200)
+
+        async def health(request):
+            return JSONResponse({"ok": True, "mode": "webhook"})
+
         app = Starlette(routes=[
             Route(TG_WEBHOOK_PATH, webhook, methods=["POST"]),
             Route("/webhook/health", health, methods=["GET"]),
-            Route("/send", send, methods=["POST"]),
+            Route("/send", self._send_endpoint(), methods=["POST"]),
         ])
         host, _, port = TG_LISTEN.rpartition(":")
         server = uvicorn.Server(uvicorn.Config(
@@ -1160,50 +1263,11 @@ class TgRelay:
         from starlette.responses import JSONResponse
         from starlette.routing import Route
 
-        async def send(request):
-            try:
-                body = await request.json()
-            except Exception:
-                return JSONResponse({"ok": False,
-                                     "error": "bad json"}, status_code=422)
-            try:
-                cid = int(body.get("chat_id") or 0) or \
-                    next(iter(_allowed_chats()), 0)
-            except (TypeError, ValueError):
-                cid = next(iter(_allowed_chats()), 0)
-            if not cid:
-                return JSONResponse({"ok": False,
-                                     "error": "no target"}, status_code=400)
-            if cid in _push_deny():
-                logger.warning("/send denied: chat %s in TG_PUSH_DENY", cid)
-                return JSONResponse({"ok": False,
-                                     "error": "chat denied by TG_PUSH_DENY"},
-                                    status_code=403)
-            photo = body.get("photo_url") or body.get("image_url")
-            video = str(body.get("video_url") or "")
-            if not (body.get("text") or photo or video):
-                return JSONResponse({"ok": False,
-                                     "error": "nothing to send"},
-                                    status_code=400)
-            try:
-                if body.get("text"):
-                    await self.send_text(cid, str(body["text"])[:4000])
-                if photo:
-                    await self.send_photo(cid, str(photo),
-                                          str(body.get("caption") or ""))
-                if video:
-                    await self.send_video(cid, video,
-                                          str(body.get("caption") or ""))
-                return JSONResponse({"ok": True, "chat_id": cid})
-            except Exception as exc:
-                return JSONResponse({"ok": False, "error": str(exc)},
-                                    status_code=502)
-
         async def health(request):
             return JSONResponse({"ok": True, "mode": "polling"})
 
         app = Starlette(routes=[
-            Route("/send", send, methods=["POST"]),
+            Route("/send", self._send_endpoint(), methods=["POST"]),
             Route("/webhook/health", health, methods=["GET"]),
         ])
         host, _, port = TG_LISTEN.rpartition(":")
