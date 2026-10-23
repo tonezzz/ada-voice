@@ -97,6 +97,23 @@ LINE_USER_CALLERS="U<tony>:user-tony,U<kk>:user-kk,U<nhong>:user-nhong"
   but a member of tony-ha; tony is a member of kk-ha). Then add the
   `U…:user-<name>` pair to the relay unit env (`LINE_USER_CALLERS`).
 
+## Member discovery — first-seen registry
+
+LINE's members API (`/v2/bot/group/<id>/members/ids`) is gated to
+verified accounts — an unverified OA gets a 404 (observed 2026-10-11),
+so a new room's members **cannot be pre-enumerated**. Instead each
+sender in an allow-listed room self-registers on first activity: the
+relay upserts mddb `line-user-registry/<userId>` with `user_id`,
+`group_ids`, `display_name` (when the per-member profile endpoint
+shares it), `first_seen`/`last_seen`, and `status` — `pending` until
+the operator binds the userId in `LINE_USER_CALLERS`, `bound` after
+(the doc flips on the member's next message). Standard flow for a new
+group: allow-list the groupId, watch first senders land in the
+registry (or the `member_registered` ops event / refusal messages),
+bind each userId to a lane caller, restart the unit. Config:
+`LINE_REGISTRY_COLL` (default `line-user-registry`, `""` disables),
+`LINE_REGISTRY_RETRY_S` (300s cooldown before a failed write retries).
+
 ## Room gating — `LINE_ALLOWED_GROUP_IDS`
 
 Comma list of groupIds/roomIds the relay serves. Unknown rooms are

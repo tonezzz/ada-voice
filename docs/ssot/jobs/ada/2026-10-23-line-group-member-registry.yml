@@ -1,0 +1,85 @@
+# SSOT Job: LINE room members can't be pre-enumerated (members API is
+# gated to verified accounts) — first-seen registry in mddb.
+# Card: line-group-member-registry. Dispatch
+# 20261023-083119-line-members-api-is-gated-to-v.
+
+title: >
+  Room members self-register on first message — mddb
+  line-user-registry/<userId> records who to bind in LINE_USER_CALLERS
+
+subtitle: >
+  LINE's /v2/bot/group/<id>/members/ids endpoint is gated to verified
+  accounts (404 since 2026-10-11), so a new room's members cannot be
+  enumerated ahead of time. The relay now learns each sender in an
+  allow-listed room on first activity and upserts a registry doc; the
+  operator (or auto-binding) maps userId -> lane caller from there.
+
+planning:
+  goal: |
+    Card 'line-group-member-registry': when a message arrives in an
+    allow-listed group from an unmapped userId, write a registry doc
+    (mddb line-user-registry) with userId, groupId, display name if
+    available, first-seen timestamp. Operator then binds the userId in
+    LINE_USER_CALLERS. Standard for every new group: allow-list the
+    group, watch first senders, bind each to a lane caller. KK pending:
+    user-kk owner key minted on ada-ha-kk-keys.json awaiting her userId.
+  decisions: |
+    - Registration fires on ANY event carrying source.userId in an
+      allow-listed room (message or not, addressed or not) — first-seen
+      means first activity, and unaddressed chatter from a stranger is
+      still a sighting worth recording.
+    - Doc shape: mddb collection 'line-user-registry', key = LINE
+      userId, lang en. meta carries user_id, group_ids (merged set —
+      one member can appear in several rooms), display_name (when the
+      per-member profile endpoint shares it), first_seen/last_seen
+      (ISO), status 'pending'|'bound', caller (when bound). Existing
+      contentMd is preserved so operator notes survive; a new doc's
+      body names the userId, first-seen room and the LINE_USER_CALLERS
+      bind step.
+    - Mapped members register too (status 'bound' + caller) — a pending
+      doc flips to bound on the member's next message after the
+      operator binds them, so the registry stays self-maintaining
+      without a separate sweeper.
+    - Dedup: one mddb get+write per userId per relay process
+      (_reg_seen); a failed write re-arms after LINE_REGISTRY_RETRY_S
+      (300s default) so an mddb outage neither stalls turns nor spams
+      calls — the member's next message retries. Reads use
+      prefer_leader so a lagging follower can't regress first_seen.
+    - The write runs as a background task off handle_event — mddb
+      latency (or the /add inline embed) never delays the refusal or
+      routed turn. Failures log + emit member_registry_failed ops
+      events; a successful first-seen emits member_registered.
+    - _fetch_profile_name extracted from _sender_label — the same
+      per-member GET (/v2/bot/{group|room}/<id>/member/<uid>) now also
+      seeds _names for unmapped first-seers, so a real displayName
+      reaches the registry and the reply labels.
+    - Config: LINE_REGISTRY_COLL (default 'line-user-registry',
+      ''/'off'/'0' disables), LINE_REGISTRY_RETRY_S.
+      MDDB_BASE_URL default already points at idc03's store.
+
+verification: |
+  tests/test_line_user_registry.py — 12 tests: unmapped first message
+  registers pending (ids + first_seen); unaddressed chatter registers
+  too; displayName recorded + label cache seeded; gated profile -> doc
+  still written name-less; mapped member registers bound; pending doc
+  flips to bound on next sighting with group_ids merged and original
+  first_seen kept (operator body preserved); dedup to one check per
+  process; failed write re-arms after cooldown; disable flag;
+  unallowed group / DM sender don't register; a raising registry never
+  breaks the refusal path. All pass.
+  LINE suite (group/parked/quota/video-link/reply-context): 59 pass.
+  Full pytest suite in a worktree venv: 1633 pass, 7 skipped, no
+  failures. tool-lint clean.
+
+followups: |
+  - Deploy installs nothing new — the unit env on idc03 needs no
+    changes (LINE_REGISTRY_COLL default + MDDB_BASE_URL default both
+    resolve correctly there). Once deployed, KK's first message in the
+    shared room lands a pending doc keyed by her userId; bind it to the
+    already-minted user-kk key and restart ada-line-relay.
+  - A memberJoined webhook event could register members before their
+    first message (joined.members[].userId) — out of scope for the
+    card but a cheap earlier-seen signal if wanted.
+  - Operator convenience: a small tool/report listing
+    status=pending registry docs would close the loop without an mddb
+    query.

@@ -41,6 +41,16 @@ Env:
                                  (429) park here and ride the next free
                                  replyToken on that chats next inbound
                                  (OPS-0651)
+    LINE_REGISTRY_COLL         — default "line-user-registry": mddb
+                                 collection that records each room
+                                 member on first sighting (LINE's
+                                 members API is gated to verified
+                                 accounts, so rooms can't be
+                                 pre-enumerated — members register by
+                                 speaking). Set "" to disable.
+    LINE_REGISTRY_RETRY_S      — default 300: cooldown before a failed
+                                 registry write retries on the member's
+                                 next message
     LINE_BULK_LANES            — comma list of /send `instance` values
                                  forced to class=bulk regardless of the
                                  body's class field
@@ -196,6 +206,32 @@ PARKED_DIR = Path(os.environ.get(
 # so a spent month stops generating doomed bulk calls.
 LINE_BULK_COALESCE_S = float(os.environ.get("LINE_BULK_COALESCE_S", "300"))
 LINE_QUOTA_RETRY_S = float(os.environ.get("LINE_QUOTA_RETRY_S", "21600"))
+
+# First-seen member registry (card line-group-member-registry): LINE's
+# group/room members API is gated to verified accounts (404 on
+# /members/ids 2026-10-11), so a new room's members cannot be
+# pre-enumerated — the relay learns them as they first speak and upserts
+# mddb line-user-registry/<userId> for the operator to bind in
+# LINE_USER_CALLERS. Empty/"off" disables the write.
+LINE_REGISTRY_COLL = os.environ.get(
+    "LINE_REGISTRY_COLL", "line-user-registry")
+LINE_REGISTRY_RETRY_S = float(
+    os.environ.get("LINE_REGISTRY_RETRY_S", "300"))
+
+_registry_mddb: Any = None
+
+
+def _registry_store():
+    """Shared mddb client for the member registry — lazy like
+    _speaker_id so the relay still starts when the memory stack is
+    absent. None disables the registry."""
+    global _registry_mddb
+    if LINE_REGISTRY_COLL.strip().lower() in ("", "off", "0"):
+        return None
+    if _registry_mddb is None:
+        from backend.mddb_client import MddbClient
+        _registry_mddb = MddbClient()
+    return _registry_mddb
 
 
 def _bulk_lanes() -> set[str]:
@@ -802,6 +838,12 @@ class LineRelay:
         self._quota_blocked = 0.0
         # Per-chat debounce tasks flushing parked class=bulk payloads.
         self._bulk_flush: dict[str, asyncio.Task] = {}
+        # First-seen registry bookkeeping: _reg_seen = userIds whose
+        # mddb doc is confirmed written (checked once per process);
+        # _reg_try = last attempt per userId (LINE_REGISTRY_RETRY_S
+        # cooldown before a failed write re-arms).
+        self._reg_seen: set[str] = set()
+        self._reg_try: dict[str, float] = {}
 
     def _verify(self, body: bytes, signature: str) -> bool:
         mac = hmac.new(CHANNEL_SECRET.encode(), body, hashlib.sha256)
@@ -1318,35 +1360,130 @@ class LineRelay:
             return [{"type": "text",
                      "text": "(voice clip could not be delivered)"}]
 
+    async def _fetch_profile_name(self, user_id: str, group_id: str,
+                                  kind: str = "group") -> str:
+        """LINE per-member profile displayName — '' on any failure (an
+        unverified OA gets 404s from the member endpoints, so callers
+        fall back to caller-key/userId-tail labels). kind is the event
+        source type: 'room' sources use the /room/ member endpoint."""
+        if kind not in ("group", "room"):
+            kind = "group"
+        try:
+            assert self.http is not None
+            r = await self.http.get(
+                f"{LINE_API}/v2/bot/{kind}/{group_id}"
+                f"/member/{user_id}",
+                headers={"Authorization": f"Bearer {CHANNEL_TOKEN}"})
+            if r.status_code == 200:
+                return str(r.json().get("displayName") or "")
+        except Exception as exc:
+            logger.info("group profile %s/%s failed: %s",
+                        group_id, user_id, exc)
+        return ""
+
     async def _sender_label(self, user_id: str, group_id: str | None,
                             caller: str | None,
                             kind: str = "group") -> str:
         """Display label for the [persona->sender] reply tag: the room
-        profile's displayName when LINE will tell us (kind is the event
-        source type — 'room' sources use the /room/ member endpoint),
-        else the caller key minus its 'user-' prefix, else the userId
-        tail."""
+        profile's displayName when LINE will tell us, else the caller
+        key minus its 'user-' prefix, else the userId tail."""
         if user_id in self._names:
             return self._names[user_id]
         label = ""
         if group_id:
-            if kind not in ("group", "room"):
-                kind = "group"
-            try:
-                assert self.http is not None
-                r = await self.http.get(
-                    f"{LINE_API}/v2/bot/{kind}/{group_id}"
-                    f"/member/{user_id}",
-                    headers={"Authorization": f"Bearer {CHANNEL_TOKEN}"})
-                if r.status_code == 200:
-                    label = str(r.json().get("displayName") or "")
-            except Exception as exc:
-                logger.info("group profile %s/%s failed: %s",
-                            group_id, user_id, exc)
+            label = await self._fetch_profile_name(
+                user_id, group_id, kind)
         if not label:
             label = re.sub(r"^user-", "", caller or "") or user_id[-6:]
         self._names[user_id] = label
         return label
+
+    def _note_group_member(self, group_id: str, user_id: str,
+                           kind: str) -> None:
+        """Queue the first-seen registry write for a room sender. Deduped
+        to one mddb check per member per process; a failed write re-arms
+        after LINE_REGISTRY_RETRY_S. Runs as a task so mddb latency never
+        stalls the turn path."""
+        if user_id in self._reg_seen:
+            return
+        last = self._reg_try.get(user_id)
+        if last is not None and \
+                time.monotonic() - last < LINE_REGISTRY_RETRY_S:
+            return
+        self._reg_try[user_id] = time.monotonic()
+        try:
+            asyncio.get_running_loop().create_task(
+                self._register_member(group_id, user_id, kind))
+        except RuntimeError:
+            pass  # no running loop (shutdown) — the next event retries
+
+    async def _register_member(self, group_id: str, user_id: str,
+                               kind: str) -> None:
+        """Upsert mddb line-user-registry/<userId>: displayName (when the
+        per-member profile endpoint shares it), group_ids, first/last
+        seen, status pending|bound. A first-seer stays 'pending' until
+        the operator binds the userId in LINE_USER_CALLERS — the next
+        sighting then flips the doc to 'bound'."""
+        try:
+            mddb = _registry_store()
+            if mddb is None:
+                return
+            caller = _user_callers().get(user_id)
+            name = self._names.get(user_id) \
+                or await self._fetch_profile_name(user_id, group_id,
+                                                  kind)
+            if name:
+                self._names.setdefault(user_id, name)
+            now = datetime.now().isoformat(timespec="seconds")
+            # prefer_leader: a lagging follower missing the just-written
+            # doc would regress first_seen to this later read.
+            doc = await mddb.get_document(LINE_REGISTRY_COLL, user_id,
+                                          prefer_leader=True)
+            meta = dict((doc or {}).get("meta") or {})
+            meta.update({
+                "user_id": [user_id],
+                "group_ids": sorted(
+                    {*(meta.get("group_ids") or []), group_id}),
+                "first_seen": meta.get("first_seen") or [now],
+                "last_seen": [now],
+                "status": ["bound" if caller else "pending"],
+            })
+            if name:
+                meta["display_name"] = [name]
+            if caller:
+                meta["caller"] = [caller]
+            else:
+                meta.pop("caller", None)
+            body = (doc or {}).get("contentMd") or (
+                f"LINE room member first seen {meta['first_seen'][0]} "
+                f"in {kind} {group_id}"
+                + (f" as '{name}'" if name else "")
+                + " — awaiting caller binding.\n\n"
+                f"Bind: add `{user_id}:user-<name>` to "
+                "LINE_USER_CALLERS on ada-line-relay and restart the "
+                "unit.")
+            res = await mddb.add_document(
+                LINE_REGISTRY_COLL, user_id, "en", body, meta=meta)
+            if res is None:
+                logger.warning("member registry write failed for %s — "
+                               "re-arms in %ss", user_id,
+                               LINE_REGISTRY_RETRY_S)
+                _ops_event("member_registry_failed", "warn",
+                           user_id=user_id, chat_id=group_id)
+                return
+            self._reg_seen.add(user_id)
+            if doc is None or \
+                    (doc.get("meta") or {}).get("status") \
+                    != meta["status"]:
+                _ops_event("member_registered", "info", user_id=user_id,
+                           chat_id=group_id,
+                           display_name=name or None,
+                           status=meta["status"][0])
+            logger.info("member registry: %s %s in %s (%s)",
+                        user_id, meta["status"][0], group_id,
+                        name or "no-name")
+        except Exception as exc:
+            logger.info("member registry %s failed: %s", user_id, exc)
 
     async def _refuse_group_member(self, chat_id: str, user_id: str,
                                    reply_token: str | None) -> None:
@@ -1632,6 +1769,12 @@ class LineRelay:
             return
         if not user_id or not chat_id:
             return
+        if is_group:
+            # Rooms can't be pre-enumerated (members API is gated) — a
+            # sender in an allowed room self-registers on first
+            # activity so the operator can bind them in
+            # LINE_USER_CALLERS.
+            self._note_group_member(group_id, user_id, src_type)
         if etype == "follow":  # user added the bot
             await self.send_text(
                 chat_id, f"Ada LINE relay online. userId={user_id}",
