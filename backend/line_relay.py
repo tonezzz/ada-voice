@@ -53,7 +53,11 @@ Env:
                                  next message
     LINE_BULK_LANES            — comma list of /send `instance` values
                                  forced to class=bulk regardless of the
-                                 body's class field
+                                 body's class field — except class=
+                                 'critical', which always pushes
+                                 (quota-gated policy: critical-only
+                                 proactive sends, everything else parks
+                                 for a free replyToken)
     LINE_BULK_COALESCE_S       — default 300: class=bulk /send payloads
                                  park durably, then flush as ONE bundled
                                  push after this debounce — adjacent text
@@ -224,7 +228,9 @@ PARKED_DIR = Path(os.environ.get(
 # Push classes (card linepush-quota-audit): LINE meters *messages* on
 # push — replies are free. class=urgent payloads always attempt the push
 # API; class=bulk payloads park first and flush bundled after
-# LINE_BULK_COALESCE_S (or free, on the chat's next replyToken). A
+# LINE_BULK_COALESCE_S (or free, on the chat's next replyToken);
+# class=critical always pushes regardless of lane demotion — the escape
+# hatch for ops alerts while bulk runs reply-only. A
 # confirmed 429 monthly-limit sets _quota_blocked for LINE_QUOTA_RETRY_S
 # so a spent month stops generating doomed bulk calls.
 LINE_BULK_COALESCE_S = float(os.environ.get("LINE_BULK_COALESCE_S", "300"))
@@ -284,6 +290,8 @@ def _push_class(body: dict) -> str:
     else is urgent — it always attempts the push API."""
     cls = str(body.get("class") or body.get("priority")
               or "urgent").strip().lower()
+    if cls == "critical":
+        return "urgent"  # critical always pushes — bypasses bulk lanes
     inst = str(body.get("instance") or "").strip()
     if cls != "bulk" and inst in _bulk_lanes():
         cls = "bulk"
