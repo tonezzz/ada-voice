@@ -1,0 +1,90 @@
+# SSOT Job: relay channels route to the REST text provider
+# Card: text-lane-provider-routing (kanban). Dispatch 20261023-083121.
+
+title: Text-lane provider routing — channel=telegram|line never opens Live
+subtitle: /ws routes relay channels to OpenRouterTextProvider(tools=True)
+  by channel name; relays pin mode=text unconditionally
+
+planning:
+  goal: |
+    channel=telegram|line sessions on /ws ran the full Gemini Live audio
+    pipeline for text-only use — billed realtime audio minutes for what
+    are, at the wire level, plain text turns. Route them to the REST
+    text provider (the proven degraded-path class) so relay turn cost
+    drops to per-call REST tokens on the gateway paid->free->OR->lite
+    chain; Live paid burn shrinks to actual voice sessions.
+  design: |
+    Routing lives in pwa_server.voice_socket as a single pure helper,
+    _wants_text_provider(mode, channel, caller):
+      - ?mode=text           -> REST text provider (unchanged contract)
+      - caller in ADA_TEXT_ONLY_CALLERS -> text (unchanged, wins even
+        over ?mode=live)
+      - ?mode=live           -> Live (new escape hatch for debug/rollback)
+      - channel in ADA_TEXT_ONLY_CHANNELS (default telegram,tg,line)
+        -> text (NEW — the card's ask)
+      - anything else (voice, no channel) -> Live (unchanged)
+    The text provider is OpenRouterTextProvider(tools=True): it harvests
+    the identical lane-filtered function_declarations + system
+    instruction from a throwaway GeminiLiveProvider._session_config()
+    probe, then runs a Gemini REST tool loop through
+    gemini_pool.generate (LiteLLM gateway "chat" class, x-litellm
+    lane/tool/session spend tags). chat_send, cms_read, memory, HA
+    tools — the full lane surface — work; same tool_runner.execute
+    dispatch with pinned owner/session identity. OR free models are the
+    fallback leg when Gemini REST fails (tools flatten to text there).
+    Tools audit (card caveat): relays need the same lane tools as Live —
+    confirmed supported by the tools=True path already running
+    channel=web in production; no gating needed.
+  reconnect: |
+    The pwa reconnect loop could recreate a GeminiLiveProvider if a
+    provider pump ended mid-session. events() on the text provider only
+    ends on close(), but a hard `if _text_only: break` now guarantees a
+    text lane can never upgrade into billed realtime minutes.
+  watchdog: |
+    stall_watchdog probes p.upstream_dead()/is_stalled() every session —
+    OpenRouterTextProvider didn't implement them, so the task died on
+    AttributeError for every text session (silently; teardown suppresses
+    task exceptions). The provider now answers the probes (always
+    healthy — no persistent upstream to reap) plus a resumption_handle
+    None attr, which also lets the pending_at speech-stall nudge fire.
+  relays: |
+    tg_relay already sent mode=text unconditionally (TG_TEXT_MODE was a
+    dead env that only duplicated the param — removed). line_relay now
+    sends mode=text unconditionally too (LINE_TEXT_MODE opt-in removed),
+    so text routing is correct against any backend vintage, and the
+    backend's channel routing is the belt for clients that don't send
+    the param.
+  caching: |
+    Card asks for "a text model + prompt caching". The primary leg rides
+    the LiteLLM gateway "chat" class (gemini-3.5-flash paid->free->OR->
+    lite chain): Gemini 2.5+/3.x implicit context caching hits the
+    static prefix (system instruction + tool decls ~19k tokens)
+    automatically, billed at cache rates — no code needed. Explicit
+    OR-side cache_control was rejected: the OR leg is the free-model
+    fallback (cost already ~0) and unsupported fields risk 400s on the
+    cheapest chain models.
+
+scope_notes: |
+  - Voice (no channel param) and chatui-voice are untouched — they
+    always take the Live path.
+  - channel=chat (PWA chat card) is NOT in the default set — out of the
+    card's scope. Add "chat" to ADA_TEXT_ONLY_CHANNELS to extend the
+    same routing after a soak.
+  - mode=live only overrides channel routing, not the callers list —
+    ADA_TEXT_ONLY_CALLERS stays the unconditional safety rail.
+
+verify:
+  automated: |
+    tests/test_text_lane_routing.py — 10 tests: channel routing
+    (telegram/tg/line -> text; voice/chat/web -> live), mode=text and
+    mode=live precedence, callers-list precedence over mode=live,
+    ADA_TEXT_ONLY_CHANNELS override/empty-set, watchdog probe surface.
+    Full suite: 1630 passed, 1 skipped (CI deselects applied).
+    tool-lint clean; scenario-schema-check 0 violations.
+  ops_pending: |
+    Post-deploy on idc03: a LINE/TG turn should log
+    "text-mode provider (channel=line ...)" at session start and
+    ops-event 'text_mode_reply' per turn; usage ledger should show no
+    Live minutes for relay sessions. Rollback: ADA_TEXT_ONLY_CHANNELS=""
+    on the backend (or ?mode=live per client) restores Live for
+    non-relay clients; relays keep pinning mode=text.

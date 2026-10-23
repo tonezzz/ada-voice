@@ -486,13 +486,11 @@ class ChatSession:
             return
         key = (_key_by_name(self.caller) if self.caller
                else _key_for_chat(self.chat_id))
+        # text-lane-provider-routing: relay lanes are text-only by
+        # nature — mode=text pins the REST text provider (metered per
+        # call, no Live session); the backend also routes on channel.
         url = (f"{ADA_WS_URL}?api_key={key}&channel=telegram"
                f"&chat_id={self.chat_id}&mode=text")
-        # ada-text-mode-sessions: TG_TEXT_MODE routes text chats to the
-        # REST text provider — no Live session, metered per call.
-        if os.environ.get("TG_TEXT_MODE", "").strip().lower() in (
-                "1", "true", "yes"):
-            url += "&mode=text"
         self.ws = await websockets.connect(
             url, max_size=8 * 1024 * 1024, ping_interval=20)
         self._rx_task = asyncio.create_task(self._reader())

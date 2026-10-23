@@ -29,13 +29,17 @@ channels:
     mode: text-only Gemini Live — no TTS, no avatar tools, no speaker-id
     identity: issued key / pinned owner
   telegram:
-    surface: tg_relay -> /ws?channel=telegram
-    mode: text-only; per-TG-user api key resolves the owner
+    surface: tg_relay -> /ws?channel=telegram&mode=text
+    mode: REST text provider (OpenRouterTextProvider tools=True) — routed
+      by ADA_TEXT_ONLY_CHANNELS (default telegram,tg,line) since
+      text-lane-provider-routing; no Live session, per-TG-user api key
+      resolves the owner
     notes: voice notes transcribed (faster-whisper, TG_VOICE_TRANSCRIBE
       gate) then echo -> Ada turn -> result
   line:
-    surface: line_relay -> /ws?channel=line
-    mode: text-only; LINE webhook signature verified, per-user key
+    surface: line_relay -> /ws?channel=line&mode=text
+    mode: REST text provider (same routing as telegram); LINE webhook
+      signature verified, per-user key
   web:
     surface: <ada-webchat-card> on boards WP (/chat/<member>, private) ->
       /ws?channel=web&chat_id=web-<member>&mode=text
@@ -83,8 +87,10 @@ ops:
     channel, owner) — session reports show how each channel behaved.
   - Channel dashboards: channel_history API + channel_activity events.
   - New channel? Add a relay that resolves user -> api key, connect with
-    ?channel=<name>, and it inherits text-only mode + shared history for
-    free. No new provider type needed.
+    ?channel=<name>&mode=text, and it inherits text-only mode + shared
+    history for free. No new provider type needed. Name the channel in
+    ADA_TEXT_ONLY_CHANNELS to route it to the REST text provider even
+    without the mode param (?mode=live pins Live for debugging).
 
 related:
   - docs/ssot/jobs/ada/2026-10-10-unified-voice-chat-history.yml (design)

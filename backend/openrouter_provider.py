@@ -586,6 +586,20 @@ class OpenRouterTextProvider(RealtimeProvider):
 
     # ------------------------------------------------------------------ misc
 
+    # Watchdog/reconnect surface (pwa stall_watchdog probes every session):
+    # a REST provider has no persistent upstream socket to reap and no
+    # Live resumption — always healthy, nothing to resume.
+    resumption_handle: str | None = None
+
+    def upstream_dead(self) -> bool:
+        return False
+
+    def upstream_close_code(self) -> None:
+        return None
+
+    def is_stalled(self) -> bool:
+        return False
+
     def _emit_ops_event(self, ev_type: str, detail: str,
                         tool: str | None = None) -> None:
         """Same signature as GeminiLiveProvider — fire-and-forget ops note."""
