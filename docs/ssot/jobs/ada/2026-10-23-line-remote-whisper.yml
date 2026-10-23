@@ -1,0 +1,78 @@
+# SSOT Job: LINE relay remote STT — LINE_WHISPER_URL -> ada-whisper (omen)
+# Card: relays-remote-whisper-review (kanban). Dispatch
+# 20261023-084239-a-devin-session-committed-daa0 on tony-macbook.
+
+title: LINE voice notes transcribe via remote whisper endpoint, local
+  faster-whisper fallback
+subtitle: rescue-review of daa0e0a — tg half already superseded on main,
+  line half ported in the current remote-STT contract
+
+planning:
+  goal: |
+    Review the rescued commit daa0e0a (a Devin session committed directly
+    onto idc03's deploy-only checkout 2026-10-14 ~22:28; Tony rescued it
+    to origin branch relays-remote-whisper as 6ad4ac7 and reset idc03 to
+    origin/main), merge the still-wanted parts, redeploy.
+  context: |
+    Between the commit (base 3aae927) and review time, main gained a
+    strictly better remote-STT path in tg_relay (c8c07c7 TG_WHISPER_URL
+    remote-first, a3f905e silence-detect + noise filter, b205457 gemini
+    multimodal fallback + (text,kind) contract). The rescued tg half
+    conflicted and would regress all of that — dropped. The line half
+    (LINE_WHISPER_URL) was still missing on main, so it was ported in
+    the current contract rather than merged: clip -> 16k mono WAV via
+    av+soundfile (no ffmpeg on idc03 — the rescued _decode_audio's
+    ffmpeg/imageio-ffmpeg ladder was dropped), OpenAI-style
+    /v1/audio/transcriptions POST with model+prompt fields, dead-mic
+    clips short-circuit before the HTTP call, local faster-whisper path
+    byte-identical to before.
+  scope: |
+    In scope:
+      - backend/line_relay.py: _decode_wav16k, _transcribe_remote,
+        remote-first _transcribe (str return contract unchanged)
+      - envs: LINE_WHISPER_URL, LINE_WHISPER_REMOTE_MODEL (default
+        large-v3), LINE_WHISPER_PROMPT; LINE_WHISPER_MODEL stays the
+        LOCAL model (default base) — not repurposed like tg's, so no
+        existing deployment changes meaning
+      - requirements.txt: declare faster-whisper>=1.0,<2.0 and
+        soundfile>=0.12,<1.0 (lazy deps previously undeclared);
+        imageio-ffmpeg from the rescue deliberately NOT carried over
+      - .env.example doc block
+    Out of scope:
+      - tg_relay changes (superseded by main)
+      - gemini/auto STT backend selection for LINE (tg-only for now)
+      - wiring LINE_WHISPER_URL into the idc03 unit env — operator
+        decision; feature is dormant without it
+  success_criteria:
+    - 'unset LINE_WHISPER_URL: behavior identical to before'
+    - 'set + remote ok: transcript routed as text turn, wav temp cleaned'
+    - 'set + remote raises: warn logged, local faster-whisper used'
+    - 'silent clip (peak<0.01): no HTTP call, empty transcript'
+
+execution:
+  gates:
+    - 'py_compile clean; tool-lint clean (61 pre-existing warnings)'
+    - 'pytest tests/ -x -q on idc03 venv via detached worktree:
+      1637 passed, 1 skipped (pre-merge verify)'
+    - 'deploy-ada.sh on idc03: tool-lint + pytest gates passed
+      (1655 passed), 45s drain expired with live sessions (transcripts
+      append per turn), all 10 services restarted + verified active at
+      af310ef'
+  deploy:
+    - 'idc03 ~/CascadeProjects/ada-voice ff-merged e0b488a -> af310ef'
+    - 'pre-existing dirty tree snapshotted to
+      wip/deploy-snapshot-20261023-085154 by the deploy script'
+
+decisions:
+  - d1: 'idc03 is deploy-only — the session that committed daa0e0a worked
+    in the wrong place. Board comment posted as the reminder; AGENTS.md
+    already states the rule.'
+  - d2: 'remote endpoint contract is tg_relay''s: decoded WAV + model +
+    optional prompt, NOT the rescued raw-file POST.'
+  - d3: 'no ffmpeg/imageio-ffmpeg dependency — av+soundfile is the
+    host-proven decode path.'
+
+notes:
+  - 'LINE push quota at the moment of deploy: used=300/300 — the relay is
+    alive but pushes are exhausted until the month rolls (pre-existing,
+    unrelated to this change).'
