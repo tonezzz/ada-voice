@@ -94,3 +94,8 @@ tools:
     policy: read
     secondary_allowed: true
     timeout_s: 20
+  conv_journal:
+    module: conv_journal
+    policy: read
+    secondary_allowed: true
+    timeout_s: 120
