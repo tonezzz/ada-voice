@@ -7,6 +7,8 @@
 """
 
 import os
+import shutil
+import tempfile
 import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock
@@ -219,6 +221,133 @@ class ChannelTailDocTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [], await cm.read_channel_tails(
                 fake, "person.tony", exclude_instance="test"))
+
+
+class WebchatHistoryStoreTests(unittest.TestCase):
+    """Per-chat JSONL history (card webchat-history-endpoint): web-channel
+    turns journal per chat_id and survive restarts; remounts backfill."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.mkdtemp(prefix="wch-")
+        self._old_dir = cm._WEBCHAT_HISTORY_DIR
+        cm._WEBCHAT_HISTORY_DIR = self._dir
+        cm._history_counts.clear()
+
+    def tearDown(self) -> None:
+        cm._WEBCHAT_HISTORY_DIR = self._old_dir
+        cm._history_counts.clear()
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def test_append_and_read_ordered(self) -> None:
+        cm.webchat_history_append("web-kk", "user", "hi ada", ts=1.5)
+        cm.webchat_history_append("web-kk", "assistant", "hello kk")
+        turns = cm.webchat_history("web-kk")
+        self.assertEqual([t["role"] for t in turns], ["user", "assistant"])
+        self.assertEqual(turns[0]["text"], "hi ada")
+        self.assertEqual(turns[0]["ts"], 1.5)
+        self.assertNotIn("image_url", turns[0])
+
+    def test_threads_are_per_chat_id(self) -> None:
+        cm.webchat_history_append("web-kk", "user", "kk text")
+        cm.webchat_history_append("web-tony", "user", "tony text")
+        self.assertEqual([t["text"] for t in cm.webchat_history("web-kk")],
+                         ["kk text"])
+        self.assertEqual([t["text"] for t in cm.webchat_history("web-tony")],
+                         ["tony text"])
+
+    def test_max_turns_takes_tail(self) -> None:
+        for i in range(6):
+            cm.webchat_history_append("web-kk", "user", f"turn {i}")
+        turns = cm.webchat_history("web-kk", max_turns=2)
+        self.assertEqual([t["text"] for t in turns],
+                         ["turn 4", "turn 5"])
+
+    def test_media_only_push_kept_empty_dropped(self) -> None:
+        cm.webchat_history_append(
+            "web-kk", "assistant", "", image_url="http://x/i.jpg")
+        cm.webchat_history_append("web-kk", "assistant", "   ")
+        cm.webchat_history_append("", "user", "no chat")
+        turns = cm.webchat_history("web-kk")
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0]["image_url"], "http://x/i.jpg")
+
+    def test_bad_lines_skipped(self) -> None:
+        path = cm._webchat_history_path("web-kk")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            'not json\n{"role":"user","text":"ok","ts":1}\n{"x":1}\n',
+            encoding="utf-8")
+        turns = cm.webchat_history("web-kk")
+        self.assertEqual([t["text"] for t in turns], ["ok"])
+
+    def test_rolls_over_at_keep(self) -> None:
+        old_keep, old_trim = cm._WEBCHAT_HISTORY_KEEP, cm._WEBCHAT_HISTORY_TRIM_AT
+        cm._WEBCHAT_HISTORY_KEEP, cm._WEBCHAT_HISTORY_TRIM_AT = 5, 6
+        try:
+            for i in range(9):
+                cm.webchat_history_append("web-kk", "user", f"turn {i}")
+        finally:
+            cm._WEBCHAT_HISTORY_KEEP, cm._WEBCHAT_HISTORY_TRIM_AT = (
+                old_keep, old_trim)
+        turns = cm.webchat_history("web-kk")
+        self.assertEqual(len(turns), 5)
+        self.assertEqual(turns[0]["text"], "turn 4")
+        # Post-restart path: counts re-sync from the trimmed file, so the
+        # next append lands at KEEP+1 instead of re-trimming at the stale
+        # in-memory high-water mark.
+        cm._history_counts.clear()
+        cm.webchat_history_append("web-kk", "user", "turn 9")
+        turns = cm.webchat_history("web-kk")
+        self.assertEqual([t["text"] for t in turns],
+                         [f"turn {i}" for i in range(4, 10)])
+
+
+class WebchatJournalTests(unittest.TestCase):
+    """_channel_append routes web-channel turns into the per-chat log."""
+
+    def setUp(self) -> None:
+        cm._channel_log.clear()
+        self._dir = tempfile.mkdtemp(prefix="wch-")
+        self._old_dir = cm._WEBCHAT_HISTORY_DIR
+        cm._WEBCHAT_HISTORY_DIR = self._dir
+        cm._history_counts.clear()
+
+    def tearDown(self) -> None:
+        cm._WEBCHAT_HISTORY_DIR = self._old_dir
+        cm._history_counts.clear()
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def test_web_turns_journal_per_chat(self) -> None:
+        conv = _conv("s1", channel="web")
+        conv.chat_id = "web-kk"
+        conv.add_user("hi ada")
+        conv.add_assistant("hello kk")
+        turns = cm.webchat_history("web-kk")
+        self.assertEqual([t["role"] for t in turns], ["user", "assistant"])
+
+    def test_voice_and_unbound_never_journal(self) -> None:
+        voice = _conv("v1", channel="voice")
+        voice.add_user("spoken")
+        unbound = _conv("w1", channel="web")
+        unbound.add_user("no chat_id bound")
+        self.assertEqual(cm.webchat_history("web-kk"), [])
+        self.assertFalse(
+            os.listdir(cm._WEBCHAT_HISTORY_DIR))
+
+    def test_no_persist_stays_out(self) -> None:
+        conv = _conv("s1", channel="web")
+        conv.chat_id = "web-kk"
+        conv.no_persist = True
+        conv.add_user("scenario text")
+        self.assertEqual(cm.webchat_history("web-kk"), [])
+
+    def test_mirrored_turns_do_not_relog(self) -> None:
+        # A sibling's turn mirrored into a web session must not land in
+        # the thread a second time — the origin session already wrote it.
+        conv = _conv("s1", channel="web")
+        conv.chat_id = "web-kk"
+        conv.add_channel_mirror("user", "typed elsewhere", "chat")
+        self.assertEqual(cm.webchat_history("web-kk"), [])
 
 
 class ProviderNoteTests(unittest.IsolatedAsyncioTestCase):

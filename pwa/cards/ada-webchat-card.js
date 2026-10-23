@@ -19,6 +19,15 @@
 // card redeems it against the lane, storing the member key + a device id
 // in localStorage on the boards origin. A raw key paste also works.
 // Turns journal channel=web into the unified voice+chat history.
+//
+// History (card webchat-history-endpoint): on the first 'ready' the card
+// sends {type:"history_request"} and the lane answers {type:"history",
+// turns:[{role,text,ts,image_url?,video_url?}]} from the chat_id's
+// server-side JSONL log — the thread survives reloads, remounts and
+// other devices bound to the same chat_id. Live events buffer until the
+// history frame lands (or a short timeout on older lanes) so backfilled
+// turns render ahead of new frames; a parked push that also flushed is
+// deduped by signature.
 
 class AdaWebchatCard extends HTMLElement {
   constructor() {
@@ -29,6 +38,11 @@ class AdaWebchatCard extends HTMLElement {
     this._retry = 0;
     this._retryTimer = null;
     this._denied = false;
+    this._histWait = false;   // awaiting the history frame
+    this._histDone = false;   // backfilled once this mount
+    this._histTimer = null;
+    this._pending = [];       // live events buffered during backfill
+    this._histSigs = null;    // history turn sigs -> chat_push dedupe
   }
 
   connectedCallback() { this._render(); this._boot(); }
@@ -36,6 +50,7 @@ class AdaWebchatCard extends HTMLElement {
   disconnectedCallback() {
     this._close();
     if (this._retryTimer) clearTimeout(this._retryTimer);
+    if (this._histTimer) clearTimeout(this._histTimer);
   }
 
   // -- config / storage ----------------------------------------------------
@@ -149,6 +164,12 @@ class AdaWebchatCard extends HTMLElement {
 
   _connect() {
     this._close();
+    // A connect that dies mid-backfill must not wedge the next one —
+    // buffered frames drop (the fresh 'ready' re-requests history when
+    // _histDone is still false).
+    this._histWait = false;
+    this._pending = [];
+    if (this._histTimer) { clearTimeout(this._histTimer); this._histTimer = null; }
     const lane = this._lane();
     const key = this._apiKey();
     if (!lane || !key) { this._showSetup(); return; }
@@ -184,6 +205,12 @@ class AdaWebchatCard extends HTMLElement {
   }
 
   _onEvent(ev) {
+    // Buffer live frames until the history backfill lands so prior
+    // turns render ahead of anything new.
+    if (this._histWait && ev.type !== "history") {
+      this._pending.push(ev);
+      return;
+    }
     switch (ev.type) {
       case "ready":
         this._retry = 0;
@@ -191,6 +218,17 @@ class AdaWebchatCard extends HTMLElement {
         this._status("");
         this._setComposer(true);
         this.shadowRoot.getElementById("wc-input").focus();
+        this._requestHistory();
+        break;
+      case "history":
+        // A frame landing after the timeout already flushed live events
+        // would render old turns out of order — drop it.
+        if (this._histDone) break;
+        this._histWait = false;
+        this._histDone = true;
+        if (this._histTimer) { clearTimeout(this._histTimer); this._histTimer = null; }
+        this._backfill(ev.turns || []);
+        this._drainPending();
         break;
       case "response_started":
         this._finishStream();
@@ -216,7 +254,9 @@ class AdaWebchatCard extends HTMLElement {
         break;
       case "chat_push":
         // Outbound push (chat_send channel=web) — a parked or live
-        // proactive message, rendered as an Ada bubble.
+        // proactive message, rendered as an Ada bubble. A parked push
+        // that also landed in the backfill is skipped by signature.
+        if (this._histSigs && this._histSigs.has(this._sig(ev))) break;
         this._pushBubble(ev);
         break;
       case "channel_activity":
@@ -231,6 +271,58 @@ class AdaWebchatCard extends HTMLElement {
         this._system(`error: ${ev.message || "unknown"}`, true);
         break;
     }
+  }
+
+  // -- history backfill ----------------------------------------------------
+
+  _requestHistory() {
+    // First 'ready' of a mount only — a provider-reconnect 'ready'
+    // mid-session must not re-render the whole thread.
+    if (this._histDone || this._histWait || !this._ws) return;
+    this._histWait = true;
+    try {
+      this._ws.send(JSON.stringify(
+        { type: "history_request", max_turns: 200 }));
+    } catch (_) {}
+    if (this._histTimer) clearTimeout(this._histTimer);
+    // Older lanes never answer — flush the buffer and carry on live.
+    this._histTimer = setTimeout(() => {
+      if (!this._histWait) return;
+      this._histWait = false;
+      this._histDone = true;
+      this._drainPending();
+    }, 2000);
+  }
+
+  _drainPending() {
+    const q = this._pending;
+    this._pending = [];
+    q.forEach(e => this._onEvent(e));
+  }
+
+  _sig(ev) {
+    return `${ev.text || ""}|${ev.image_url || ""}|${ev.video_url || ""}`;
+  }
+
+  _backfill(turns) {
+    this._histSigs = new Set();
+    for (const t of turns) {
+      if (!t || typeof t !== "object") continue;
+      this._histSigs.add(this._sig(t));
+      const kind = t.role === "user" ? "mine" : "ada";
+      const { el, body } = this._bubble(kind, t.text || "");
+      for (const u of [{ url: t.image_url },
+                       { url: t.video_url, video: true }]) {
+        if (!u.url) continue;
+        const tag = document.createElement(u.video ? "video" : "img");
+        tag.className = "media";
+        tag.src = u.url;
+        if (u.video) { tag.controls = true; tag.muted = true; tag.playsInline = true; }
+        body.append(tag);
+      }
+      if (!body.textContent && !body.children.length) el.remove();
+    }
+    this._scroll();
   }
 
   // -- rendering -----------------------------------------------------------

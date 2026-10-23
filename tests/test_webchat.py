@@ -236,5 +236,50 @@ class ChatSendWebTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(res["ok"])
 
 
+class ChatHistoryEndpointTests(unittest.IsolatedAsyncioTestCase):
+    """GET /api/chat/history — the remount backfill source."""
+
+    async def test_returns_ordered_turns(self):
+        turns = [{"role": "user", "text": "hi", "ts": 1.0},
+                 {"role": "assistant", "text": "yo", "ts": 2.0}]
+        with patch.object(pwa_server, "_require_api_key", lambda r: None), \
+                patch.object(pwa_server._conv_mem, "webchat_history",
+                             lambda cid, max_turns=None: turns):
+            res = await pwa_server.chat_history(
+                _Req({}), chat_id="web-kk", max_turns=50)
+        self.assertEqual(res["chat_id"], "web-kk")
+        self.assertEqual(res["turns"], turns)
+
+    async def test_chat_id_required(self):
+        with patch.object(pwa_server, "_require_api_key", lambda r: None):
+            with self.assertRaises(pwa_server.HTTPException) as cm:
+                await pwa_server.chat_history(_Req({}), chat_id="  ")
+        self.assertEqual(cm.exception.status_code, 422)
+
+
+class DeliverJournalsHistoryTests(unittest.IsolatedAsyncioTestCase):
+    """webchat_deliver writes the push into the thread history so a
+    remount backfills it (card webchat-history-endpoint)."""
+
+    def setUp(self):
+        self._live = dict(pwa_server._live_sessions)
+        pwa_server._live_sessions.clear()
+        SESSION_CHAT.clear()
+
+    def tearDown(self):
+        pwa_server._live_sessions.clear()
+        pwa_server._live_sessions.update(self._live)
+        SESSION_CHAT.clear()
+
+    async def test_push_appends_to_history(self):
+        with patch.object(pwa_server._conv_mem,
+                          "webchat_history_append") as app:
+            await pwa_server.webchat_deliver(
+                "web-kk", text="ping", image_url="http://x/i.jpg")
+        app.assert_called_once_with(
+            "web-kk", "assistant", "ping",
+            image_url="http://x/i.jpg", video_url="")
+
+
 if __name__ == "__main__":
     unittest.main()

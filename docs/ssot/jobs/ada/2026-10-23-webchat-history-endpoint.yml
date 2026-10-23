@@ -1,0 +1,72 @@
+# SSOT Job: per-chat web history — remount/second-device backfill for the
+# boards webchat. Card: webchat-history-endpoint.
+# Dispatch 20261023-084744-tony-2026-10-22-roster-working.
+
+title: >
+  Web-channel threads persist server-side per chat_id — reload roster or
+  open a second UI and the prior turns backfill
+
+subtitle: >
+  Tony ask ("keep chat history across reconnects/devices, server-side"):
+  web turns already journal channel=web + a session-end MDDB summary, but
+  the card had nothing to backfill from — every mount started blank.
+  /api/chat/transcript only exposes live sessions + the last-session tail.
+
+planning:
+  goal: |
+    One durable thread per chat_id (web-<member>), surface-agnostic: any
+    UI bound to the same chat_id on a lane shares the thread (roster,
+    member webchat, future surfaces). Different member = different
+    thread; voice/LINE/TG stay under their own channels.
+  decisions: |
+    - Store: backend/conversation_memory.py — webchat_history_append /
+      webchat_history over ADA_WEBCHAT_HISTORY_DIR (default
+      ~/.local/share/ada/webchat/<chat_id>.jsonl), rolling
+      ADA_WEBCHAT_HISTORY_KEEP=500 turns/chat (append-only until
+      KEEP+50, then truncate to KEEP; per-file line counts re-sync from
+      disk after restart). Local-only like the transcript archive —
+      never pushed to git/MDDB.
+    - Funnel: ConversationMemory._channel_append is the single point
+      every user/assistant turn crosses; channel=="web" + bound
+      conversation.chat_id (set by /ws from ?chat_id=) also writes the
+      JSONL. no_persist sessions stay out (scenarios can't pollute real
+      threads); mirrored sibling turns never re-log.
+    - Pushes: webchat_deliver journals each proactive push as an
+      assistant turn (text + image_url/video_url) — live-delivered and
+      parked alike, so history is complete regardless of when the page
+      was open.
+    - Read path A (card, no CORS needed): ws {type:history_request,
+      max_turns} → {type:history, chat_id, turns:[{role,text,ts,
+      image_url?,video_url?}]} — only the session's own bound chat_id is
+      ever served, so a member can never name another thread.
+    - Read path B (ops/tooling): GET /api/chat/history?chat_id=
+      &max_turns= (default 100) — key-gated like /api/chat/transcript.
+    - Card (ada-webchat-card.js): first 'ready' of a mount sends
+      history_request; live events buffer until the 'history' frame (or
+      a 2s timeout on older lanes) so backfill renders ahead of new
+      frames. Parked pushes that also flushed on this connect are
+      deduped by text|image|video signature. Provider-reconnect 'ready'
+      never re-backfills (_histDone per mount).
+    - Roster needs no change — the card backfills itself.
+
+verification:
+  - tests/test_channel_history.py — 14 new: store round-trip/ordering,
+    per-chat_id isolation, max_turns tail, media-only push, bad-line
+    skip, KEEP rollover + post-restart re-sync, web journal hook,
+    voice/unbound/no_persist exclusions, mirrored-turn no-relog.
+  - tests/test_webchat.py — 3 new: /api/chat/history returns ordered
+    turns + 422 on missing chat_id; webchat_deliver journals the push.
+  - pytest tests/ -x -q — 1652 passed, 7 skipped (scratch venv:
+    fastapi, httpx, pyyaml, pillow, qrcode, websockets, numpy, uvicorn).
+  - python3 scripts/tool-lint.py — clean (61 pre-existing warnings).
+
+followups:
+  - Deploy via ~/.local/bin/deploy-ada.sh on idc03 (not done in
+    worktree); verify: reload roster -> prior turns per contact; a
+    second webui on the same chat_id shows the same thread.
+  - Card JS verified by inspection only — no browser/node on runner;
+    watch first real backfill on the boards page.
+  - Turns missed during a ws gap are not re-synced mid-mount
+    (_histDone); parked pushes still flush. Reload covers it.
+  - REST endpoint is key-gated but not per-member-scoped — any valid
+    key reads any chat_id (same bar as /api/chat/transcript today).
