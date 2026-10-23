@@ -200,6 +200,96 @@ def channel_log() -> list[dict[str, Any]]:
     return [dict(it) for it in _channel_log]
 
 
+# Per-chat web history (card webchat-history-endpoint): web-channel turns
+# also append to a JSONL log per chat_id so a remounted card (or a second
+# device on the same thread) can backfill prior turns — the in-memory
+# channel log and the MDDB tail are tails, not per-chat history. Local-only
+# like the transcript archive; the thread key is the ws chat_id
+# (web-<member>), so every surface bound to it shares one file.
+_WEBCHAT_HISTORY_DIR = os.environ.get(
+    "ADA_WEBCHAT_HISTORY_DIR",
+    str(Path(TRANSCRIPT_DIR).parent / "webchat"))
+_WEBCHAT_HISTORY_KEEP = int(os.environ.get("ADA_WEBCHAT_HISTORY_KEEP", "500"))
+# Rewrite point: append-only until past KEEP+50, then truncate to KEEP.
+_WEBCHAT_HISTORY_TRIM_AT = _WEBCHAT_HISTORY_KEEP + 50
+_WEBCHAT_HISTORY_TEXT_CHARS = 2000
+_history_counts: dict[str, int] = {}
+
+
+def _webchat_history_path(chat_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(chat_id or "").strip())
+    return Path(_WEBCHAT_HISTORY_DIR) / f"{safe or 'unknown'}.jsonl"
+
+
+def webchat_history_append(
+    chat_id: str,
+    role: str,
+    text: str,
+    ts: float | None = None,
+    **extra: Any,
+) -> None:
+    """Append one turn to a web chat_id's rolling JSONL history. Media-only
+    records (push with just an image/video) are kept; truly empty turns
+    are dropped."""
+    chat_id = str(chat_id or "").strip()
+    text = str(text or "").strip()
+    rec: dict[str, Any] = {}
+    for k in ("image_url", "video_url"):
+        v = str(extra.get(k) or "").strip()
+        if v:
+            rec[k] = v
+    if not chat_id or not (text or rec):
+        return
+    rec["ts"] = float(ts if ts is not None else time.time())
+    rec["role"] = role if role in ("user", "assistant") else "user"
+    rec["text"] = text[:_WEBCHAT_HISTORY_TEXT_CHARS]
+    try:
+        path = _webchat_history_path(chat_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = str(path)
+        count = _history_counts.get(key)
+        if count is None:
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    count = sum(1 for _ in fh)
+            except OSError:
+                count = 0
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        count += 1
+        if count > _WEBCHAT_HISTORY_TRIM_AT:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            path.write_text(
+                "\n".join(lines[-_WEBCHAT_HISTORY_KEEP:]) + "\n",
+                encoding="utf-8")
+            count = min(len(lines), _WEBCHAT_HISTORY_KEEP)
+        _history_counts[key] = count
+    except Exception as exc:
+        _report_failure("webchat_history", exc)
+
+
+def webchat_history(chat_id: str, max_turns: int | None = None) -> list[dict]:
+    """Ordered turns for a web chat_id (oldest first) — the backfill
+    behind GET /api/chat/history and the ws 'history' frame."""
+    try:
+        lines = _webchat_history_path(chat_id).read_text(
+            encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and (rec.get("text") or rec.get("image_url")
+                                    or rec.get("video_url")):
+            out.append(rec)
+    if max_turns and max_turns > 0:
+        out = out[-int(max_turns):]
+    return out
+
+
 async def record_channel_tail(
     mddb: Any, owner: str | None, tail: str
 ) -> None:
@@ -686,6 +776,10 @@ class ConversationMemory:
         # — turns only ever merge/mirror between sessions of the same owner.
         self.channel: str = "voice"
         self.owner_identity: str | None = None
+        # Thread key for per-chat web history (the ws ?chat_id= binding) —
+        # set by the /ws handler for channel sessions; web-channel turns
+        # journal to the chat_id's JSONL log in _channel_append.
+        self.chat_id: str | None = None
         # Crash durability (card ada-transcript-durability): when on, each
         # completed turn is appended to the archive file as it lands, so a
         # restart/SIGKILL mid-session loses nothing already spoken. Off by
@@ -716,6 +810,8 @@ class ConversationMemory:
             "channel": self.channel, "session_id": self.session_id,
             "owner": self.owner_identity,
         })
+        if self.channel == "web" and self.chat_id:
+            webchat_history_append(self.chat_id, role, text)
 
     def add_user(self, text: str) -> None:
         if text.strip():

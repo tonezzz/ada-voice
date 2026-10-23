@@ -1195,6 +1195,9 @@ async def voice_socket(ws: WebSocket) -> None:
     # same-owner sessions (card ada-reads-text-chat).
     conversation.channel = channel or "voice"
     conversation.owner_identity = tool_runner.session_owner_identity
+    # Thread key for per-chat web history — web-channel turns journal to
+    # this chat_id's JSONL log (card webchat-history-endpoint).
+    conversation.chat_id = chat_id or None
     # Test hook: ?no_persist=1 skips transcript persist, extraction,
     # summaries and the session-end marker so scenario runs never pollute
     # real memory (banks are unaffected — explicit ada_remember still writes).
@@ -1606,6 +1609,24 @@ async def voice_socket(ws: WebSocket) -> None:
                                     await ws.send_text(json.dumps({
                                         "type": "error",
                                         "message": "image send failed"}))
+                        elif control.get("type") == "history_request":
+                            # Backfill for the bound web thread (card
+                            # webchat-history-endpoint): the card asks on
+                            # first 'ready' and renders the returned turns
+                            # before live frames. Only this session's own
+                            # bound chat_id is ever served — a client can
+                            # never name another member's thread.
+                            if channel == "web" and chat_id:
+                                try:
+                                    _n = int(control.get("max_turns") or 0)
+                                except (TypeError, ValueError):
+                                    _n = 0
+                                await ws.send_text(json.dumps({
+                                    "type": "history",
+                                    "chat_id": chat_id,
+                                    "turns": _conv_mem.webchat_history(
+                                        chat_id, max_turns=_n),
+                                }))
                         elif control.get("type") == "text":
                             chat_text = str(control.get("text") or "").strip()
                             if chat_text:
@@ -2765,6 +2786,12 @@ async def webchat_deliver(chat_id: str, text: str = "",
     if not chat_id:
         return {"ok": False, "error": "chat_id required"}
     frame = _webchat_frame(text, image_url, video_url)
+    # Journal the push into the thread's history so a remount backfills
+    # it like a normal turn. The card dedupes the case where the same
+    # push also arrives via the parked flush on this connect.
+    _conv_mem.webchat_history_append(
+        chat_id, "assistant", text,
+        image_url=image_url, video_url=video_url)
     delivered = 0
     for _sid, sess in _webchat_sessions(chat_id):
         ws = sess.get("ws")
@@ -2945,6 +2972,25 @@ async def chat_transcript(request: Request, max_turns: int = 200) -> dict:
         # Unified voice+chat history: raw shared-log turns across all
         # live/recent sessions on this backend, channel-labelled.
         "channel_history": _conv_mem.channel_log()[-200:],
+    }
+
+
+@app.get("/api/chat/history")
+async def chat_history(request: Request, chat_id: str = "",
+                       max_turns: int = 100) -> dict:
+    """Persisted per-chat web history (card webchat-history-endpoint).
+
+    Thread key is the ws chat_id (web-<member>) — surface-agnostic, so
+    every UI bound to the same chat_id reads one thread. Ordered turns
+    {role, text, ts, image_url?, video_url?}, oldest first."""
+    _require_api_key(request)
+    chat_id = str(chat_id or "").strip()
+    if not chat_id:
+        raise HTTPException(status_code=422, detail="chat_id required")
+    return {
+        "chat_id": chat_id,
+        "turns": _conv_mem.webchat_history(
+            chat_id, max_turns=max(0, int(max_turns))),
     }
 
 
