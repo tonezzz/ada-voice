@@ -1,0 +1,104 @@
+# SSOT Job: LINE push-quota resilience — per-day send ledger + periodic
+# headroom probe. Card: line-push-quota-resilience (chaba kanban).
+# Dispatch 20261023-083039-2026-10-14-17-12-two-queued-ch.
+# Incident 2026-10-14 17:12: two queued chat_send deliveries to the kk-ha
+# group (apology text, then image+caption) failed on LINE 429
+# {"message":"You have reached your monthly limit."} — nothing reached KK.
+
+title: LINE push-quota resilience — send ledger, quota poller, spend gate
+
+context: |
+  Follow-on to 2026-10-17-line-push-quota-policy.yml (card
+  linepush-quota-audit). That dispatch already shipped the durable
+  parked queue (OPS-0651: 429'd pushes ride the next free inbound
+  replyToken), urgent|bulk /send classes with bundled debounced flush
+  (LINE_BULK_COALESCE_S), the _quota_blocked epoch, the boot quota
+  probe, and GET /quota. This card's fixes 1 (429 fallback) and 3
+  (reduce push usage, relay side) were therefore already committed —
+  the remaining gap was fix 2: the burn was only visible AT the wall
+  (first signal = a 429), not before it.
+
+changes:
+  - file: backend/line_relay.py
+    what: |
+      Per-day send ledger: every _deliver outcome bumps counters on
+      today's row — push_calls/push_msgs on push attempts and 200s,
+      reply_calls/reply_msgs on free replyToken deliveries, parked_msgs
+      when a payload enters the durable park queue (/send bulk park,
+      bulk-under-block park, 429 park), push_failed on non-429 push
+      errors. Write-through to LINE_SEND_LEDGER (default
+      ~/.local/share/ada/line-send-ledger.json) so a restart loses
+      nothing; rows keyed YYYY-MM-DD persist per day.
+      Day rollover emits one 'send_rollup' ops event per nonzero day
+      (checked on every ledger touch and on each quota poll, so an
+      idle relay still rolls the day out) — this is the 'count push vs
+      reply per day in the ops ledger' ask.
+      Quota poller: _quota_poller runs _quota_poll_once every
+      LINE_QUOTA_POLL_S (default 3600, 0 disables). Each poll journals
+      used/limit/remaining and emits one ops event: 'quota_status'
+      (info) normally, 'quota_low' (warn) once remaining <=
+      LINE_QUOTA_WARN (default 30) — visible before the wall — or
+      'quota_depleted' + _quota_blocked re-arm when used >= limit
+      (same as boot probe; stays quiet while the block is already
+      set). Unlimited plans (limit null) never fire quota_low.
+      GET /quota gains ledger_today {field:n} and month_push_msgs —
+      the relay's own month-to-date pushed-bubble count vs LINE's
+      authoritative consumption counter.
+  - file: .env.example
+    what: LINE_QUOTA_POLL_S / LINE_QUOTA_WARN / LINE_SEND_LEDGER
+      documented in the LINE block.
+  - file: tests/test_line_relay_quota.py
+    what: |
+      11 new tests (SendLedger class): push/reply counting,
+      parked counting across 429 + bulk-under-block, ledger
+      persist+reload, send_rollup emitted once per completed day and
+      skipped for quiet days, quota_low below threshold, depleted poll
+      arms the block once then stays quiet, unlimited plan never low,
+      /quota ledger fields. Existing helpers now redirect
+      SEND_LEDGER_FILE into tmp (also in test_line_relay_parked.py) so
+      unit tests never touch the real ledger file.
+
+ops_surface:
+  ledger_file: ~/.local/share/ada/line-send-ledger.json
+  events: |
+    send_rollup      info  day, push_calls, push_msgs, reply_calls,
+                           reply_msgs, parked_msgs, push_failed
+    quota_status     info  per poll: used/limit/remaining
+    quota_low        warn  remaining <= LINE_QUOTA_WARN
+    quota_depleted   error used >= limit (boot / poll / alert paths)
+    quota_recovered  info  a push 200 cleared a known block
+    push_parked      warn  429'd payload parked for next replyToken
+    parked_flushed   info  parked msgs delivered free on a reply
+  endpoints: |
+    GET 127.0.0.1:8912/quota -> {quota:{limit,used,remaining},
+      quota_blocked, quota_blocked_until, parked:{chat:n},
+      ledger_today:{...}, month_push_msgs:n}
+
+verify:
+  - .venv pytest tests/test_line_relay_quota.py
+    test_line_relay_parked.py test_line_relay_group.py
+    test_line_reply_context.py test_line_video_link.py — 69 passed
+  - .venv pytest tests/ -x -q — 1631 passed, 7 skipped
+  - python3 scripts/tool-lint.py — clean
+
+open:
+  spend_gate: |
+    Raised on the board (request line-oa-spend-gate-*). Free 300/mo is
+    structurally thin at ~35 calls/day healthy burn. Options put to
+    Tony: (a) stay free + demote nag/watch/digest senders to
+    class=bulk (LINE_BULK_LANES on idc03 covers out-of-repo callers),
+    (b) paid OA plan, (c) per-member OA split.
+  caller_adoption: |
+    chaba-nag.py, gemini-wallet-watch.py, line-digest.py live outside
+    this repo — still urgent until they send class=bulk or
+    LINE_BULK_LANES is set (carried over from the 2026-10-17 job).
+
+notes: |
+  - The incident's exact failure mode is covered end-to-end: a queued
+    chat_send (text OR image+caption — _image_msgs bubbles park the
+    same as text) that 429s now lands in the chat's durable park file
+    and flushes free on that chat's next inbound replyToken.
+  - LINE meters message bubbles on push, not calls — the ledger counts
+    both so a bundled 5-bubble flush shows its true cost.
+  - Ledger month_push_msgs counts OUR delivered pushes; LINE's
+    /quota/consumption stays authoritative (polled hourly).

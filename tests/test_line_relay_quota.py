@@ -27,6 +27,7 @@ class _R:
 
 def _relay(tmp):
     line_relay.PARKED_DIR = Path(tmp)
+    line_relay.SEND_LEDGER_FILE = Path(tmp) / "send-ledger.json"
     relay = line_relay.LineRelay()
     return relay
 
@@ -202,6 +203,7 @@ class SendEndpointClass(unittest.TestCase):
         from starlette.testclient import TestClient
         with tempfile.TemporaryDirectory() as tmp:
             line_relay.PARKED_DIR = Path(tmp)
+            line_relay.SEND_LEDGER_FILE = Path(tmp) / "send-ledger.json"
             app, relay = self._app()
             relay._quota_blocked = time.time() + 3600
             client = TestClient(app)
@@ -218,6 +220,7 @@ class SendEndpointClass(unittest.TestCase):
         from starlette.testclient import TestClient
         with tempfile.TemporaryDirectory() as tmp:
             line_relay.PARKED_DIR = Path(tmp)
+            line_relay.SEND_LEDGER_FILE = Path(tmp) / "send-ledger.json"
             app, relay = self._app()
             client = TestClient(app)
             r = client.post("/send", json={"to": "U1", "text": "now"})
@@ -230,6 +233,7 @@ class SendEndpointClass(unittest.TestCase):
         from starlette.testclient import TestClient
         with tempfile.TemporaryDirectory() as tmp:
             line_relay.PARKED_DIR = Path(tmp)
+            line_relay.SEND_LEDGER_FILE = Path(tmp) / "send-ledger.json"
             app, relay = self._app()
             relay._quota_probe = AsyncMock(
                 return_value={"limit": 300, "used": 300, "remaining": 0})
@@ -242,6 +246,144 @@ class SendEndpointClass(unittest.TestCase):
             self.assertEqual(body["quota"]["remaining"], 0)
             self.assertEqual(body["parked"], {"U1": 2})
             self.assertFalse(body["quota_blocked"])
+
+
+class SendLedger(unittest.TestCase):
+    """Per-day push-vs-reply counters + periodic quota headroom events
+    (card line-push-quota-resilience)."""
+
+    def _relay(self, tmp):
+        line_relay.PARKED_DIR = Path(tmp)
+        line_relay.SEND_LEDGER_FILE = Path(tmp) / "send-ledger.json"
+        return line_relay.LineRelay()
+
+    def _today(self):
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def test_push_success_counts_msgs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            relay.line = AsyncMock(return_value=_R(200))
+            asyncio.run(relay._deliver(
+                "U1", [{"type": "text", "text": "a"},
+                       {"type": "text", "text": "b"}]))
+            row = relay._ledger[self._today()]
+            self.assertEqual(row["push_calls"], 1)
+            self.assertEqual(row["push_msgs"], 2)
+            self.assertNotIn("reply_msgs", row)
+
+    def test_reply_counts_free_not_push(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            relay.line = AsyncMock(return_value=_R(200))
+            asyncio.run(relay._deliver(
+                "U1", [{"type": "text", "text": "a"}],
+                reply_token="tok"))
+            row = relay._ledger[self._today()]
+            self.assertEqual(row["reply_calls"], 1)
+            self.assertEqual(row["reply_msgs"], 1)
+            self.assertNotIn("push_msgs", row)
+
+    def test_429_and_bulk_park_count_parked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            relay._quota_alert = AsyncMock()
+            relay.line = AsyncMock(return_value=_R(
+                429, '{"message":"You have reached your monthly limit."}'))
+            asyncio.run(relay._deliver(
+                "U1", [{"type": "text", "text": "a"}]))
+            relay._quota_blocked = time.time() + 3600
+            asyncio.run(relay._deliver(
+                "U1", [{"type": "text", "text": "b"}], cls="bulk"))
+            row = relay._ledger[self._today()]
+            self.assertEqual(row["parked_msgs"], 2)
+            self.assertNotIn("push_msgs", row)
+
+    def test_ledger_persists_and_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            relay._ledger_add(push_msgs=7, reply_msgs=3)
+            relay2 = self._relay(tmp)
+            relay2._ledger_load()
+            row = relay2._ledger[self._today()]
+            self.assertEqual(row["push_msgs"], 7)
+            self.assertEqual(row["reply_msgs"], 3)
+
+    def test_rollover_emits_send_rollup_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            relay._ledger = {"2020-01-01": {"push_msgs": 5,
+                                            "reply_msgs": 9}}
+            relay._ledger_day = "2020-01-01"
+            with patch.object(line_relay, "_ops_event") as ev:
+                relay._ledger_rollover_check()
+                ev.assert_called_once_with(
+                    "send_rollup", "info", day="2020-01-01",
+                    push_msgs=5, reply_msgs=9)
+            with patch.object(line_relay, "_ops_event") as ev:
+                relay._ledger_rollover_check()  # same day: no re-emit
+                ev.assert_not_called()
+
+    def test_rollover_skips_quiet_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            relay._ledger = {"2020-01-01": {}}
+            relay._ledger_day = "2020-01-01"
+            with patch.object(line_relay, "_ops_event") as ev:
+                relay._ledger_rollover_check()
+                ev.assert_not_called()
+
+    def test_quota_poll_warns_before_wall(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            relay._quota_probe = AsyncMock(
+                return_value={"limit": 300, "used": 285, "remaining": 15})
+            with patch.object(line_relay, "_ops_event") as ev:
+                asyncio.run(relay._quota_poll_once())
+            ev.assert_called_once_with(
+                "quota_low", "warn", limit=300, used=285, remaining=15)
+            self.assertEqual(relay._quota_blocked, 0.0)
+
+    def test_quota_poll_spent_arms_block_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            relay._quota_probe = AsyncMock(
+                return_value={"limit": 300, "used": 300, "remaining": 0})
+            with patch.object(line_relay, "_ops_event") as ev:
+                asyncio.run(relay._quota_poll_once())
+            self.assertGreater(relay._quota_blocked, time.time())
+            self.assertEqual(ev.call_args.args[0], "quota_depleted")
+            # block already set: next poll stays quiet
+            with patch.object(line_relay, "_ops_event") as ev:
+                asyncio.run(relay._quota_poll_once())
+                ev.assert_not_called()
+
+    def test_quota_poll_unlimited_never_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relay = self._relay(tmp)
+            # unlimited plan: remaining = 0 - used goes negative — the
+            # low-water warn must not fire without a limit.
+            relay._quota_probe = AsyncMock(
+                return_value={"limit": None, "used": 5, "remaining": -5})
+            with patch.object(line_relay, "_ops_event") as ev:
+                asyncio.run(relay._quota_poll_once())
+            ev.assert_called_once_with(
+                "quota_status", "info", limit=None, used=5, remaining=-5)
+
+    def test_quota_route_reports_ledger(self):
+        from starlette.testclient import TestClient
+        with tempfile.TemporaryDirectory() as tmp:
+            line_relay.PARKED_DIR = Path(tmp)
+            line_relay.SEND_LEDGER_FILE = Path(tmp) / "ledger.json"
+            app, relay = SendEndpointClass()._app()
+            relay._quota_probe = AsyncMock(
+                return_value={"limit": 300, "used": 10, "remaining": 290})
+            relay._ledger_add(push_msgs=4, reply_msgs=6)
+            client = TestClient(app)
+            body = client.get("/quota").json()
+            self.assertEqual(body["ledger_today"]["push_msgs"], 4)
+            self.assertEqual(body["month_push_msgs"], 4)
 
 
 if __name__ == "__main__":
