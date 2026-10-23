@@ -1,0 +1,118 @@
+# SSOT Job: Phantom-claim gate — denied/failed or never-run actions must
+# not be narrated as success (send/delivery class)
+# Card: ada-phantom-claim-gate (kk-dev kanban). Dispatch
+# 20261023-084031-kk-dev-probes-2026-10-12-1-cha (runner tony-omen).
+
+title: Phantom-claim gate — deterministic post-check + forced re-voice for send claims
+
+planning:
+  goal: |
+    kk-dev probes 2026-10-12, two observed failures of the same class as
+    phantom_write_claim:
+      (1) chat_send photo:pick was policy-DENIED (secondary speaker /
+          doc-bank gate) but Ada told the user the picker was being sent;
+      (2) a catalog-primed run returned cms_read ok, then she claimed
+          delivery with ZERO chat_send calls.
+    Detection existed (phantom_write_claim ops event) but is post-hoc
+    telemetry — the false claim still reached the user's ears. The card
+    asks for provider-level handling: when a tool result is an
+    error/denial or an expected send never fired, the spoken reply must
+    not assert success — deterministic post-check or forced re-voice —
+    verified via a scenario asserting response_not_contains on
+    success-claim phrases after a forced denial.
+  scope: |
+    - backend/realtime_provider.py
+      * _PHANTOM_CLAIM_RE gains send/delivery vocabulary (EN
+        sent/delivered/forwarded/pushed + object, "being sent", "on its
+        way", "sending it"; TH ส่ง…แล้ว/เรียบร้อย, กำลังส่ง).
+      * _CLAIM_SUBJECT_RE — a done-verb on a non-Ada subject ("you sent
+        it", "เขาส่งแล้ว") is not Ada's claim.
+      * _RECALL_CLAIM_RE — past-time frames ("I sent it yesterday",
+        เมื่อวาน/ก่อนหน้า) mark a claim as recall: telemetry still fires,
+        the re-voice stands down (correcting recall speech would narrate
+        a falsehood of our own).
+      * speech_rule injection: a claim-capable call that returns
+        ok:False (gate denial OR tool-level failure) carries
+        _CLAIM_FAILED_SPEECH_RULE in the result blob — the honesty
+        contract travels WITH the result the model composes over.
+      * Forced re-voice (_send_claim_correction): at the FINAL turn
+        boundary, a phantom claim with no ok claim-capable call reopens
+        the model turn — Ada must say aloud, now, that it did not go
+        through (or clarify it meant an earlier turn). One-shot:
+        _revoice_in_flight suppresses re-arm inside the correction turn.
+        Emits phantom_claim_revoice ops event.
+      * Claim-gate counters (tool_calls/failed_results/backing_calls)
+        now reset at the FINAL boundary only — a mid-task reset orphaned
+        segment-1 calls from segment-2 narration, so an ok send could
+        never back a later "sent it" (pre-existing detector hole).
+      * Instructions: DONE MEANS DONE gains the send clause (a message
+        is "sent"/"on its way" only when chat_send returned ok THIS
+        turn) on both instruction variants.
+    - tests/test_provider_events.py — PhantomClaimRevoiceTests
+      (denied send forces correction + phantom_claim_revoice; ok send
+      backs; zero-call delivery claim; cms_read non-backing;
+      speech_rule attached only to claim-capable failures; recall
+      stand-down; correction can't re-arm; honest failure clean) +
+      regex coverage for the new vocabulary and guards.
+    - tests/scenarios-live/chat_send_denied_claim.yaml — forced denial
+      via ?simulate_speaker=KK (secondary speaker → photo:pick hits the
+      secondary block deterministically); response_not_contains on
+      success-claim phrases + a follow-up honesty turn.
+  success_criteria:
+    - 'a denied chat_send + "sent it"/"being sent" narration emits
+      phantom_write_claim AND phantom_claim_revoice and sends exactly
+      one correction turn (send_client_content, turn_complete=True)'
+    - 'an ok chat_send in segment 1 backs a "sent" claim in segment 2
+      (no event, no correction)'
+    - 'zero-send delivery claims and read-only-call turns (cms_read)
+      still arm the re-voice'
+    - 'recall-framed claims emit telemetry but never force a correction'
+    - 'scenario chat_send_denied_claim passes: no success-claim phrase
+      in the reply after the KK secondary-speaker denial'
+  risks:
+    - 'The re-voice adds one model turn per false claim — bounded by
+      _revoice_in_flight (one per claim) and the recall hedge; a
+      pathological re-claim inside the correction only re-fires
+      telemetry.'
+    - 'The counters now persist across mid-task boundaries — mid
+      boundaries judge claims with counters-so-far (unchanged); final
+      boundaries now see the whole turn (fixes a false-positive class
+      that previously flagged honest "sent" narrations).'
+    - 'New claim vocabulary is wider (sent/delivered/on its way) —
+      negation + subject + recall guards bound it, but borderline
+      phrasing may still add ops-event noise (flags, not interventions).'
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-10-23"
+  steps:
+    - id: 1
+      label: "Claim vocabulary: send/delivery + attribution/recall guards"
+      status: done
+      notes: "_PHANTOM_CLAIM_RE send-set EN+TH; _CLAIM_SUBJECT_RE skips verbs on you/he/she/they/เธอ/เขา; _RECALL_CLAIM_RE marks past-time frames for the re-voice stand-down."
+    - id: 2
+      label: "speech_rule on failed claim-capable results"
+      status: done
+      notes: "result.setdefault('speech_rule', _CLAIM_FAILED_SPEECH_RULE) when ok:False and _claim_backing_call — covers gate denials AND tool-level failures; read failures carry no admonition."
+    - id: 3
+      label: "Forced re-voice at final boundary"
+      status: done
+      notes: "_send_claim_correction reopens the model turn with the claim text + failed-call causes; _revoice_in_flight captured per boundary (no re-arm); mid-task boundaries stand down; ops event phantom_claim_revoice."
+    - id: 4
+      label: "Claim-gate counter lifecycle fix"
+      status: done
+      notes: "tool_calls/failed_results/backing_calls reset only when not tools_pending — backing now spans all segments of the user turn."
+    - id: 5
+      label: "Instructions + scenario + verify"
+      status: done
+      notes: "DONE MEANS DONE send clause (both variants); chat_send_denied_claim.yaml via simulate_speaker=KK; 1633 unit tests pass, tool-lint clean, scenario-schema-check clean."
+
+invoke:
+  voice:
+    - '"send the photo picker to my LINE" as secondary speaker -> chat_send photo:pick denied -> reply names the denial, never "sent"'
+  scenario: |
+    python3 scripts/scenario-live.py tests/scenarios-live/chat_send_denied_claim.yaml \
+      --url ws://127.0.0.1:8003/ws --api-key "$ADA_API_KEY" -v
+  env: {}

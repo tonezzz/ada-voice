@@ -6,7 +6,7 @@ from google.genai import types
 
 from backend.realtime_provider import (
     GeminiLiveProvider, _claim_backing_call, _media_grounding_problems,
-    _phantom_claim)
+    _phantom_claim, _RECALL_CLAIM_RE)
 
 
 class InterruptedSession:
@@ -414,6 +414,42 @@ class PhantomClaimRegexTests(unittest.TestCase):
     def test_present_tense_intent_is_not_a_claim(self) -> None:
         self.assertFalse(_phantom_claim("I'll save that for you now."))
 
+    def test_send_claims(self) -> None:
+        """Card ada-phantom-claim-gate (kk-dev probes 2026-10-12): the
+        two observed phantom phrasings — 'being sent' over a denied
+        chat_send photo:pick, and a delivery claim over ZERO sends."""
+        for text in (
+            "Done — I sent it to your LINE.",
+            "It's being sent now.",
+            "The catalog is on its way to you.",
+            "Sending it over now.",
+            "I pushed it to the channel.",
+            "ส่งให้แล้วค่ะ",
+            "ส่งรูปไปแล้ว",
+            "กำลังส่งให้นะคะ",
+        ):
+            self.assertTrue(_phantom_claim(text), text)
+
+    def test_send_non_claims(self) -> None:
+        for text in (
+            "I'll send it in a moment.",       # promise, not a done claim
+            "the photo you sent me is nice",   # the USER's send
+            "you sent it already",
+            "เขาส่งแล้ว",                        # third person's send
+            "เดี๋ยวจะส่งให้นะ",                   # intent, no done marker
+            "I couldn't send it — denied.",
+            "do you want me to send it?",
+        ):
+            self.assertFalse(_phantom_claim(text), text)
+
+    def test_recall_claim_marker(self) -> None:
+        # "I sent it yesterday" still trips the ops detector (telemetry),
+        # but _RECALL_CLAIM_RE marks it so the re-voice stands down.
+        text = "Yes, I sent it yesterday."
+        self.assertTrue(_phantom_claim(text))
+        self.assertTrue(_RECALL_CLAIM_RE.search(text))
+        self.assertFalse(_RECALL_CLAIM_RE.search("I sent it just now."))
+
 
 class ClaimBackingCallTests(unittest.TestCase):
     """Only a mutating/actuating call may back a narrated write claim —
@@ -511,6 +547,151 @@ class PhantomWriteClaimGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_write_still_fires(self):
         fired = await self._run("file", {"ok": False, "error": "nope"})
         self.assertEqual(len(fired), 1)
+
+
+class PhantomSendTurnSession:
+    """A chat_send-shaped call (faked through the runner) then a turn
+    narrating a delivery — plus a second claim turn when `reclaim`, to
+    prove the correction's own boundary can't re-arm the nudge.
+    send_client_content captures the forced re-voice."""
+
+    def __init__(self, provider, tool, result,
+                 claim="Done — I sent it to your LINE.", reclaim=False):
+        self.provider = provider
+        self.tool = tool
+        self.result = result
+        self.claim = claim
+        self.reclaim = reclaim
+        self.responses = []
+        self.contents = []
+        self._sent_call = False
+
+    async def receive(self):
+        if self.tool is not None:
+            yield types.LiveServerMessage(
+                tool_call=types.LiveServerToolCall(function_calls=[
+                    types.FunctionCall(
+                        id="send-1", name=self.tool,
+                        args={"text": "hi"})]))
+            # Gemini's real shape: the call segment closes with its own
+            # turn_complete (a mid-task boundary), THEN the reply segment
+            # ends with the final one.
+            yield types.LiveServerMessage(
+                server_content=types.LiveServerContent(
+                    turn_complete=True))
+        yield types.LiveServerMessage(
+            server_content=types.LiveServerContent(
+                output_transcription=types.Transcription(
+                    text=self.claim),
+                turn_complete=True))
+        if self.reclaim:
+            yield types.LiveServerMessage(
+                server_content=types.LiveServerContent(
+                    output_transcription=types.Transcription(
+                        text=self.claim),
+                    turn_complete=True))
+        self.provider._closed = True
+
+    async def send_tool_response(self, *, function_responses):
+        self.responses.extend(function_responses)
+
+    async def send_client_content(self, **kwargs):
+        self.contents.append(kwargs)
+
+
+class PhantomClaimRevoiceTests(unittest.IsolatedAsyncioTestCase):
+    """Card ada-phantom-claim-gate: an unbacked success claim at the
+    final turn boundary must reopen the model turn for an out-loud
+    correction — a denial narrated as success, or a delivery claimed
+    over zero send calls (kk-dev probes 2026-10-12)."""
+
+    async def _run(self, tool, result, claim=None, reclaim=False):
+        runner = MagicMock()
+        runner.execute = AsyncMock(return_value=result)
+        provider = GeminiLiveProvider(tool_runner=runner)
+        kwargs = {"claim": claim} if claim else {}
+        session = PhantomSendTurnSession(
+            provider, tool, result, reclaim=reclaim, **kwargs)
+        provider._session = session
+        provider._emit_ops_event = MagicMock()
+        async for _ in provider.events():
+            pass
+        return session, [c.args[0] for c in
+                         provider._emit_ops_event.call_args_list]
+
+    async def test_denied_send_claim_forces_revoice(self):
+        session, ops = await self._run(
+            "chat_send", {"ok": False,
+                          "error": "NOT EXECUTED — denied"})
+        self.assertEqual(len(session.contents), 1)
+        self.assertTrue(session.contents[0]["turn_complete"])
+        nudge = session.contents[0]["turns"].parts[0].text
+        self.assertIn("did not happen", nudge)
+        self.assertIn("chat_send", nudge)
+        self.assertIn("phantom_write_claim", ops)
+        self.assertIn("phantom_claim_revoice", ops)
+
+    async def test_failed_result_carries_speech_rule(self):
+        session, _ = await self._run(
+            "chat_send", {"ok": False, "error": "denied"})
+        self.assertIn("speech_rule", session.responses[0].response)
+        self.assertIn("did NOT happen",
+                      session.responses[0].response["speech_rule"])
+
+    async def test_ok_send_backs_the_claim(self):
+        session, ops = await self._run(
+            "chat_send", {"ok": True, "status": "queued"})
+        self.assertEqual(session.contents, [])
+        self.assertNotIn("phantom_write_claim", ops)
+        self.assertNotIn("phantom_claim_revoice", ops)
+
+    async def test_zero_call_delivery_claim_revoces(self):
+        # kk-dev probe 2 shape: a delivery claimed with ZERO sends.
+        session, ops = await self._run(
+            None, None, claim="The catalog is on its way to you.")
+        self.assertEqual(len(session.contents), 1)
+        nudge = session.contents[0]["turns"].parts[0].text
+        self.assertIn("No write/send/actuate call ran", nudge)
+
+    async def test_read_only_call_does_not_back_send_claim(self):
+        # kk-dev probe 2 exact: cms_read ok then claimed delivery.
+        session, ops = await self._run(
+            "cms_read", {"ok": True, "page": {"title": "catalog"}},
+            claim="I sent it to your LINE.")
+        self.assertEqual(len(session.contents), 1)
+
+    async def test_failed_read_only_does_not_carry_speech_rule(self):
+        # The admonition attaches to claim-capable calls only — a failed
+        # READ can't be 'claimed as done'.
+        session, _ = await self._run(
+            "ada_memory_search", {"ok": False, "error": "boom"})
+        self.assertNotIn("speech_rule", session.responses[0].response)
+
+    async def test_recall_framed_claim_stands_down_revoice(self):
+        # "I sent it yesterday" is still phantom_write_claim telemetry,
+        # but a past-time frame must NOT force an out-loud correction.
+        session, ops = await self._run(
+            None, None, claim="Yes, I sent it yesterday.")
+        self.assertIn("phantom_write_claim", ops)
+        self.assertEqual(session.contents, [])
+        self.assertNotIn("phantom_claim_revoice", ops)
+
+    async def test_correction_turn_cannot_rearm(self):
+        # The correction's own boundary sees _in_revoice — a re-claim
+        # inside it fires telemetry again but never a second nudge.
+        session, ops = await self._run(
+            None, None, reclaim=True)
+        self.assertEqual(len(session.contents), 1)
+        self.assertEqual(
+            ops.count("phantom_write_claim"), 2)
+        self.assertEqual(ops.count("phantom_claim_revoice"), 1)
+
+    async def test_honest_failure_report_no_revoice(self):
+        session, ops = await self._run(
+            "chat_send", {"ok": False, "error": "denied"},
+            claim="I couldn't send it — the action was denied.")
+        self.assertEqual(session.contents, [])
+        self.assertNotIn("phantom_claim_revoice", ops)
 
 class MediaClaimGuardTests(unittest.TestCase):
     """ada-tv-action-hallucinated-input (2026-10-09, transcript

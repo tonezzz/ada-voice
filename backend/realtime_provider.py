@@ -289,6 +289,19 @@ _PHANTOM_CLAIM_RE = re.compile(
     r"|บันทึก[^.\n]{0,15}?บอร์ด"
     # display/cast completion claims in Thai — "แสดงผล...แล้ว", "ขึ้นจอ 3 แล้ว"
     r"|(?:แสดงผล|ขึ้น(?:ที่)?จอ|บนจอ|ส่ง(?:ไป)?(?:ที่)?จอ)[^.\n]{0,40}(?:แล้ว|เรียบร้อย)"
+    # send/delivery claims (card ada-phantom-claim-gate — kk-dev probes
+    # 2026-10-12): chat_send photo:pick was policy-DENIED and she still
+    # said it was being sent; another run claimed a catalog delivery
+    # over ZERO chat_send calls. Completed/progressive send frames only —
+    # promises ("I'll send it", "เดี๋ยวส่งให้") carry no done marker and
+    # stay out, as do the user's own sends ("the photo you sent me").
+    r"|\b(?:sent|delivered|forwarded|pushed)\s+"
+    r"(?:it|that|this|them|those|the|an?|to|over|off|out|you(?:r)?)\b"
+    r"|\b(?:it'?s|is)\s+being\s+sent\b"
+    r"|\b(?:it'?s|is)\s+on\s+(?:its|the)\s+way\b"
+    r"|\bsending\s+(?:it|that|this|them|over|off|out)\b"
+    r"|กำลังส่ง"
+    r"|ส่ง[^.\n]{0,30}?(?:แล้ว|เรียบร้อย)"
 )
 # Negated/inability statements aren't claims — "I can't put it on screen"
 # fired phantom_write_claim as often as real phantoms (sampled 2026-09-29:
@@ -298,14 +311,45 @@ _PHANTOM_NEGATION_RE = re.compile(
     r"(?i)(?:can't|cannot|couldn't|won't|wouldn't|not|isn't|aren't"
     r"|unable|ไม่ได้|ยังไม่|ไม่สามารถ)\W*(?:\w+\W+){0,5}$")
 
+# A done-verb sitting directly on a non-Ada subject isn't Ada's claim —
+# "you sent it already" / "เขาส่งแล้ว" reports the OTHER side's action
+# and must not arm the re-voice.
+_CLAIM_SUBJECT_RE = re.compile(
+    r"(?i)(?:you|he|she|they)\s*$|(?:เธอ|คุณ|เขา|หล่อน|พวกเขา|ท่าน)\s*$")
+
 
 def _phantom_claim(text: str) -> bool:
     m = _PHANTOM_CLAIM_RE.search(text)
     while m:
         if not _PHANTOM_NEGATION_RE.search(text[: m.start()][-48:]):
-            return True
+            if not _CLAIM_SUBJECT_RE.search(text[: m.start()][-24:]):
+                return True
         m = _PHANTOM_CLAIM_RE.search(text, m.end())
     return False
+
+
+# Past-time frames make a write/send-shaped clause a RECALL report, not a
+# this-turn claim — "yes, I sent it yesterday" over a zero-tool recall
+# answer is honest. The turn-boundary re-voice checks this and stands
+# down: forcing a correction onto recall speech would itself narrate a
+# falsehood ("nothing was sent"). The phantom_write_claim ops event still
+# fires — telemetry tolerates the noise, a spoken correction does not.
+_RECALL_CLAIM_RE = re.compile(
+    r"(?i)\b(?:earlier|yesterday|last\s+(?:week|night|time|month)|"
+    r"previously|before|a\s+while\s+ago|already\s+did)\b"
+    r"|เมื่อวาน|ก่อนหน้า|เมื่อก่อน|ไปแล้วตั้งแต่|ตั้งแต่(?:เมื่อ)?วาน")
+
+
+# Failed result admonition (card ada-phantom-claim-gate): injected into a
+# claim-capable call's result blob so the "nothing happened" contract
+# travels WITH the result the model composes over — the NOT-EXECUTED
+# prefix covers gate denials only, a tool that ran and came back
+# ok:false had no such marker (probe 1's photo:pick denial was still
+# narrated as 'being sent').
+_CLAIM_FAILED_SPEECH_RULE = (
+    "This action did NOT happen — the call was denied or failed. Do not "
+    "describe it as sent, done, saved, queued, or in progress; say aloud "
+    "that it did not go through and give the reason in one clause.")
 
 
 # What can back a narrated write/done claim: a claim is honest only when
@@ -3032,8 +3076,8 @@ Conversation discipline:
   without resume, acknowledge it aloud in one clause — the connection
   hiccupped and the last moment may be missing — then continue from the
   transcript tail it carries; never contradict what the tail shows.
-- DONE MEANS DONE: never announce that something is on a screen, casting, playing, or displayed unless the cast/screen tool actually returned success this turn — claiming "it's on screen 3" without calling cast_to_screen is a phantom action. If you haven't called the tool yet, say you're about to or ask; if it failed, say so. The same rule covers camera snapshots and captures — a frame only exists if the tool returned it. Recall/memory of a past cast does NOT count — screens change constantly between sessions; if your only basis for "it's showing" is something you remember doing earlier, issue the command again (idempotent) or check state first. Board writes follow the same law: a kanban card exists only when kanban action='file' (or comment/move/ask) returned ok THIS turn — then you may say "on the board" with the card id. Narrating a filed/moved card from intent or memory is a phantom write: the board is the record, so if the tool didn't confirm it, it didn't happen — say the write didn't land and offer to retry.
-- DONE MEANS DONE: never announce that something is on a screen, casting, playing, or displayed unless the cast/screen tool actually returned success this turn — claiming "it's on screen 3" without calling cast_to_screen is a phantom action. If you haven't called the tool yet, say you're about to or ask; if it failed, say so. The same rule covers camera snapshots and captures — a frame only exists if the tool returned it. Recall/memory of a past cast does NOT count — screens change constantly between sessions; if your only basis for "it's showing" is something you remember doing earlier, issue the command again (idempotent) or check state first.
+- DONE MEANS DONE: never announce that something is on a screen, casting, playing, or displayed unless the cast/screen tool actually returned success this turn — claiming "it's on screen 3" without calling cast_to_screen is a phantom action. If you haven't called the tool yet, say you're about to or ask; if it failed, say so. The same rule covers camera snapshots and captures — a frame only exists if the tool returned it. Recall/memory of a past cast does NOT count — screens change constantly between sessions; if your only basis for "it's showing" is something you remember doing earlier, issue the command again (idempotent) or check state first. Board writes follow the same law: a kanban card exists only when kanban action='file' (or comment/move/ask) returned ok THIS turn — then you may say "on the board" with the card id. Narrating a filed/moved card from intent or memory is a phantom write: the board is the record, so if the tool didn't confirm it, it didn't happen — say the write didn't land and offer to retry. Sends obey the same law: a message/photo/document is "sent" or "on its way" only when chat_send returned ok THIS turn — a denied or never-called send must be said aloud as not sent, never narrated from intent.
+- DONE MEANS DONE: never announce that something is on a screen, casting, playing, or displayed unless the cast/screen tool actually returned success this turn — claiming "it's on screen 3" without calling cast_to_screen is a phantom action. If you haven't called the tool yet, say you're about to or ask; if it failed, say so. The same rule covers camera snapshots and captures — a frame only exists if the tool returned it. Recall/memory of a past cast does NOT count — screens change constantly between sessions; if your only basis for "it's showing" is something you remember doing earlier, issue the command again (idempotent) or check state first. Sends obey the same law: "sent/on its way" only when chat_send returned ok THIS turn — a denied or never-called send is said aloud as not sent.
 - TITLE/PLAYING-STATE CLAIMS: never name a specific song, video, or channel title — and never claim playing vs paused — unless a tool result in THIS turn contains it (yt action='status', a media_player state read, a shot). A cast ack or cast_verify='paused' means it is NOT playing; say paused, not the title you expected. If no result reported a title, say you can't tell what's playing — or check first, then answer from the result.
 - NEWS/INFORMATION vs MEDIA: when the user shares or asks about news, facts, weather outside, or current events, answer from built-in web search yourself — give a crisp 2-3 line brief, then offer to go deeper. yt(action='cast')/vcast are ONLY for explicitly requested video/web playback on a screen — never cast information lookups instead of answering them.
 - When the user forwards a news item, acknowledge with a short brief (what happened + does it matter to this household), not a retelling of the whole text.
@@ -3372,6 +3416,11 @@ class GeminiLiveProvider(RealtimeProvider):
         # turn falls through to the synthesized tool-result fallback
         # instead of looping. Cleared when a turn lands a real answer.
         self._dead_retried = False
+        # Phantom-claim re-voice (card ada-phantom-claim-gate): True while
+        # a forced correction turn is in flight — the correction's own
+        # boundary must not re-trigger the check (one re-voice per false
+        # claim, never a loop).
+        self._revoice_in_flight = False
         # Language-drift guard (card ada-output-hygiene-tags): the last
         # clearly-dominant user script — True once a Thai turn lands, back
         # to False on a clearly-English one; filler ("ok", "mhm") doesn't
@@ -3684,6 +3733,49 @@ class GeminiLiveProvider(RealtimeProvider):
             return True
         except Exception:
             logger.debug("dead-turn retry send failed", exc_info=True)
+            return False
+
+    async def _send_claim_correction(self, claim_text: str,
+                                     failed: list[tuple[str, dict]]
+                                     ) -> bool:
+        """Forced re-voice (card ada-phantom-claim-gate): the turn closed
+        on a write/send/done narration that no ok claim-capable call this
+        turn can back — the user already heard a false success claim.
+        Reopen the model turn so it must correct itself aloud, NOW, one
+        honest sentence. The claim text can't be unspoken, so this is the
+        deterministic remediation the detector hands off to: deny-note at
+        result time first, boundary re-voice as the backstop."""
+        if failed:
+            cause = "; ".join(
+                f"{name} → "
+                + _first_speakable_line(
+                    res.get("error") or res.get("output"), limit=100)
+                for name, res in failed[:3] if isinstance(res, dict))
+            what = (f"The call(s) behind it came back failed/denied "
+                    f"({cause}).")
+        else:
+            what = ("No write/send/actuate call ran at all this turn — "
+                    "nothing was dispatched.")
+        nudge = (
+            "[system] Honesty correction — your last reply claimed "
+            f"{claim_text[:160]!r}. {what} The user just heard a success "
+            "claim for an action that did not happen. Correct yourself "
+            "aloud NOW — one short sentence in the session language: say "
+            "it did NOT go through, give the real reason, and offer the "
+            "honest next step. If the claim meant an earlier turn's "
+            "action, say that explicitly instead. No tools, no markup.")
+        try:
+            async with self._send_lock:
+                await self._session.send_client_content(
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=nudge)],
+                    ),
+                    turn_complete=True,
+                )
+            return True
+        except Exception:
+            logger.debug("claim-correction send failed", exc_info=True)
             return False
 
     # An affirmation is a consent utterance, not a content word: it must
@@ -5893,6 +5985,18 @@ class GeminiLiveProvider(RealtimeProvider):
                         result = normalize_tool_result(result)
                         if result.get("ok") is False:
                             failed_results_this_turn += 1
+                            if _claim_backing_call(
+                                    str(call.name),
+                                    dict(call.args or {})):
+                                # Phantom-claim gate (card
+                                # ada-phantom-claim-gate): a claimable
+                                # action that failed/denied must reach the
+                                # model with the honesty contract attached
+                                # — kk-dev probe 1 narrated "being sent"
+                                # over a denied chat_send photo:pick.
+                                result.setdefault(
+                                    "speech_rule",
+                                    _CLAIM_FAILED_SPEECH_RULE)
                         elif _claim_backing_call(
                                 str(call.name), dict(call.args or {})):
                             backing_calls_this_turn += 1
@@ -6054,6 +6158,7 @@ class GeminiLiveProvider(RealtimeProvider):
                     turn_fidelity_calls = []
                     segment_tool_pending = False
                     self._dead_retried = False
+                    self._revoice_in_flight = False
                     self._leak_active = False
                     self._artifact_hold = ""
                     self._artifact_logged = False
@@ -6134,6 +6239,14 @@ class GeminiLiveProvider(RealtimeProvider):
                 if content.turn_complete:
                     tools_pending = segment_tool_pending
                     segment_tool_pending = False
+                    # Forced re-voice (card ada-phantom-claim-gate): True
+                    # only at the boundary of the correction turn itself —
+                    # captured then cleared so a re-claim inside the
+                    # correction can't re-arm the nudge (one per claim).
+                    _in_revoice = self._revoice_in_flight
+                    self._revoice_in_flight = False
+                    _unbacked_claim = ""
+                    _claim_failed: list[tuple[str, dict]] = []
                     transcript = input_transcript.strip()
                     if transcript:
                         if barge_pending and _looks_like_noise(transcript):
@@ -6180,7 +6293,8 @@ class GeminiLiveProvider(RealtimeProvider):
                     # (2026-10-07 flake), and a passed READ doesn't back
                     # a write (card ada-phantom-card-claims: narrated
                     # board cards while only reads/zero calls ran).
-                    if _phantom_claim(assistant_turn_text) and (
+                    _claim_hit = _phantom_claim(assistant_turn_text)
+                    if _claim_hit and (
                             backing_calls_this_turn == 0
                             or failed_results_this_turn):
                         _claim_basis = (
@@ -6193,6 +6307,23 @@ class GeminiLiveProvider(RealtimeProvider):
                             f"assistant claimed a write with {_claim_basis}: "
                             f"{assistant_turn_text.strip()[:160]!r}",
                         )
+                    # Re-voice arm (card ada-phantom-claim-gate): only a
+                    # claim with NO ok claim-capable call behind it is
+                    # provably false — a failed sibling call elsewhere in
+                    # the turn must not make us deny a write that DID
+                    # land. Recall-framed claims ("I sent it yesterday")
+                    # likewise stand down — correcting them would narrate
+                    # a falsehood of our own. tools_pending mid-task
+                    # boundaries arm too but the tail gate stands down —
+                    # a "sending it now" intent line can still earn its
+                    # backing call in the next segment.
+                    if _claim_hit and backing_calls_this_turn == 0 and not (
+                            _RECALL_CLAIM_RE.search(assistant_turn_text)):
+                        _unbacked_claim = assistant_turn_text.strip()[:160]
+                        _claim_failed = [
+                            (n, r) for n, r in turn_tool_results
+                            if isinstance(r, dict)
+                            and r.get("ok") is False]
                     # Media narration guard (card
                     # ada-tv-action-hallucinated-input, 2026-10-09): a
                     # named title or playing claim must literally appear
@@ -6230,9 +6361,16 @@ class GeminiLiveProvider(RealtimeProvider):
                             turn_fidelity_calls)
                         for _ff in _fidelity_flags:
                             self._emit_ops_event("write_fidelity", _ff)
-                    tool_calls_this_turn = 0
-                    failed_results_this_turn = 0
-                    backing_calls_this_turn = 0
+                    if not tools_pending:
+                        # Claim-gate counters reset at the FINAL boundary
+                        # only — a mid-task reset orphaned the call from
+                        # the reply segment's narration, so an ok send in
+                        # segment 1 could never back a "sent it" in
+                        # segment 2 (card ada-phantom-claim-gate). Same
+                        # lifecycle as turn_tool_results below.
+                        tool_calls_this_turn = 0
+                        failed_results_this_turn = 0
+                        backing_calls_this_turn = 0
                     actuations_this_turn = 0
                     budget_hit = False
                     budget_nudged = False
@@ -6384,6 +6522,26 @@ class GeminiLiveProvider(RealtimeProvider):
                                 logger.debug(
                                     "language-lock note send failed",
                                     exc_info=True)
+                    # Forced re-voice (card ada-phantom-claim-gate): the
+                    # turn closed on a success claim nothing backs —
+                    # reopen the model turn so it corrects itself aloud.
+                    # Mid-task boundaries stand down (a pending call can
+                    # still back the claim), the correction's own
+                    # boundary stands down (no re-voice loops), and a
+                    # failed send gets the whole turn's failures handed
+                    # over so the correction can name the real reason.
+                    if (_unbacked_claim and not tools_pending
+                            and not _in_revoice
+                            and await self._send_claim_correction(
+                                _unbacked_claim, _claim_failed)):
+                        self._revoice_in_flight = True
+                        logger.warning(
+                            "session=%s phantom claim re-voice sent: %r",
+                            self.session_id, _unbacked_claim[:120])
+                        self._emit_ops_event(
+                            "phantom_claim_revoice",
+                            f"forced correction after unbacked claim: "
+                            f"{_unbacked_claim!r}")
                     # A notification queued mid-turn — deliver it now that
                     # the response finished, as its own turn.
                     if self._pending_notifications:
