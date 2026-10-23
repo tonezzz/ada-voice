@@ -83,6 +83,11 @@ Env:
                                  day rollover emits 'send_rollup' to the
                                  ops ledger so the monthly burn is
                                  visible without querying LINE
+    LINE_ROOM_PINS             — default ~/.local/share/ada/
+                                 line-room-pins.json: persisted
+                                 interview-room persona pins so a relay
+                                 restart doesn't silently fall back to
+                                 LINE_DEFAULT_PERSONA
     LINE_VOICE_CORPUS_DIR      — default ~/.local/share/ada-voice-corpus/line;
                                  audio clips from enrolled senders land here
                                  (local only — like tg_relay's voice rule)
@@ -244,6 +249,9 @@ LINE_QUOTA_WARN = int(os.environ.get("LINE_QUOTA_WARN", "30"))
 SEND_LEDGER_FILE = Path(os.environ.get(
     "LINE_SEND_LEDGER",
     str(Path.home() / ".local" / "share" / "ada" / "line-send-ledger.json")))
+ROOM_PINS_FILE = Path(os.environ.get(
+    "LINE_ROOM_PINS",
+    str(Path.home() / ".local" / "share" / "ada" / "line-room-pins.json")))
 
 # First-seen member registry (card line-group-member-registry): LINE's
 # group/room members API is gated to verified accounts (404 on
@@ -539,6 +547,22 @@ def _display_name(persona: str, text: str) -> str:
     if text and _THAI_RE.search(text):
         return _name_th().get(persona, persona)
     return persona
+
+
+class _PinMap(dict):
+    """dict that fires on_change when a key actually changes value —
+    lets _route() mutate the room->persona pins while the write-through
+    to ROOM_PINS_FILE stays transparent to its callers."""
+
+    def __init__(self, *a, on_change=None, **kw):
+        super().__init__(*a, **kw)
+        self._on_change = on_change
+
+    def __setitem__(self, key, value):
+        changed = self.get(key) != value
+        super().__setitem__(key, value)
+        if changed and self._on_change is not None:
+            self._on_change()
 
 
 def _route(text: str, is_group: bool, room: str = "",
@@ -925,7 +949,10 @@ class LineRelay:
         # user) pushed persona sends into the owner's DM.
         self._recent_chat: dict[str, tuple[str, float]] = {}
         # Interview-room pins: room chat_id -> last-mentioned persona.
-        self._room_pin: dict[str, str] = {}
+        # Write-through to ROOM_PINS_FILE — a restart reloads the map
+        # instead of silently falling back to LINE_DEFAULT_PERSONA.
+        self._room_pin: dict[str, str] = _PinMap(
+            on_change=self._pins_save)
         self._names: dict[str, str] = {}  # userId -> display label cache
         self._refused: dict[tuple[str, str], float] = {}
         # In-flight image turns waiting out the caption window:
@@ -1050,6 +1077,26 @@ class LineRelay:
                 logger.info("markAsRead %s: %s", r.status_code, r.text[:120])
         except Exception as exc:
             logger.info("markAsRead failed: %s", exc)
+
+    def _pins_load(self) -> None:
+        try:
+            if ROOM_PINS_FILE.is_file():
+                data = json.loads(ROOM_PINS_FILE.read_text())
+                if isinstance(data, dict):
+                    self._room_pin.update(
+                        {str(k): str(v) for k, v in data.items()})
+                    logger.info("room pins loaded: %d room(s)",
+                                len(self._room_pin))
+        except Exception:
+            logger.exception("room-pins load failed")
+
+    def _pins_save(self) -> None:
+        try:
+            ROOM_PINS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ROOM_PINS_FILE.write_text(json.dumps(
+                dict(self._room_pin), sort_keys=True))
+        except Exception:
+            logger.info("room-pins save failed")
 
     def _ledger_load(self) -> None:
         try:
@@ -2503,6 +2550,7 @@ class LineRelay:
         self.http = httpx.AsyncClient(timeout=40)
         asyncio.create_task(self.sweeper())
         self._ledger_load()
+        self._pins_load()
         self._ledger_rollover_check()
         if LINE_QUOTA_POLL_S > 0:
             asyncio.create_task(self._quota_poller())
