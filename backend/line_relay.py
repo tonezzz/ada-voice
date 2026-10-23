@@ -708,11 +708,10 @@ class ChatSession:
         if self.chat_id:
             import urllib.parse
             url += "&chat_id=" + urllib.parse.quote(self.chat_id, safe="")
-        # ada-text-mode-sessions: LINE_TEXT_MODE routes text chats to the
-        # REST text provider — no Live session, metered per call.
-        if os.environ.get("LINE_TEXT_MODE", "").strip().lower() in (
-                "1", "true", "yes"):
-            url += "&mode=text"
+        # text-lane-provider-routing: relay lanes are text-only by nature —
+        # always pin the REST text provider (metered per call, no Live
+        # session). The backend also routes channel=line to it directly.
+        url += "&mode=text"
         self.ws = await websockets.connect(
             url, max_size=8 * 1024 * 1024, ping_interval=20)
         self._rx_task = asyncio.create_task(self._reader())

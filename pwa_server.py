@@ -68,6 +68,28 @@ _drift_warned: dict[str, float] = {}
 _TEXT_ONLY_CALLERS = {s.strip() for s in os.environ.get(
     "ADA_TEXT_ONLY_CALLERS", "").split(",") if s.strip()}
 
+# Channels that always get the text provider (card
+# text-lane-provider-routing): relay text lanes never open a Gemini Live
+# session — the REST text provider runs the identical lane tool set per
+# call, so relay turns stop renting realtime audio minutes. Voice (no
+# channel) stays on Live. Set ADA_TEXT_ONLY_CHANNELS="" to disable
+# channel routing; ?mode=live pins a Live session for debugging.
+_TEXT_ONLY_CHANNELS = {s.strip().lower() for s in os.environ.get(
+    "ADA_TEXT_ONLY_CHANNELS", "telegram,tg,line").split(",") if s.strip()}
+
+
+def _wants_text_provider(mode: str, channel: str | None,
+                         caller: str | None) -> bool:
+    """Provider routing: ?mode=text always forces the REST text provider;
+    ?mode=live always forces Live. Otherwise a relay channel named in
+    ADA_TEXT_ONLY_CHANNELS (default telegram/tg/line) or a caller named
+    in ADA_TEXT_ONLY_CALLERS gets text mode — everything else is Live."""
+    if mode == "text" or caller in _TEXT_ONLY_CALLERS:
+        return True
+    if mode == "live":
+        return False
+    return bool(channel) and channel in _TEXT_ONLY_CHANNELS
+
 
 def _drift_track(name: str, confidence: float, provider) -> None:
     """Feed one identification score; emit voiceprint_drift when the
@@ -1187,12 +1209,15 @@ async def voice_socket(ws: WebSocket) -> None:
         "client": ws.client.host if ws.client else None,
         "ws": ws,
     }
-    # Text mode (ada-text-mode-sessions): ?mode=text or a caller named in
-    # ADA_TEXT_ONLY_CALLERS gets the REST text provider — no Gemini Live
-    # session at all (relay text no longer rents realtime audio minutes).
-    _text_only = (
-        (ws.query_params.get("mode") or "").strip().lower() == "text"
-        or tool_runner.session_caller_name in _TEXT_ONLY_CALLERS)
+    # Text mode (ada-text-mode-sessions, text-lane-provider-routing):
+    # ?mode=text, a caller named in ADA_TEXT_ONLY_CALLERS, or a channel
+    # named in ADA_TEXT_ONLY_CHANNELS (default telegram/tg/line) gets the
+    # REST text provider — no Gemini Live session at all, so relay text
+    # stops renting realtime audio minutes. ?mode=live overrides channel
+    # routing (debug/rollback); the callers list always wins.
+    _mode_param = (ws.query_params.get("mode") or "").strip().lower()
+    _text_only = _wants_text_provider(
+        _mode_param, channel, tool_runner.session_caller_name)
     if _text_only:
         from backend.openrouter_provider import OpenRouterTextProvider
         provider_ref = [OpenRouterTextProvider(
@@ -1200,8 +1225,8 @@ async def voice_socket(ws: WebSocket) -> None:
             conversation=conversation, channel=channel, tools=True,
             caller_name=tool_runner.session_caller_name,
             caller_person=tool_runner.session_caller_ha_person)]
-        logger.info("session=%s text-mode provider (caller=%s)",
-                    session_id, tool_runner.session_caller_name)
+        logger.info("session=%s text-mode provider (channel=%s caller=%s)",
+                    session_id, channel, tool_runner.session_caller_name)
     else:
         provider_ref = [create_provider(
             tool_runner=tool_runner, session_id=session_id, conversation=conversation,
@@ -1801,6 +1826,13 @@ async def voice_socket(ws: WebSocket) -> None:
                         break
                     logger.warning("session=%s provider stream ended: %s", session_id, exc)
                 if closed.is_set():
+                    break
+                if _text_only:
+                    # The REST text provider's events() only ends on
+                    # close() — a dead pump means the session is done.
+                    # Never fall into the Live reconnect path below: a
+                    # text lane must not upgrade into billed realtime
+                    # audio minutes (card text-lane-provider-routing).
                     break
                 # Gemini Live session ended (go_away or drop) — resume with the
                 # last resumption handle instead of killing the browser socket.
