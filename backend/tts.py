@@ -17,7 +17,10 @@ import urllib.error
 import urllib.request
 import wave
 
-from backend import gemini_pool
+try:
+    from backend import gemini_pool
+except ImportError:  # loaded as a script sibling (python backend/tg_relay.py)
+    import gemini_pool
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +39,10 @@ async def synth_pcm(text: str, mddb=None, tool: str = "tts",
                     session_id: str = "") -> bytes | None:
     """Synthesize `text` with Gemini TTS in the instance's configured
     voice — returns raw 24kHz s16le mono PCM, or None on failure."""
-    from backend import voice_config
+    try:
+        from backend import voice_config
+    except ImportError:  # script mode — backend/ itself is sys.path[0]
+        import voice_config
     model = tts_model()
     api_key = gemini_pool.next_key(model)
     if not api_key:
