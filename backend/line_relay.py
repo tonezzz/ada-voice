@@ -210,6 +210,9 @@ _DRIVE_LINK_RE = re.compile(
 _TEXT_URL_RE = re.compile(
     r"(?:https?://|/v1/drive/media/)[^\s<>\)\]\}\"'“”]+")
 _IMG_URL_TAIL = re.compile(r"\.(?:jpe?g|png|webp|gif|heic)$", re.I)
+# Video tails are never image candidates — an arch clip URL in reply
+# text would otherwise fetch the whole mp4 then fail the image check.
+_VID_URL_TAIL = re.compile(r"\.(?:mp4|m4v|mov|webm|mkv)$", re.I)
 
 # Voice corpus: audio clips from enrolled senders (allowed DM users /
 # mapped room members — the same gate a reply sits behind) are saved for
@@ -772,10 +775,32 @@ def _transcribe(path) -> str:
     return " ".join(seg.text.strip() for seg in segments).strip()
 
 
+def _tailnet_only_url(url: str) -> bool:
+    """True when the URL's host is reachable inside the tailnet only —
+    *.ts.net magic-DNS names, loopback, RFC1918 and the 100.64/10 CGNAT
+    range. A link like that plays for the owner's devices but is dead to
+    any LINE member off-tailnet, so the relay re-hosts the bytes
+    publicly before sending it."""
+    import ipaddress
+    import urllib.parse
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    if host.endswith(".ts.net") or host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    # is_global excludes RFC1918, loopback, link-local AND the 100.64/10
+    # CGNAT range Tailscale hands out (which is_private lets through).
+    return not ip.is_global
+
+
 def _images_from(results: list[dict]) -> list[tuple[str, str, str]]:
     """(url, caption, kind) triples found in tool_result payloads — a
     camera snapshot's cast_url turns into an image message in the chat;
-    a render's video_url becomes a LINE videoMessage."""
+    a render's video_url becomes a poster+link pair."""
     out: list[tuple[str, str, str]] = []
     for res in results:
         if not isinstance(res, dict):
@@ -812,6 +837,8 @@ def _mine_image_urls(text: str, limit: int = 3) -> list[str]:
         if u in out:
             continue
         path = u.split("?", 1)[0].split("#", 1)[0]
+        if _VID_URL_TAIL.search(path):
+            continue
         if (_IMG_URL_TAIL.search(path) or _DRIVE_LINK_RE.search(u)
                 or "/v1/drive/media/" in u or "/relay-img/" in u):
             out.append(u)
@@ -1476,11 +1503,38 @@ class LineRelay:
             return [{"type": "text",
                      "text": f"(video: {caption or url})"}]
 
-    async def _video_link_msg(self, url: str, caption: str) -> dict:
-        """ADA-0512 (decided 2026-10-15): LINE lanes get the clip LINK, not
-        the file — sidesteps LINE's size cap and re-encode. TG lanes still
-        get the file via their own relay. _video_msgs stays for the file
-        path if policy flips back."""
+    def _arch_host_video(self, data: bytes, mime: str) -> str | None:
+        """Durable public URL for a fetched clip — writes it under
+        MEDIA_ARCHIVE_DIR/video/, the same /relay-img/arch/<dir>/<file>
+        route inbound media and the render tools publish through. A
+        tailnet-only source URL becomes a link every member can play."""
+        try:
+            ext = _MIME_EXT.get(mime, ".mp4")
+            d = MEDIA_ARCHIVE_DIR / "video"
+            d.mkdir(parents=True, exist_ok=True)
+            import secrets
+            name = (f"clip-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                    f"-{secrets.token_hex(3)}{ext}")
+            (d / name).write_bytes(data)
+        except OSError as exc:
+            logger.warning("arch host video failed: %s", exc)
+            return None
+        return f"{LINE_PUBLIC_IMG_BASE}/arch/video/{name}"
+
+    async def _video_link_msgs(self, url: str, caption: str
+                               ) -> list[dict]:
+        """Hybrid delivery (ADA-0512, refined by card
+        ada-render-video-line-unsendable): a LINE lane gets the poster
+        jpeg + a playable link, not the file — LINE's size cap and
+        re-encode made videoMessage pushes unreliable, and TG lanes
+        still get the mp4 itself via their own relay. The clip is
+        fetched relay-side (this host rides the tailnet, so *.ts.net
+        render URLs resolve), its first frame is hosted publicly as an
+        image bubble, and a tailnet-only source URL is re-hosted on the
+        durable /relay-img/arch lane so the link plays for members
+        off-tailnet too. Any fetch/poster failure degrades to the bare
+        caption+link — the same shape the link-only policy sent.
+        _video_msgs stays for the file path if policy flips back."""
         url = await self._resolve_doc_media(url)
         if url.startswith("/"):
             m = re.search(r"https?://\S+", url)
@@ -1490,13 +1544,47 @@ class LineRelay:
                 base = os.environ.get(
                     "LINE_URL_BASE", "http://100.102.134.91:11023")
                 url = base.rstrip("/") + url
-        text = f"{caption}\n{url}".strip() if caption else url
-        return {"type": "text", "text": text[:4900]}
+        link = url
+        msgs: list[dict] = []
+        try:
+            r = await self.http.get(url, timeout=240,
+                                    follow_redirects=True)
+            if r.status_code == 200 and \
+                    1000 <= len(r.content) <= 190 * 1024 * 1024:
+                poster = await asyncio.to_thread(
+                    self._video_poster, r.content)
+                if poster:
+                    import secrets
+                    pnonce = "vpost-" + secrets.token_urlsafe(12)
+                    self._imgs[pnonce] = (poster, time.time(),
+                                          "image/jpeg")
+                    self._img_persist(pnonce, poster, "image/jpeg")
+                    purl = f"{LINE_PUBLIC_IMG_BASE}/{pnonce}"
+                    msgs.append({"type": "image",
+                                 "originalContentUrl": purl,
+                                 "previewImageUrl": purl})
+                if _tailnet_only_url(url):
+                    mime = (r.headers.get("content-type") or
+                            "video/mp4").split(";")[0]
+                    # only re-host real clip bytes — a tailnet error
+                    # page must not become a durable arch asset
+                    if mime.startswith("video/") or \
+                            b"ftyp" in r.content[:32]:
+                        if not mime.startswith("video/"):
+                            mime = "video/mp4"
+                        hosted = self._arch_host_video(r.content, mime)
+                        if hosted:
+                            link = hosted
+        except Exception as exc:
+            logger.info("video poster/host %s failed: %s", url, exc)
+        text = f"{caption}\n{link}".strip() if caption else link
+        msgs.append({"type": "text", "text": text[:4900]})
+        return msgs
 
     async def _media_msgs(self, url: str, caption: str, kind: str
                           ) -> list[dict]:
         if kind == "video":
-            return [await self._video_link_msg(url, caption)]
+            return await self._video_link_msgs(url, caption)
         return await self._image_msgs(url, caption)
 
     async def _image_msgs(self, url: str, caption: str,
@@ -2430,8 +2518,8 @@ class LineRelay:
                 msgs += await self._image_msgs(
                     str(body["image_url"]), str(body.get("caption") or ""))
             if body.get("video_url"):
-                msgs.append(await self._video_link_msg(
-                    str(body["video_url"]), str(body.get("caption") or "")))
+                msgs += await self._video_link_msgs(
+                    str(body["video_url"]), str(body.get("caption") or ""))
             msgs += await self._mined_msgs(
                 str(body.get("text") or ""),
                 {str(body.get("image_url") or ""),

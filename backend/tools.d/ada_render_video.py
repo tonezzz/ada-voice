@@ -693,9 +693,11 @@ async def _finish(runner: Any, client: httpx.AsyncClient, api_key: str,
         "aspect": ratio,
         "model": _model(),
         "bytes": len(data),
-        "note": "video_url is the playable mp4 clip — send it to a "
-                "display with cast_to_screen(action='play', url=video_url) "
-                "or share the link; 'file' is the local artifact.",
+        "note": "video_url is the playable mp4 clip — LINE/Telegram "
+                "relay lanes deliver it to the chat automatically "
+                "(LINE: poster + link, Telegram: the file itself). "
+                "cast_to_screen(action='play', url=video_url) shows it "
+                "on a display; 'file' is the local artifact.",
     }
     if est_cost is not None:
         out["est_cost_usd"] = est_cost

@@ -1,0 +1,71 @@
+# SSOT Job: hybrid video delivery — LINE gets poster jpeg + link,
+# Telegram gets the file (sendVideo)
+# Card: ada-render-video-line-unsendable (kanban, ref ADA-0512).
+# Dispatch 20261026-070636-hybrid-delivery-per-tony-line-.
+
+title: ada_render_video delivery — LINE poster+link, TG file push
+subtitle: refines ADA-0512's link-only LINE path into poster jpeg +
+  playable link; tailnet-only source URLs are re-hosted on the durable
+  /relay-img/arch lane so members off-tailnet can play them
+
+planning:
+  goal: |
+    Audit 2026-10-12 (session 7a2f02b3db): a LINE-lane ada_render_video
+    returned a tailnet-only input-bridge URL LINE could never fetch,
+    and the relay had no video message type — the clip was unsendable.
+    Tony's spec: LINE lanes get a poster jpeg + link; TG lanes get the
+    video file itself. Done when render output lands playable on both.
+  state_before: |
+    - ada_render_video already publishes the mp4 to
+      {ADA_RELAY_PUBLIC_BASE|LINE_PUBLIC_IMG_BASE}/arch/renders/*.mp4
+      (durable public URL) with a traffic_camera.publish_relay
+      (tailnet-only *.ts.net input-bridge) fallback.
+    - line_relay ADA-0512 (047ca83): video_url -> bare text caption+link
+      (_video_link_msg). No poster.
+    - tg_relay already ships the file: turn media + /send video_url ->
+      send_video -> sendVideo multipart upload (b36c734).
+  decisions: |
+    - LINE = poster jpeg + link, not videoMessage: LINE's size cap and
+      re-encode were the original complaint; the poster lands inline
+      and the link plays at full quality. _video_msgs stays for the
+      file path if policy flips back.
+    - Poster = PyAV first frame (_video_poster, existing helper),
+      hosted on the same /relay-img/<nonce> IMG_CACHE_DIR lane every
+      outbound image uses — TTL'd like all transient sends.
+    - Link = the source URL when it is already public; when the source
+      is tailnet-only (*.ts.net, loopback, RFC1918, 100.64/10 CGNAT —
+      not ip.is_global) the fetched bytes are re-hosted under
+      MEDIA_ARCHIVE_DIR/video/ -> {public}/arch/video/<name>.mp4, the
+      durable arch route, so the text link plays off-tailnet. Non-video
+      bytes (HTML error pages) are never re-hosted.
+    - "tailnet link" in the spec is read as "the render's link" — a
+      public URL is strictly better than a ts.net URL members off the
+      tailnet cannot open (the card's own failure was exactly that).
+    - Fallback preserved: any fetch/poster failure degrades to the bare
+      caption+link text ADA-0512 sent.
+    - _mine_image_urls now skips video tails (.mp4/.m4v/.mov/.webm/.mkv)
+      so a narrated clip URL doesn't get image-mined into a doomed
+      multi-MB fetch.
+    - tg_relay needed no code — sendVideo already covered; added
+      tests/test_tg_relay_video.py to lock the contract.
+    - ada_render_video note + tool_guide now tell the model relays
+      auto-deliver (no chat_send double-push needed).
+
+verification:
+  - tests/test_line_video_link.py — rewritten: tailnet-only host
+    detection, fetch-failure -> bare link, public URL -> [image,text]
+    with original link, tailnet URL -> re-hosted arch/video link +
+    on-disk bytes, poster-failure -> link only. 13 tests pass.
+  - tests/test_tg_relay_video.py — new: send_media video -> sendVideo
+    multipart with real bytes; image kind untouched; fetch failure and
+    >49MB clip -> text link fallback; video_url -> kind='video'. 5 pass.
+  - live smoke (local): real PyAV-encoded mp4 served on 127.0.0.1 ->
+    _video_link_msgs produced [image poster (real jpeg, persisted
+    img-cache), text "demo clip\n{public}/arch/video/clip-*.mp4"].
+  - .venv-test/bin/python -m pytest tests/ -x -q -> 1701 passed,
+    4 skipped.
+  - python3 scripts/tool-lint.py -> clean (57 declared, cap 112).
+  - Not exercised: real LINE/TG API pushes and a billed Veo render —
+    both require live credentials/quota on idc03. First real render on
+    a LINE lane should show poster bubble + arch link; on a TG lane a
+    native playable video.
