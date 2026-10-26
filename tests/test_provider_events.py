@@ -47,6 +47,25 @@ class ExpressionToolSession:
         self.responses.extend(function_responses)
 
 
+class ExpressionStormSession(ExpressionToolSession):
+    """Three expression calls inside one turn — the cosmetic budget
+    (ADA_EXPRESSION_TURN_BUDGET, default 2) must refuse the third
+    without emitting a face change (OPS-0509 token diet)."""
+
+    async def receive(self):
+        for i, expr in enumerate(("sassy", "amused", "alert")):
+            yield types.LiveServerMessage(
+                tool_call=types.LiveServerToolCall(function_calls=[
+                    types.FunctionCall(
+                        id=f"expr-{i}",
+                        name="set_facial_expression",
+                        args={"expression": expr},
+                    )
+                ])
+            )
+        self.provider._closed = True
+
+
 class HabitObservationToolSession(ExpressionToolSession):
     async def receive(self):
         yield types.LiveServerMessage(tool_call=types.LiveServerToolCall(function_calls=[
@@ -159,6 +178,26 @@ class ProviderEventTests(unittest.IsolatedAsyncioTestCase):
         response = session.responses[0]
         self.assertEqual(response.id, "expression-call-1")
         self.assertEqual(response.scheduling, types.FunctionResponseScheduling.WHEN_IDLE)
+
+    async def test_expression_calls_throttled_past_turn_budget(self) -> None:
+        provider = GeminiLiveProvider()
+        session = ExpressionStormSession(provider)
+        provider._session = session
+
+        events = [event async for event in provider.events()]
+
+        self.assertEqual(
+            [event.type for event in events],
+            ["tool_call", "expression", "tool_result",
+             "tool_call", "expression", "tool_result",
+             "tool_call", "tool_result"],
+        )
+        self.assertEqual(len(session.responses), 3)
+        throttled = session.responses[-1]
+        self.assertEqual(throttled.id, "expr-2")
+        # Soft refusal — ok stays true so a cosmetic throttle can't
+        # taint the phantom-claim gate's failed_results count.
+        self.assertIn("unchanged", str(throttled.response).lower())
 
     async def test_habit_observation_tool_emits_structured_event(self) -> None:
         provider=GeminiLiveProvider(); session=HabitObservationToolSession(provider); provider._session=session
