@@ -598,8 +598,10 @@ ada_render_video: >-
   it's cooking, don't repeat the call. A pending result carries
   operation= — call again WITH that operation to keep waiting (no new
   render is billed), never resubmit the same prompt. The result's
-  video_url is the playable mp4; cast_to_screen(action='play',
-  url=video_url) shows it on a display; 'file' is the local artifact.
+  video_url is the playable mp4 — LINE/Telegram lanes deliver it to
+  the chat on their own (LINE: poster + link, Telegram: the file), no
+  chat_send needed; cast_to_screen(action='play', url=video_url)
+  shows it on a display; 'file' is the local artifact.
   Video is owner-only (env-gated per lane) - a refusal meaning 'not
   open on this lane' is a policy answer, not an error; do not retry or
   work around it. Renders are billed per second (est_cost_usd in the
