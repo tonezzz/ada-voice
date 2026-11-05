@@ -777,8 +777,7 @@ OPENCODE_INSTRUCTIONS = (
     "model, key, host, profile, verifier, artifact, or limits, and never "
     "claim a job ran without a board/artifact receipt. Use ada_opencode "
     "action='status' or 'receipts' for follow-up. Plain questions and "
-    "status/spend questions stay in Ada and must not start OpenCode.
-"
+    "status/spend questions stay in Ada and must not start OpenCode.\n"
 )
 
 # Summary rollup tools — tools-merge-calendar-plan (2026-10-05) folded
