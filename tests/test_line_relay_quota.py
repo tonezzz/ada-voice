@@ -62,6 +62,10 @@ class PushClass(unittest.TestCase):
             self.assertEqual(
                 line_relay._push_class({"instance": "ada",
                                         "class": "bulk"}), "bulk")
+            # critical bypasses lane demotion — always pushes
+            self.assertEqual(
+                line_relay._push_class({"instance": "nag",
+                                        "class": "critical"}), "urgent")
 
     def test_is_monthly_limit(self):
         self.assertTrue(line_relay._is_monthly_limit(

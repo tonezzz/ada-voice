@@ -238,6 +238,7 @@ CMS_INSTRUCTIONS = (
     "moment. If the read reports several open cards it picked the most "
     "recently updated — say which card got the comment; if no card links "
     "the report, answer aloud and offer to file one (action='file')."
+    " NEXT — when the user says 'next' without a specific card, call kanban action='next' first. Do not answer with a raw card list. The result checks current doing/review/backlog work, blockers, and safe candidates, then presents the returned next_menu choices. Wait for Tony's choice; choosing a menu item selects the next plan/review step only and never queues or dispatches a job automatically. When Tony picks an option — a webchat button sends 'next choice <id>' or he says it aloud — call kanban action='next_choice' with choice=<id>. The tool re-validates the pick against fresh board state and returns the resolved card plus the read-only step to perform; follow its next_safe_action. If it reports stale, present the fresh next_menu it returns and ask him to pick again. "
     " KANBAN — you review and triage the board with the kanban tool: "
     "list/read/comment/file are always fine; 'move' is yours for "
     "backlog→doing, doing→backlog, and doing→review only; closing a "
@@ -758,6 +759,26 @@ DEVIN_INSTRUCTIONS = (
     "page refreshed, call devin_read action='report' — it puts failed jobs "
     "(including spawn failures the ledger still marks running) in their own "
     "'Failed jobs' section; never list failed jobs among the active ones."
+)
+
+OPENCODE_INSTRUCTIONS = (
+    " OpenCode is a bounded executor behind Ada, not the user-facing "
+    "responder. For implementation work, call ada_opencode action='preflight' "
+    "on the exact card before narrating any envelope. NEVER invent default "
+    "limits or claim that preflight ran: the tool result is the only source "
+    "of truth. Pass the exact bounded task to preflight so its approval "
+    "receipt binds the task. Require the returned explicit model, LiteLLM "
+    "key alias, profile, target host, artifact, resolved verifier, and max "
+    "USD/turn/token/wall-time/retry limits. Show those returned values to "
+    "the user. Only after the user approves that exact receipt may you call "
+    "ada_opencode_dispatch, passing the task, all returned limits, "
+    "approval_receipt, approval_issued_at, and approval_expires_at verbatim. "
+    "Do not retry a schema-error dispatch with guessed or default arguments; "
+    "report the rejected fields and stop. Never silently change the executor, "
+    "model, key, host, profile, verifier, artifact, or limits, and never "
+    "claim a job ran without a board/artifact receipt. Use ada_opencode "
+    "action='status' or 'receipts' for follow-up. Plain questions and "
+    "status/spend questions stay in Ada and must not start OpenCode.\n"
 )
 
 # Summary rollup tools — tools-merge-calendar-plan (2026-10-05) folded
@@ -3210,14 +3231,15 @@ class GeminiLiveProvider(RealtimeProvider):
                   "yourself as Ada and never invent other names; if asked your name "
                   "repeatedly, answer Ada every time.")
             + ("" if self.text_only else
-               " You have a visible animated face. Use the "
-               "set_facial_expression tool to select the expression that best matches "
-               "your response and attitude. Call it once per reply — if you need a memory "
-               "or device tool to answer, run that tool first and set the expression "
-               "while composing the reply instead of before it. You may update it again only if your tone changes "
-               "materially. Prefer neutral for ordinary replies; "
-               "use alert only for genuine urgency or warnings. Never describe or announce "
-               "the tool call to the user.")
+               " You have a visible animated face. The "
+               "set_facial_expression tool changes it, but every call is a full "
+               "extra model round — treat it as expensive. Call it only when the "
+               "face should change because your tone shifted materially (alert "
+               "for genuine urgency or warnings, amused or sassy for banter, "
+               "concerned for bad news); ordinary replies keep the current "
+               "expression, neutral is the default, and most replies need no "
+               "call at all. Over-limit calls are refused. Never describe or "
+               "announce the tool call to the user.")
             + ("" if not self.text_only else
                f" This is a text chat session over {self.channel}: the user "
                "reads your replies as chat messages — answer in plain concise "
@@ -3356,6 +3378,7 @@ class GeminiLiveProvider(RealtimeProvider):
             + CALENDAR_INSTRUCTIONS
             + CMS_INSTRUCTIONS
             + DEVIN_INSTRUCTIONS
+            + OPENCODE_INSTRUCTIONS
             + DOC_INSTRUCTIONS
             + DRIVE_INSTRUCTIONS
             + HABIT_INSTRUCTIONS
@@ -3467,6 +3490,15 @@ class GeminiLiveProvider(RealtimeProvider):
         except RuntimeError:
             self._ops_collection = None
         self._response_active = False
+        # Expression-call throttle (OPS-0509 / expression-call-batching):
+        # a NON_BLOCKING cosmetic call still bills a full tool round
+        # (~28k context resend — session f245275fde ran 234 of them).
+        # _expr_applied_at holds monotonic timestamps of calls that
+        # actually changed the face, used as a rolling 60s window.
+        self._expr_applied_at: list[float] = []
+        # One ops event per session is enough — the minute window can
+        # refuse for the rest of a chatty session.
+        self._expr_throttle_noted = False
         # True while a user turn is open: input_transcription seen but the
         # turn hasn't completed/interrupted yet. A turn_complete=False
         # context note sent mid-turn can be dropped by the API — gate
@@ -5414,6 +5446,15 @@ class GeminiLiveProvider(RealtimeProvider):
         tool_budget = int(os.environ.get("ADA_TOOL_CALL_BUDGET", "20"))
         actuations_this_turn = 0
         actuation_budget = int(os.environ.get("ADA_ACTUATION_BUDGET", "6"))
+        # Cosmetic-call budgets (OPS-0509): set_facial_expression gets its
+        # own caps — the generic 20/turn budget only bites once a storm is
+        # already expensive, and the instructed once-per-reply cadence
+        # never trips it at all. 0 disables the tool outright.
+        expr_calls_this_turn = 0
+        expr_turn_budget = int(os.environ.get(
+            "ADA_EXPRESSION_TURN_BUDGET", "2"))
+        expr_minute_budget = int(os.environ.get(
+            "ADA_EXPRESSION_MINUTE_BUDGET", "4"))
         budget_hit = False
         barge_pending = False  # a barge-in's transcript arrives next turn_complete
         input_done_ts = 0.0  # last input_transcription chunk ≈ end of user speech
@@ -5572,8 +5613,45 @@ class GeminiLiveProvider(RealtimeProvider):
                                 f"{call.name} is not available on this "
                                 "lane — answer with the tools you have.")}
                         elif call.name == "set_facial_expression" and requested in EXPRESSION_NAMES:
-                            yield ProviderEvent("expression", {"name": requested})
-                            result = {"output": f"{_ADA_DISPLAY_NAME} is now {requested}"}
+                            # Token diet (OPS-0509 /
+                            # expression-call-batching): every expression
+                            # call is a billed model round — the over-cap
+                            # call itself already cost the resend, so the
+                            # refusal's job is stopping the NEXT one.
+                            # An ok result carries the steer: ok:false
+                            # would count in failed_results_this_turn and
+                            # taint the phantom-claim gate for a cosmetic
+                            # refusal, while a hard "invalid" error invites
+                            # a retry (another billed round).
+                            expr_calls_this_turn += 1
+                            _expr_now = time.monotonic()
+                            self._expr_applied_at = [
+                                t for t in self._expr_applied_at
+                                if _expr_now - t < 60.0]
+                            if (expr_calls_this_turn > expr_turn_budget
+                                    or len(self._expr_applied_at)
+                                    >= expr_minute_budget):
+                                if not self._expr_throttle_noted:
+                                    self._expr_throttle_noted = True
+                                    self._emit_ops_event(
+                                        "expression_throttled",
+                                        "set_facial_expression refused by "
+                                        "the cosmetic-call budget "
+                                        f"({expr_turn_budget}/turn, "
+                                        f"{expr_minute_budget}/min) — "
+                                        "OPS-0509 token diet.",
+                                        tool="set_facial_expression")
+                                result = {"output": (
+                                    "Expression unchanged — facial-expression "
+                                    "updates are capped for now; do not call "
+                                    "set_facial_expression again unless the "
+                                    "tone clearly demands it.")}
+                            else:
+                                self._expr_applied_at.append(_expr_now)
+                                yield ProviderEvent(
+                                    "expression", {"name": requested})
+                                result = {"output": (
+                                    f"{_ADA_DISPLAY_NAME} is now {requested}")}
                         elif (call.name == "get_home_state"
                               # entity_id=/domain= reads route to the
                               # runner (tools-merge-ha) — the fast path
@@ -6024,10 +6102,24 @@ class GeminiLiveProvider(RealtimeProvider):
                             dur_ms=int((time.monotonic() - tool_t0) * 1000),
                             ok=bool(result.get("ok", True)),
                             result_hash=result_hash)
+                        _ws_result = (_safe_args(result)
+                                      if isinstance(result, dict)
+                                      else {"value": str(result)[:500]})
+                        # The webchat needs the bounded next-menu structure
+                        # to render clickable choices; keep all other tool
+                        # results on the small trace-safe stump.
+                        if (isinstance(result, dict)
+                                and result.get("operation")
+                                in ("next", "next_choice")
+                                and isinstance(result.get("next_menu"), list)):
+                            _ws_result["question_id"] = result.get("question_id")
+                            _ws_result["expires_at"] = result.get("expires_at")
+                            _ws_result["next_menu"] = _json_safe(
+                                result.get("next_menu"))
                         yield ProviderEvent("tool_result", {
                             "id": str(call.id or ""),
                             "name": str(call.name),
-                            "result": _safe_args(result) if isinstance(result, dict) else {"value": str(result)[:500]},
+                            "result": _ws_result,
                             "result_hash": result_hash,
                         })
                         if self._trace_full:
@@ -6149,6 +6241,7 @@ class GeminiLiveProvider(RealtimeProvider):
                     )
                     self._response_active = False
                     tool_calls_this_turn = 0
+                    expr_calls_this_turn = 0
                     failed_results_this_turn = 0
                     backing_calls_this_turn = 0
                     actuations_this_turn = 0
@@ -6369,6 +6462,7 @@ class GeminiLiveProvider(RealtimeProvider):
                         # segment 2 (card ada-phantom-claim-gate). Same
                         # lifecycle as turn_tool_results below.
                         tool_calls_this_turn = 0
+                        expr_calls_this_turn = 0
                         failed_results_this_turn = 0
                         backing_calls_this_turn = 0
                     actuations_this_turn = 0

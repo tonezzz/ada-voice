@@ -85,6 +85,58 @@ logger = logging.getLogger("tg_relay")
 
 TG_API = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+
+
+class _TelegramTokenRedactionFilter(logging.Filter):
+    """Remove the Bot API token from messages and formatted tracebacks."""
+
+    def __init__(self, token: str):
+        super().__init__()
+        self._token = token
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._token:
+            return True
+        try:
+            message = record.getMessage()
+            safe_message = message.replace(self._token, "[REDACTED]")
+            if safe_message != message:
+                record.msg, record.args = safe_message, ()
+        except Exception:
+            pass
+        if record.exc_info:
+            try:
+                rendered = logging.Formatter().formatException(record.exc_info)
+                if self._token in rendered:
+                    record.exc_text = rendered.replace(
+                        self._token, "[REDACTED]")
+                    record.exc_info = None
+            except Exception:
+                pass
+        elif record.exc_text and self._token in record.exc_text:
+            record.exc_text = record.exc_text.replace(
+                self._token, "[REDACTED]")
+        return True
+
+
+def _install_telegram_log_safety() -> _TelegramTokenRedactionFilter | None:
+    if not BOT_TOKEN:
+        return None
+    token_filter = _TelegramTokenRedactionFilter(BOT_TOKEN)
+    root = logging.getLogger()
+    loggers = [root, logger, logging.getLogger("httpx"),
+               logging.getLogger("httpcore")]
+    for log in loggers:
+        log.addFilter(token_filter)
+        for handler in log.handlers:
+            handler.addFilter(token_filter)
+    # httpx logs full request URLs at INFO, which includes /bot<TOKEN>/.
+    for name in ("httpx", "httpcore"):
+        client_logger = logging.getLogger(name)
+        client_logger.setLevel(max(client_logger.level, logging.WARNING))
+    return token_filter
+
+
 ADA_WS_URL = os.environ.get("ADA_WS_URL", "ws://127.0.0.1:8002/ws")
 ADA_API_KEY = os.environ.get("ADA_API_KEY", "")
 IDLE_SESSION_S = float(os.environ.get("TELEGRAM_IDLE_SESSION_S", "600"))
@@ -1291,6 +1343,7 @@ async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s tg_relay: %(message)s")
+    _install_telegram_log_safety()
     if not BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN not set")
     if not ADA_API_KEY:

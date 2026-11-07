@@ -1,0 +1,180 @@
+"""devnest_news — publish a verified public DevNest News article.
+
+Ada orchestrates the event; board-api owns validation, idempotency, retry,
+and the MediaWiki credential boundary. This tool never talks to MediaWiki
+directly and never receives Wiki credentials.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from backend import board_client
+
+_GEO_SCOPES = {"world", "region", "country", "subnational", "local", "project"}
+_VISIBILITY = "public"
+
+DECLARATION = {
+    "name": "devnest_news",
+    "description": (
+        "Publish one verified, source-backed public DevNest News article "
+        "through board-api into the MediaWiki News hierarchy. Use only "
+        "after the user explicitly approves the exact title and body. "
+        "Private or members-only content is not supported yet."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Article title."},
+            "body": {"type": "string", "description": "Article body."},
+            "summary": {
+                "type": "string",
+                "description": "One factual quick-glance sentence, <=80 chars.",
+            },
+            "source_url": {
+                "type": "string",
+                "description": "Primary evidence/source URL.",
+            },
+            "source_published_at": {
+                "type": "string",
+                "description": "Exact source publication timestamp.",
+            },
+            "wiki_title": {
+                "type": "string",
+                "description": (
+                    "Canonical page title under News/, e.g. "
+                    "News/Desks/DevNest/Projects/Release."
+                ),
+            },
+            "desk": {
+                "type": "string",
+                "description": "Editorial desk, normally DevNest.",
+            },
+            "geo_scope": {
+                "type": "string",
+                "description": (
+                    "One of world, region, country, subnational, local, "
+                    "project."
+                ),
+            },
+            "topic": {"type": "string", "description": "News topic."},
+            "parent": {
+                "type": "string",
+                "description": "Parent News/ hierarchy page.",
+            },
+            "country": {"type": "string"},
+            "region": {"type": "string"},
+            "private_wiki_title": {"type": "string"},
+            "review_revid": {"type": "integer"},
+            "diagnosis_id": {"type": "string"},
+            "card_ref": {"type": "string"},
+        },
+        "required": [
+            "title", "body", "summary", "source_url", "source_published_at",
+            "wiki_title", "desk", "geo_scope", "topic", "parent",
+        ],
+    },
+}
+
+
+def _text(args: dict[str, Any], key: str) -> str:
+    return str(args.get(key) or "").strip()
+
+
+def _validate(args: dict[str, Any]) -> str | None:
+    for key in ("title", "body", "source_url", "source_published_at",
+                "wiki_title", "desk", "geo_scope", "topic", "parent"):
+        if not _text(args, key):
+            return f"{key} is required"
+    wiki_title = _text(args, "wiki_title")
+    summary = _text(args, "summary")
+    parent = _text(args, "parent")
+    if not wiki_title.startswith("News/"):
+        return "wiki_title must start with News/"
+    if "\n" in wiki_title or "\r" in wiki_title:
+        return "wiki_title must be one line"
+    if len(summary) > 80:
+        return "summary must be <=80 characters"
+    if not parent.startswith("News/"):
+        return "parent must start with News/"
+    promotion_fields = ("private_wiki_title", "review_revid",
+                        "diagnosis_id", "card_ref")
+    if any(args.get(key) not in (None, "") for key in promotion_fields):
+        if not _text(args, "private_wiki_title").startswith("PrivateNews:"):
+            return "private_wiki_title is required for promotion"
+        if args.get("review_revid") in (None, ""):
+            return "review_revid is required for promotion"
+        if not _text(args, "diagnosis_id"):
+            return "diagnosis_id is required for promotion"
+        if not _text(args, "card_ref"):
+            return "card_ref is required for promotion"
+    scope = _text(args, "geo_scope").lower()
+    if scope not in _GEO_SCOPES:
+        return f"geo_scope must be one of {sorted(_GEO_SCOPES)}"
+    if not _text(args, "source_url").startswith(("https://", "http://")):
+        return "source_url must be an http(s) URL"
+    return None
+
+
+async def run(runner: Any, **args: Any) -> dict[str, Any]:
+    error = _validate(args)
+    if error:
+        return {"ok": False, "error": error}
+
+    event = {
+        "kind": "news",
+        "title": _text(args, "title"),
+        "body": _text(args, "body"),
+        "summary": _text(args, "summary"),
+        "source": "ada",
+        "from": "ada",
+        "confidence": "verified",
+        "visibility": _VISIBILITY,
+        "evidence": [_text(args, "source_url")],
+        "sinks": ["wiki"],
+        "meta": {
+            "wiki_title": _text(args, "wiki_title"),
+            "status": "published",
+            "summary": _text(args, "summary"),
+            "desk": _text(args, "desk"),
+            "geo_scope": _text(args, "geo_scope").lower(),
+            "topic": _text(args, "topic"),
+            "parent": _text(args, "parent"),
+            "source_published_at": _text(args, "source_published_at"),
+            "source_name": _text(args, "desk"),
+        },
+    }
+    for key in ("country", "region"):
+        value = _text(args, key)
+        if value:
+            event["meta"][key] = value
+    if args.get("private_wiki_title"):
+        event["card"] = _text(args, "card_ref")
+        event["meta"].update({
+            "promotion": "private-to-public",
+            "private_wiki_title": _text(args, "private_wiki_title"),
+            "review_revid": int(args["review_revid"]),
+            "diagnosis_id": _text(args, "diagnosis_id"),
+        })
+
+    status, result = await board_client.post("/publish", event, timeout=45)
+    if status <= 0:
+        return {"ok": False, "error": result.get("error", "board unavailable")}
+    if status >= 400 or not result.get("ok", True):
+        return {"ok": False, "error": result.get("error", result)}
+    receipt = result.get("receipts", {}).get("wiki", {})
+    if receipt.get("status") != "delivered":
+        return {
+            "ok": False,
+            "error": f"Wiki publication was not delivered: {receipt}",
+            "publication": result,
+        }
+    return {
+        "ok": True,
+        "status": "published",
+        "title": event["title"],
+        "wiki_title": event["meta"]["wiki_title"],
+        "receipt": receipt,
+        "event_id": result.get("event_id"),
+        "note": "Published through board-api; Ada did not hold Wiki credentials.",
+    }

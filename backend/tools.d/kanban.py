@@ -37,6 +37,8 @@ Authority matrix (design §3):
 from __future__ import annotations
 
 import re
+import secrets
+import time
 from typing import Any
 
 import httpx
@@ -51,9 +53,9 @@ _HTTP_TIMEOUT = 75.0
 DECLARATION = {
     "name": "kanban",
     "description": (
-        "Kanban board — action='list'|'read'|'comment'|'move'|'ask'|"
-        "'file'|'respond'. Moves need the right authority: free within "
-        "triage, evidence= to close review cards, Tony's confirm beyond."
+        "Kanban board — action='next'|'next_choice'|'list'|'read'|"
+        "'comment'|'move'|'ask'|'file'|'respond'. next/next_choice are "
+        "read-only menus; moves need triage authority or Tony's confirm."
     ),
     "parameters": {
         "type": "object",
@@ -62,8 +64,18 @@ DECLARATION = {
                 "type": "string",
                 "description": "'list' (default read of the board), "
                                "'read' (one card, id= or report=), "
+                               "'next_choice' (resolve a next_menu pick), "
                                "'comment', 'move', 'ask', 'file' "
                                "('create' accepted), 'respond'.",
+            },
+            "choice": {
+                "type": "string",
+                "description": "action=next_choice only: the option id "
+                               "from the last next_menu, e.g. "
+                               "'plan:ADA-1010', 'review:X', "
+                               "'continue:Y', or 'stop'. Re-validated "
+                               "against fresh board state — a stale "
+                               "option is refused with a fresh menu.",
             },
             "id": {
                 "type": "string",
@@ -449,6 +461,119 @@ async def _list(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _next_rank(cards: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a read-only next-step menu from current board truth."""
+    active, review, backlog = [], [], []
+    blockers = []
+    for card in cards:
+        col = str(card.get("column") or "backlog")
+        compact = _compact_card(card)
+        open_reqs = compact.get("open_requests", 0)
+        if open_reqs:
+            blockers.append(compact)
+        if col == "doing":
+            active.append(compact)
+        elif col == "review":
+            review.append(compact)
+        elif col == "backlog" and not open_reqs:
+            backlog.append(compact)
+    key = lambda c: (str(c.get("updated") or ""), str(c.get("id") or ""))
+    active.sort(key=key, reverse=True)
+    review.sort(key=key, reverse=True)
+    backlog.sort(key=lambda c: (str(c.get("priority") or "medium") != "high", -len(str(c.get("title") or "")), str(c.get("updated") or "")))
+    menu = []
+    for c in active[:3]:
+        menu.append({"id": f"continue:{c['id']}", "label": f"Continue: {c['title']}", "card_id": c["id"], "operation": "plan"})
+    for c in review[:3]:
+        menu.append({"id": f"review:{c['id']}", "label": f"Review: {c['title']}", "card_id": c["id"], "operation": "review"})
+    for c in backlog[:3]:
+        menu.append({"id": f"plan:{c['id']}", "label": f"Plan: {c['title']}", "card_id": c["id"], "operation": "plan"})
+    menu.append({"id": "stop", "label": "Stop", "operation": "stop"})
+    return {
+        "ok": True, "operation": "next",
+        "question_id": "next-" + secrets.token_urlsafe(9),
+        "expires_at": time.time() + 900,
+        "current_work": active[:3], "review_ready": review[:3],
+        "safe_candidates": backlog[:3], "blockers": blockers[:8],
+        "next_menu": menu, "mutations_performed": [],
+        "next_safe_action": "present the menu and wait for Tony's choice; do not queue or dispatch",
+    }
+
+
+async def _next(ctx: Any) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        data, err = await _request(client, "GET", "/cards", ctx=ctx)
+    if err:
+        return {"ok": False, "operation": "next", "error": err}
+    return _next_rank(_cards_only((data or {}).get("cards")))
+
+
+# What Ada does with each menu prefix once the choice resolves. Every
+# branch is read-only narration/planning — a menu pick never queues,
+# dispatches, moves, merges, or deploys.
+_NEXT_CHOICE_GUIDANCE = {
+    "continue": ("the card is in 'doing' — report where the work stands "
+                 "(action.status, open requests, last comms) and the next "
+                 "safe step; read-only, do not queue or dispatch"),
+    "review": ("the card is in 'review' — summarize the evidence present, "
+               "what is missing, and what Tony must decide; do not "
+               "approve, close, merge, or deploy"),
+    "plan": ("read-only planning step — summarize the card's objective, "
+             "current state, and smallest safe next step; do not queue, "
+             "dispatch, move, or deploy"),
+    "stop": ("stop — end the next-step flow; take no board action unless "
+             "Tony asks"),
+}
+
+
+async def _next_choice(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a next_menu pick ('next choice <id>' text turn or a
+    webchat button) against FRESH board state. Menu ids are deterministic
+    (continue:<id>, review:<id>, plan:<id>, stop); re-ranking means a
+    card that moved columns or gained a blocker drops out of the menu and
+    the pick is refused as stale instead of acting on an old snapshot."""
+    choice = str(args.get("choice") or args.get("option") or "").strip()
+    if not choice:
+        return {"ok": False, "operation": "next_choice",
+                "error": "choice is required — pass the option id from "
+                         "the next_menu (e.g. 'plan:ADA-1010' or "
+                         "'stop')"}
+    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        data, err = await _request(client, "GET", "/cards", ctx=ctx)
+    if err:
+        return {"ok": False, "operation": "next_choice", "error": err}
+    cards = _cards_only((data or {}).get("cards"))
+    ranked = _next_rank(cards)
+    menu = ranked.get("next_menu") or []
+    option = next((o for o in menu
+                   if str(o.get("id") or "") == choice), None)
+    if option is None:
+        return {"ok": False, "operation": "next_choice", "stale": True,
+                "choice": choice,
+                "error": "that option is no longer on the fresh menu — "
+                         "the board changed since it was shown; present "
+                         "the new next_menu and let Tony pick again",
+                "next_menu": menu,
+                "question_id": ranked.get("question_id"),
+                "expires_at": ranked.get("expires_at")}
+    prefix = choice.split(":", 1)[0]
+    out: dict[str, Any] = {
+        "ok": True, "operation": "next_choice",
+        "choice": choice,
+        "menu_operation": option.get("operation"),
+        "next_safe_action": _NEXT_CHOICE_GUIDANCE.get(
+            prefix, _NEXT_CHOICE_GUIDANCE["plan"]),
+    }
+    cid = str(option.get("card_id") or "")
+    card = _resolve_in(cards, cid) if cid else None
+    if card is not None:
+        out["card"] = _full_card(card)
+    elif cid:
+        out["warning"] = (f"menu pointed at {cid} but the card is no "
+                          "longer readable — re-run action='next'")
+    return out
+
+
 async def _read(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     cid = _card_id(args)
     if not cid:
@@ -822,6 +947,10 @@ async def run(runner: Any, confirmed: Any = None,
         return {"ok": False,
                 "error": "board writes are the session owner's — ask "
                          "them to make the change in their own voice"}
+    if action == "next":
+        return await _next(ctx)
+    if action == "next_choice":
+        return await _next_choice(ctx, args)
     if action == "list":
         return await _list(ctx, args)
     if action == "read":
@@ -837,5 +966,6 @@ async def run(runner: Any, confirmed: Any = None,
     if action == "respond":
         return await _respond(runner, args)
     return {"ok": False,
-            "error": f"unknown action {action!r} — use list, read, "
-                     "comment, move, ask, file, or respond"}
+            "error": f"unknown action {action!r} — use next, "
+                     "next_choice, list, read, comment, move, ask, "
+                     "file, or respond"}

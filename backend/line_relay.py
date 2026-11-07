@@ -41,9 +41,23 @@ Env:
                                  (429) park here and ride the next free
                                  replyToken on that chats next inbound
                                  (OPS-0651)
+    LINE_REGISTRY_COLL         — default "line-user-registry": mddb
+                                 collection that records each room
+                                 member on first sighting (LINE's
+                                 members API is gated to verified
+                                 accounts, so rooms can't be
+                                 pre-enumerated — members register by
+                                 speaking). Set "" to disable.
+    LINE_REGISTRY_RETRY_S      — default 300: cooldown before a failed
+                                 registry write retries on the member's
+                                 next message
     LINE_BULK_LANES            — comma list of /send `instance` values
                                  forced to class=bulk regardless of the
-                                 body's class field
+                                 body's class field — except class=
+                                 'critical', which always pushes
+                                 (quota-gated policy: critical-only
+                                 proactive sends, everything else parks
+                                 for a free replyToken)
     LINE_BULK_COALESCE_S       — default 300: class=bulk /send payloads
                                  park durably, then flush as ONE bundled
                                  push after this debounce — adjacent text
@@ -69,6 +83,11 @@ Env:
                                  day rollover emits 'send_rollup' to the
                                  ops ledger so the monthly burn is
                                  visible without querying LINE
+    LINE_ROOM_PINS             — default ~/.local/share/ada/
+                                 line-room-pins.json: persisted
+                                 interview-room persona pins so a relay
+                                 restart doesn't silently fall back to
+                                 LINE_DEFAULT_PERSONA
     LINE_VOICE_CORPUS_DIR      — default ~/.local/share/ada-voice-corpus/line;
                                  audio clips from enrolled senders land here
                                  (local only — like tg_relay's voice rule)
@@ -191,6 +210,9 @@ _DRIVE_LINK_RE = re.compile(
 _TEXT_URL_RE = re.compile(
     r"(?:https?://|/v1/drive/media/)[^\s<>\)\]\}\"'“”]+")
 _IMG_URL_TAIL = re.compile(r"\.(?:jpe?g|png|webp|gif|heic)$", re.I)
+# Video tails are never image candidates — an arch clip URL in reply
+# text would otherwise fetch the whole mp4 then fail the image check.
+_VID_URL_TAIL = re.compile(r"\.(?:mp4|m4v|mov|webm|mkv)$", re.I)
 
 # Voice corpus: audio clips from enrolled senders (allowed DM users /
 # mapped room members — the same gate a reply sits behind) are saved for
@@ -214,7 +236,9 @@ PARKED_DIR = Path(os.environ.get(
 # Push classes (card linepush-quota-audit): LINE meters *messages* on
 # push — replies are free. class=urgent payloads always attempt the push
 # API; class=bulk payloads park first and flush bundled after
-# LINE_BULK_COALESCE_S (or free, on the chat's next replyToken). A
+# LINE_BULK_COALESCE_S (or free, on the chat's next replyToken);
+# class=critical always pushes regardless of lane demotion — the escape
+# hatch for ops alerts while bulk runs reply-only. A
 # confirmed 429 monthly-limit sets _quota_blocked for LINE_QUOTA_RETRY_S
 # so a spent month stops generating doomed bulk calls.
 LINE_BULK_COALESCE_S = float(os.environ.get("LINE_BULK_COALESCE_S", "300"))
@@ -228,6 +252,35 @@ LINE_QUOTA_WARN = int(os.environ.get("LINE_QUOTA_WARN", "30"))
 SEND_LEDGER_FILE = Path(os.environ.get(
     "LINE_SEND_LEDGER",
     str(Path.home() / ".local" / "share" / "ada" / "line-send-ledger.json")))
+ROOM_PINS_FILE = Path(os.environ.get(
+    "LINE_ROOM_PINS",
+    str(Path.home() / ".local" / "share" / "ada" / "line-room-pins.json")))
+
+# First-seen member registry (card line-group-member-registry): LINE's
+# group/room members API is gated to verified accounts (404 on
+# /members/ids 2026-10-11), so a new room's members cannot be
+# pre-enumerated — the relay learns them as they first speak and upserts
+# mddb line-user-registry/<userId> for the operator to bind in
+# LINE_USER_CALLERS. Empty/"off" disables the write.
+LINE_REGISTRY_COLL = os.environ.get(
+    "LINE_REGISTRY_COLL", "line-user-registry")
+LINE_REGISTRY_RETRY_S = float(
+    os.environ.get("LINE_REGISTRY_RETRY_S", "300"))
+
+_registry_mddb: Any = None
+
+
+def _registry_store():
+    """Shared mddb client for the member registry — lazy like
+    _speaker_id so the relay still starts when the memory stack is
+    absent. None disables the registry."""
+    global _registry_mddb
+    if LINE_REGISTRY_COLL.strip().lower() in ("", "off", "0"):
+        return None
+    if _registry_mddb is None:
+        from backend.mddb_client import MddbClient
+        _registry_mddb = MddbClient()
+    return _registry_mddb
 
 
 def _bulk_lanes() -> set[str]:
@@ -248,6 +301,8 @@ def _push_class(body: dict) -> str:
     else is urgent — it always attempts the push API."""
     cls = str(body.get("class") or body.get("priority")
               or "urgent").strip().lower()
+    if cls == "critical":
+        return "urgent"  # critical always pushes — bypasses bulk lanes
     inst = str(body.get("instance") or "").strip()
     if cls != "bulk" and inst in _bulk_lanes():
         cls = "bulk"
@@ -497,6 +552,22 @@ def _display_name(persona: str, text: str) -> str:
     return persona
 
 
+class _PinMap(dict):
+    """dict that fires on_change when a key actually changes value —
+    lets _route() mutate the room->persona pins while the write-through
+    to ROOM_PINS_FILE stays transparent to its callers."""
+
+    def __init__(self, *a, on_change=None, **kw):
+        super().__init__(*a, **kw)
+        self._on_change = on_change
+
+    def __setitem__(self, key, value):
+        changed = self.get(key) != value
+        super().__setitem__(key, value)
+        if changed and self._on_change is not None:
+            self._on_change()
+
+
 def _route(text: str, is_group: bool, room: str = "",
            pinned: dict | None = None) -> tuple[str | None, str]:
     """(persona, turn_text) for a message — None persona means ignore.
@@ -704,10 +775,32 @@ def _transcribe(path) -> str:
     return " ".join(seg.text.strip() for seg in segments).strip()
 
 
+def _tailnet_only_url(url: str) -> bool:
+    """True when the URL's host is reachable inside the tailnet only —
+    *.ts.net magic-DNS names, loopback, RFC1918 and the 100.64/10 CGNAT
+    range. A link like that plays for the owner's devices but is dead to
+    any LINE member off-tailnet, so the relay re-hosts the bytes
+    publicly before sending it."""
+    import ipaddress
+    import urllib.parse
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    if host.endswith(".ts.net") or host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    # is_global excludes RFC1918, loopback, link-local AND the 100.64/10
+    # CGNAT range Tailscale hands out (which is_private lets through).
+    return not ip.is_global
+
+
 def _images_from(results: list[dict]) -> list[tuple[str, str, str]]:
     """(url, caption, kind) triples found in tool_result payloads — a
     camera snapshot's cast_url turns into an image message in the chat;
-    a render's video_url becomes a LINE videoMessage."""
+    a render's video_url becomes a poster+link pair."""
     out: list[tuple[str, str, str]] = []
     for res in results:
         if not isinstance(res, dict):
@@ -744,6 +837,8 @@ def _mine_image_urls(text: str, limit: int = 3) -> list[str]:
         if u in out:
             continue
         path = u.split("?", 1)[0].split("#", 1)[0]
+        if _VID_URL_TAIL.search(path):
+            continue
         if (_IMG_URL_TAIL.search(path) or _DRIVE_LINK_RE.search(u)
                 or "/v1/drive/media/" in u or "/relay-img/" in u):
             out.append(u)
@@ -881,7 +976,10 @@ class LineRelay:
         # user) pushed persona sends into the owner's DM.
         self._recent_chat: dict[str, tuple[str, float]] = {}
         # Interview-room pins: room chat_id -> last-mentioned persona.
-        self._room_pin: dict[str, str] = {}
+        # Write-through to ROOM_PINS_FILE — a restart reloads the map
+        # instead of silently falling back to LINE_DEFAULT_PERSONA.
+        self._room_pin: dict[str, str] = _PinMap(
+            on_change=self._pins_save)
         self._names: dict[str, str] = {}  # userId -> display label cache
         self._refused: dict[tuple[str, str], float] = {}
         # In-flight image turns waiting out the caption window:
@@ -904,6 +1002,12 @@ class LineRelay:
         # write-through to SEND_LEDGER_FILE so a restart loses nothing.
         self._ledger: dict[str, dict[str, int]] = {}
         self._ledger_day = ""
+        # First-seen registry bookkeeping: _reg_seen = userIds whose
+        # mddb doc is confirmed written (checked once per process);
+        # _reg_try = last attempt per userId (LINE_REGISTRY_RETRY_S
+        # cooldown before a failed write re-arms).
+        self._reg_seen: set[str] = set()
+        self._reg_try: dict[str, float] = {}
 
     def _verify(self, body: bytes, signature: str) -> bool:
         mac = hmac.new(CHANNEL_SECRET.encode(), body, hashlib.sha256)
@@ -1000,6 +1104,26 @@ class LineRelay:
                 logger.info("markAsRead %s: %s", r.status_code, r.text[:120])
         except Exception as exc:
             logger.info("markAsRead failed: %s", exc)
+
+    def _pins_load(self) -> None:
+        try:
+            if ROOM_PINS_FILE.is_file():
+                data = json.loads(ROOM_PINS_FILE.read_text())
+                if isinstance(data, dict):
+                    self._room_pin.update(
+                        {str(k): str(v) for k, v in data.items()})
+                    logger.info("room pins loaded: %d room(s)",
+                                len(self._room_pin))
+        except Exception:
+            logger.exception("room-pins load failed")
+
+    def _pins_save(self) -> None:
+        try:
+            ROOM_PINS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ROOM_PINS_FILE.write_text(json.dumps(
+                dict(self._room_pin), sort_keys=True))
+        except Exception:
+            logger.info("room-pins save failed")
 
     def _ledger_load(self) -> None:
         try:
@@ -1379,11 +1503,38 @@ class LineRelay:
             return [{"type": "text",
                      "text": f"(video: {caption or url})"}]
 
-    async def _video_link_msg(self, url: str, caption: str) -> dict:
-        """ADA-0512 (decided 2026-10-15): LINE lanes get the clip LINK, not
-        the file — sidesteps LINE's size cap and re-encode. TG lanes still
-        get the file via their own relay. _video_msgs stays for the file
-        path if policy flips back."""
+    def _arch_host_video(self, data: bytes, mime: str) -> str | None:
+        """Durable public URL for a fetched clip — writes it under
+        MEDIA_ARCHIVE_DIR/video/, the same /relay-img/arch/<dir>/<file>
+        route inbound media and the render tools publish through. A
+        tailnet-only source URL becomes a link every member can play."""
+        try:
+            ext = _MIME_EXT.get(mime, ".mp4")
+            d = MEDIA_ARCHIVE_DIR / "video"
+            d.mkdir(parents=True, exist_ok=True)
+            import secrets
+            name = (f"clip-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                    f"-{secrets.token_hex(3)}{ext}")
+            (d / name).write_bytes(data)
+        except OSError as exc:
+            logger.warning("arch host video failed: %s", exc)
+            return None
+        return f"{LINE_PUBLIC_IMG_BASE}/arch/video/{name}"
+
+    async def _video_link_msgs(self, url: str, caption: str
+                               ) -> list[dict]:
+        """Hybrid delivery (ADA-0512, refined by card
+        ada-render-video-line-unsendable): a LINE lane gets the poster
+        jpeg + a playable link, not the file — LINE's size cap and
+        re-encode made videoMessage pushes unreliable, and TG lanes
+        still get the mp4 itself via their own relay. The clip is
+        fetched relay-side (this host rides the tailnet, so *.ts.net
+        render URLs resolve), its first frame is hosted publicly as an
+        image bubble, and a tailnet-only source URL is re-hosted on the
+        durable /relay-img/arch lane so the link plays for members
+        off-tailnet too. Any fetch/poster failure degrades to the bare
+        caption+link — the same shape the link-only policy sent.
+        _video_msgs stays for the file path if policy flips back."""
         url = await self._resolve_doc_media(url)
         if url.startswith("/"):
             m = re.search(r"https?://\S+", url)
@@ -1393,13 +1544,47 @@ class LineRelay:
                 base = os.environ.get(
                     "LINE_URL_BASE", "http://100.102.134.91:11023")
                 url = base.rstrip("/") + url
-        text = f"{caption}\n{url}".strip() if caption else url
-        return {"type": "text", "text": text[:4900]}
+        link = url
+        msgs: list[dict] = []
+        try:
+            r = await self.http.get(url, timeout=240,
+                                    follow_redirects=True)
+            if r.status_code == 200 and \
+                    1000 <= len(r.content) <= 190 * 1024 * 1024:
+                poster = await asyncio.to_thread(
+                    self._video_poster, r.content)
+                if poster:
+                    import secrets
+                    pnonce = "vpost-" + secrets.token_urlsafe(12)
+                    self._imgs[pnonce] = (poster, time.time(),
+                                          "image/jpeg")
+                    self._img_persist(pnonce, poster, "image/jpeg")
+                    purl = f"{LINE_PUBLIC_IMG_BASE}/{pnonce}"
+                    msgs.append({"type": "image",
+                                 "originalContentUrl": purl,
+                                 "previewImageUrl": purl})
+                if _tailnet_only_url(url):
+                    mime = (r.headers.get("content-type") or
+                            "video/mp4").split(";")[0]
+                    # only re-host real clip bytes — a tailnet error
+                    # page must not become a durable arch asset
+                    if mime.startswith("video/") or \
+                            b"ftyp" in r.content[:32]:
+                        if not mime.startswith("video/"):
+                            mime = "video/mp4"
+                        hosted = self._arch_host_video(r.content, mime)
+                        if hosted:
+                            link = hosted
+        except Exception as exc:
+            logger.info("video poster/host %s failed: %s", url, exc)
+        text = f"{caption}\n{link}".strip() if caption else link
+        msgs.append({"type": "text", "text": text[:4900]})
+        return msgs
 
     async def _media_msgs(self, url: str, caption: str, kind: str
                           ) -> list[dict]:
         if kind == "video":
-            return [await self._video_link_msg(url, caption)]
+            return await self._video_link_msgs(url, caption)
         return await self._image_msgs(url, caption)
 
     async def _image_msgs(self, url: str, caption: str,
@@ -1512,35 +1697,130 @@ class LineRelay:
             return [{"type": "text",
                      "text": "(voice clip could not be delivered)"}]
 
+    async def _fetch_profile_name(self, user_id: str, group_id: str,
+                                  kind: str = "group") -> str:
+        """LINE per-member profile displayName — '' on any failure (an
+        unverified OA gets 404s from the member endpoints, so callers
+        fall back to caller-key/userId-tail labels). kind is the event
+        source type: 'room' sources use the /room/ member endpoint."""
+        if kind not in ("group", "room"):
+            kind = "group"
+        try:
+            assert self.http is not None
+            r = await self.http.get(
+                f"{LINE_API}/v2/bot/{kind}/{group_id}"
+                f"/member/{user_id}",
+                headers={"Authorization": f"Bearer {CHANNEL_TOKEN}"})
+            if r.status_code == 200:
+                return str(r.json().get("displayName") or "")
+        except Exception as exc:
+            logger.info("group profile %s/%s failed: %s",
+                        group_id, user_id, exc)
+        return ""
+
     async def _sender_label(self, user_id: str, group_id: str | None,
                             caller: str | None,
                             kind: str = "group") -> str:
         """Display label for the [persona->sender] reply tag: the room
-        profile's displayName when LINE will tell us (kind is the event
-        source type — 'room' sources use the /room/ member endpoint),
-        else the caller key minus its 'user-' prefix, else the userId
-        tail."""
+        profile's displayName when LINE will tell us, else the caller
+        key minus its 'user-' prefix, else the userId tail."""
         if user_id in self._names:
             return self._names[user_id]
         label = ""
         if group_id:
-            if kind not in ("group", "room"):
-                kind = "group"
-            try:
-                assert self.http is not None
-                r = await self.http.get(
-                    f"{LINE_API}/v2/bot/{kind}/{group_id}"
-                    f"/member/{user_id}",
-                    headers={"Authorization": f"Bearer {CHANNEL_TOKEN}"})
-                if r.status_code == 200:
-                    label = str(r.json().get("displayName") or "")
-            except Exception as exc:
-                logger.info("group profile %s/%s failed: %s",
-                            group_id, user_id, exc)
+            label = await self._fetch_profile_name(
+                user_id, group_id, kind)
         if not label:
             label = re.sub(r"^user-", "", caller or "") or user_id[-6:]
         self._names[user_id] = label
         return label
+
+    def _note_group_member(self, group_id: str, user_id: str,
+                           kind: str) -> None:
+        """Queue the first-seen registry write for a room sender. Deduped
+        to one mddb check per member per process; a failed write re-arms
+        after LINE_REGISTRY_RETRY_S. Runs as a task so mddb latency never
+        stalls the turn path."""
+        if user_id in self._reg_seen:
+            return
+        last = self._reg_try.get(user_id)
+        if last is not None and \
+                time.monotonic() - last < LINE_REGISTRY_RETRY_S:
+            return
+        self._reg_try[user_id] = time.monotonic()
+        try:
+            asyncio.get_running_loop().create_task(
+                self._register_member(group_id, user_id, kind))
+        except RuntimeError:
+            pass  # no running loop (shutdown) — the next event retries
+
+    async def _register_member(self, group_id: str, user_id: str,
+                               kind: str) -> None:
+        """Upsert mddb line-user-registry/<userId>: displayName (when the
+        per-member profile endpoint shares it), group_ids, first/last
+        seen, status pending|bound. A first-seer stays 'pending' until
+        the operator binds the userId in LINE_USER_CALLERS — the next
+        sighting then flips the doc to 'bound'."""
+        try:
+            mddb = _registry_store()
+            if mddb is None:
+                return
+            caller = _user_callers().get(user_id)
+            name = self._names.get(user_id) \
+                or await self._fetch_profile_name(user_id, group_id,
+                                                  kind)
+            if name:
+                self._names.setdefault(user_id, name)
+            now = datetime.now().isoformat(timespec="seconds")
+            # prefer_leader: a lagging follower missing the just-written
+            # doc would regress first_seen to this later read.
+            doc = await mddb.get_document(LINE_REGISTRY_COLL, user_id,
+                                          prefer_leader=True)
+            meta = dict((doc or {}).get("meta") or {})
+            meta.update({
+                "user_id": [user_id],
+                "group_ids": sorted(
+                    {*(meta.get("group_ids") or []), group_id}),
+                "first_seen": meta.get("first_seen") or [now],
+                "last_seen": [now],
+                "status": ["bound" if caller else "pending"],
+            })
+            if name:
+                meta["display_name"] = [name]
+            if caller:
+                meta["caller"] = [caller]
+            else:
+                meta.pop("caller", None)
+            body = (doc or {}).get("contentMd") or (
+                f"LINE room member first seen {meta['first_seen'][0]} "
+                f"in {kind} {group_id}"
+                + (f" as '{name}'" if name else "")
+                + " — awaiting caller binding.\n\n"
+                f"Bind: add `{user_id}:user-<name>` to "
+                "LINE_USER_CALLERS on ada-line-relay and restart the "
+                "unit.")
+            res = await mddb.add_document(
+                LINE_REGISTRY_COLL, user_id, "en", body, meta=meta)
+            if res is None:
+                logger.warning("member registry write failed for %s — "
+                               "re-arms in %ss", user_id,
+                               LINE_REGISTRY_RETRY_S)
+                _ops_event("member_registry_failed", "warn",
+                           user_id=user_id, chat_id=group_id)
+                return
+            self._reg_seen.add(user_id)
+            if doc is None or \
+                    (doc.get("meta") or {}).get("status") \
+                    != meta["status"]:
+                _ops_event("member_registered", "info", user_id=user_id,
+                           chat_id=group_id,
+                           display_name=name or None,
+                           status=meta["status"][0])
+            logger.info("member registry: %s %s in %s (%s)",
+                        user_id, meta["status"][0], group_id,
+                        name or "no-name")
+        except Exception as exc:
+            logger.info("member registry %s failed: %s", user_id, exc)
 
     async def _refuse_group_member(self, chat_id: str, user_id: str,
                                    reply_token: str | None) -> None:
@@ -1826,6 +2106,12 @@ class LineRelay:
             return
         if not user_id or not chat_id:
             return
+        if is_group:
+            # Rooms can't be pre-enumerated (members API is gated) — a
+            # sender in an allowed room self-registers on first
+            # activity so the operator can bind them in
+            # LINE_USER_CALLERS.
+            self._note_group_member(group_id, user_id, src_type)
         if etype == "follow":  # user added the bot
             await self.send_text(
                 chat_id, f"Ada LINE relay online. userId={user_id}",
@@ -2232,8 +2518,8 @@ class LineRelay:
                 msgs += await self._image_msgs(
                     str(body["image_url"]), str(body.get("caption") or ""))
             if body.get("video_url"):
-                msgs.append(await self._video_link_msg(
-                    str(body["video_url"]), str(body.get("caption") or "")))
+                msgs += await self._video_link_msgs(
+                    str(body["video_url"]), str(body.get("caption") or ""))
             msgs += await self._mined_msgs(
                 str(body.get("text") or ""),
                 {str(body.get("image_url") or ""),
@@ -2352,6 +2638,7 @@ class LineRelay:
         self.http = httpx.AsyncClient(timeout=40)
         asyncio.create_task(self.sweeper())
         self._ledger_load()
+        self._pins_load()
         self._ledger_rollover_check()
         if LINE_QUOTA_POLL_S > 0:
             asyncio.create_task(self._quota_poller())

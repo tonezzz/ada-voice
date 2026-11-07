@@ -170,6 +170,8 @@ class GroupEventTests(unittest.IsolatedAsyncioTestCase):
         _FakeSession.made = []
         self._patches = [
             patch.object(line_relay, "ChatSession", _FakeSession),
+            patch.object(line_relay, "_registry_store",
+                         lambda: None),
             patch.object(line_relay, "VOICE_CORPUS_DIR",
                          Path(self._tmp.name)),
             patch.object(line_relay, "MEDIA_ARCHIVE_DIR",

@@ -127,7 +127,11 @@ class ParkSplitTests(unittest.TestCase):
         gemini_pool.mark_exhausted("k1", "m", _quota_exc())
         until = gemini_pool._exhausted[("k1", "m")]
         import time
-        self.assertGreater(until, time.time() + 3600)
+        # parks until the next Pacific-midnight reset — a positive,
+        # bounded wait; >1h isn't guaranteed inside the last hour
+        # before reset (time-dependent flake)
+        self.assertGreater(until, time.time())
+        self.assertLessEqual(until, gemini_pool._reset_at() + 5)
 
     def test_per_minute_429_parks_briefly(self):
         exc = RuntimeError(

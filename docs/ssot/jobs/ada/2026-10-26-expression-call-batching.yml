@@ -1,0 +1,80 @@
+# SSOT Job: expression-call batching — cosmetic tool gets its own budget
+# Card: expression-call-batching (kanban), parent live-session-token-diet
+# (OPS-0509). Dispatch 20261026-084719.
+
+title: set_facial_expression throttle — per-turn + per-minute caps
+subtitle: |
+  set_facial_expression is NON_BLOCKING cosmetic but every call still
+  bills a full tool round (~28k context resend). Worst observed: session
+  f245275fde ran 234 expression calls; ssot census: 17k calls/7d — the
+  hottest tool by far, driven by the instruction "call it once per
+  reply".
+
+planning:
+  goal: |
+    Cut expression-call token spend on voice lanes without losing the
+    animated face: (1) instruction diet — once-per-reply -> only on a
+    material tone change; (2) hard caps so a storm or a habitual model
+    can't burn unbounded billed rounds.
+  decisions: |
+    - Chose card option (b) throttle + instruction diet.
+      (a) "queue expressions inside the reply text" is infeasible on the
+      voice lane: native-audio sessions (gemini-3.1-flash-live-preview)
+      have no non-spoken output channel — reply text exists only as
+      output_audio_transcription of spoken audio, so an inline marker
+      would be spoken aloud. The transcript-side scrubbers
+      (speech_sanitize, _tool_leak_re) clean display text only, not the
+      already-played PCM.
+      (c) "cheap text-mode side channel" would replace model-chosen
+      expressions with a server-side heuristic/classifier — bigger UX
+      change; deferred as a follow-up if (b) doesn't move the metric.
+    - Budgets (env, read per connect like ADA_TOOL_CALL_BUDGET):
+        ADA_EXPRESSION_TURN_BUDGET   default 2  (once per reply + one
+                                                 material tone update)
+        ADA_EXPRESSION_MINUTE_BUDGET default 4  (rolling 60s window of
+                                                 APPLIED calls, survives
+                                                 reconnects)
+      0 disables the tool outright (every call refused).
+    - Over-cap calls get a SOFT refusal — {"output": "Expression
+      unchanged — ..."} with ok:true — because ok:false would count in
+      failed_results_this_turn and taint the phantom-claim gate for a
+      cosmetic refusal, and a hard "invalid" error invites a billed
+      retry. The refusal's job is stopping the NEXT call; the current
+      one already cost its round. No ProviderEvent("expression") is
+      emitted for refused calls (the cap has teeth — the face doesn't
+      change).
+    - First refusal per session emits ops event "expression_throttled"
+      (ada-ha-events-<instance>) for measurement; subsequent refusals
+      stay silent (ops events are capped 5/session anyway).
+    - expr_calls_this_turn resets with tool_calls_this_turn at the
+      final turn boundary and on interruption; the minute window lives
+      on the provider instance so it survives Live reconnects.
+    - Expression calls still count toward the generic
+      ADA_TOOL_CALL_BUDGET (unchanged) — the dedicated caps are tighter
+      and hit first.
+    - Invalid expression names (outside EXPRESSION_NAMES) still fall
+      through to the runner error path, unchanged.
+  files: |
+    backend/realtime_provider.py — instruction paragraph, dispatch
+    branch, per-turn counter, __init__ throttle state.
+    tests/test_provider_events.py — ExpressionStormSession +
+    test_expression_calls_throttled_past_turn_budget.
+  measure: |
+    calls/day: count set_facial_expression function_call lines in the
+    session call logs (ADA_CALL_LOG_DIR, default
+    ~/.local/share/ada/call-logs/<day>-<session>.jsonl) on ada-ha-tony
+    before/after deploy; applied vs refused splits via the
+    "Expression unchanged" result text.
+    in-tokens/turn: usage.jsonl `in` rows for lane=ada-ha-tony — compare
+    mean/peak per-turn input before/after; each avoided call ≈ one 28k
+    context resend.
+
+meta: |
+  Verification (this worktree): focused suite 109 passed
+  (test_provider_events incl. new storm test, text_channel, dead_turn,
+  transcript_leak, tool_audit); tool-lint clean (57 declared). Full
+  suite 1693 passed / 5 failed — all failures are relay-endpoint tests
+  (test_line_relay_quota x4 paths incl. line_reply_context,
+  tg_relay_voice_reply) where tests/dep_stubs.py's fabricated starlette
+  Route rejects the real 3-arg constructor; the ad-hoc gate venv lacks
+  real starlette. Pre-existing env gap, unrelated to this diff.

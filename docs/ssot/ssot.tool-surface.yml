@@ -50,7 +50,8 @@ lazy_schemas:
   env_disable: ADA_LAZY_SCHEMAS        # =0 ships full schemas again
   env_extend: ADA_FULL_SCHEMA_TOOLS    # csv of extra hot tools, no redeploy
   full_schema_tools:
-    - set_facial_expression            # 17k calls/7d — hottest by far
+    - set_facial_expression            # 17k calls/7d — hottest by far; capped by
+                                       # ADA_EXPRESSION_{TURN,MINUTE}_BUDGET (OPS-0509)
     - ada_memory_search
     - cms_read
     - control_entity

@@ -94,8 +94,43 @@ tools:
     policy: read
     secondary_allowed: true
     timeout_s: 60
+  devnest_news:
+    module: devnest_news
+    policy: confirmed
+    secondary_allowed: false
+    timeout_s: 60
+  devnest_news_review:
+    module: devnest_news_review
+    policy: read
+    secondary_allowed: false
+    timeout_s: 60
+  devnest_news_diagnose:
+    module: devnest_news_diagnose
+    policy: read
+    secondary_allowed: false
+    timeout_s: 60
+  wiki_extension:
+    module: wiki_extension
+    policy: confirmed
+    secondary_allowed: false
+    timeout_s: 120
   weather_station:
     module: weather_station
     policy: read
     secondary_allowed: true
     timeout_s: 20
+  conv_journal:
+    module: conv_journal
+    policy: read
+    secondary_allowed: true
+    timeout_s: 120
+  ada_opencode:
+    module: ada_opencode
+    policy: read
+    secondary_allowed: false
+    timeout_s: 30
+  ada_opencode_dispatch:
+    module: ada_opencode_dispatch
+    policy: confirmed
+    secondary_allowed: false
+    timeout_s: 45
