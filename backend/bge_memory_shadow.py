@@ -104,6 +104,10 @@ async def run_shadow(
     started = time.perf_counter()
     base_url = os.environ["ADA_BGE_SHADOW_MDDB_URL"].rstrip("/")
     rerank_url = os.environ["ADA_BGE_SHADOW_RERANK_URL"]
+    rerank_token = os.environ.get("ADA_BGE_SHADOW_RERANK_TOKEN", "").strip()
+    rerank_headers = (
+        {"Authorization": f"Bearer {rerank_token}"} if rerank_token else {}
+    )
     timeout_s = min(10.0, max(0.1, float(os.environ.get(
         "ADA_BGE_SHADOW_TIMEOUT_S", "3.0"))))
     deadline = started + timeout_s
@@ -196,7 +200,8 @@ async def run_shadow(
                          for i, item in enumerate(dense)],
             }
             response = await client.post(
-                rerank_url, json=payload, timeout=max(0.1, remaining))
+                rerank_url, json=payload, headers=rerank_headers,
+                timeout=max(0.1, remaining))
             response.raise_for_status()
             scores = response.json().get("scores") or []
             if len(scores) != len(dense):
