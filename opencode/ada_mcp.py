@@ -81,9 +81,9 @@ def _selection_gate(card_reference: str, selection_token: str) -> str | None:
     return None
 
 
-def _get_json(path: str) -> Any:
+def _get_json(path: str, timeout: float = 15) -> Any:
     req = urllib.request.Request(f"{BOARD_API}{path}", headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=15) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -227,10 +227,10 @@ def _devin_mddb_memory(query: str, deadline: float, limit: int = 3) -> list[dict
     return hits
 
 
-def recall_memory(query: str) -> dict[str, Any]:
+def recall_memory(query: str, deadline: float | None = None) -> dict[str, Any]:
     """Read Education and canonical Devin summaries with local fallback."""
     errors = []
-    deadline = time.monotonic() + 4.5
+    deadline = deadline if deadline is not None else time.monotonic() + 4.5
     try:
         lessons = _lesson_memory(query, deadline)
     except Exception as exc:
@@ -248,6 +248,50 @@ def recall_memory(query: str) -> dict[str, Any]:
             sessions = []
             errors.append(f"devin-session:{local_exc}")
     return {"query": query, "lessons": lessons, "devin_sessions": sessions, "errors": errors}
+
+
+
+def _ssot_search(query: str, deadline: float, limit: int = 3) -> tuple[list[dict[str, Any]], list[str]]:
+    """Search canonical SSOT documents in MDDB; read-only and collection-allowlisted."""
+    hits: list[dict[str, Any]] = []
+    errors: list[str] = []
+    collections = ("infrastructure-ssot", "chaba-glossary")
+    for collection in collections:
+        remaining = max(0.25, min(1.5, deadline - time.monotonic()))
+        if remaining <= 0.25:
+            break
+        try:
+            payload = _mddb_post(
+                "search",
+                {"collection": collection, "query": query, "limit": limit},
+                timeout=remaining,
+            )
+        except Exception as exc:
+            errors.append(f"{collection}:{exc}")
+            continue
+        if not isinstance(payload, list):
+            continue
+        for row in payload[:limit]:
+            if not isinstance(row, dict):
+                continue
+            meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            def _meta_first(name: str) -> Any:
+                value = meta.get(name)
+                if isinstance(value, list):
+                    return value[0] if value else None
+                return value
+            content = str(row.get("contentMd") or row.get("content") or "")
+            hits.append({
+                "source": "ssot",
+                "storage": "mddb",
+                "collection": collection,
+                "key": row.get("key"),
+                "path": _meta_first("original_path") or "",
+                "title": _meta_first("title"),
+                "score": row.get("score"),
+                "excerpt": content[:1200],
+            })
+    return hits, errors
 
 
 def _adobe_stock_index_root() -> Path:
@@ -726,6 +770,54 @@ def _safe_card(card: dict[str, Any]) -> dict[str, Any]:
         "requests": card.get("requests") or [],
         "comms_tail": (card.get("comms") or [])[-5:],
     }
+
+
+def _context_card(reference: str, deadline: float) -> dict[str, Any]:
+    """Resolve one card through board-api projected reads for context packs.
+
+    Uses the compact board projection to map id/ref/title to a card id, then
+    fetches only the fields `_safe_card` needs. This avoids the legacy full
+    `/cards` dump inside an MCP request budget.
+    """
+    needle = reference.strip()
+    if not needle:
+        raise ValueError("card reference is required")
+    lowered = needle.lower()
+    fields = "id,ref,title,column,priority,updated,brief,spec,action,requests,comms"
+
+    def remaining() -> float:
+        return max(0.5, deadline - time.monotonic())
+
+    def fetch_by_id(card_id: Any) -> dict[str, Any] | None:
+        if card_id in (None, ""):
+            return None
+        payload = _get_json(
+            f"/cards?id={urllib.parse.quote(str(card_id), safe='')}&limit=1&fields={fields}",
+            timeout=remaining(),
+        )
+        rows = payload.get("cards") if isinstance(payload, dict) else []
+        return rows[0] if rows and isinstance(rows[0], dict) else None
+
+    exact_id = fetch_by_id(needle)
+    if exact_id is not None:
+        return exact_id
+
+    compact = _get_json("/cards?compact=1&limit=1000", timeout=remaining())
+    rows = compact.get("cards") if isinstance(compact, dict) else []
+    rows = [row for row in rows if isinstance(row, dict)]
+    exact = [
+        row for row in rows
+        if lowered in {str(row.get("id") or "").lower(), str(row.get("ref") or "").lower()}
+    ]
+    if len(exact) > 1:
+        raise _ambiguity_error(reference, exact)
+    titled = [row for row in rows if lowered in str(row.get("title") or "").lower()]
+    if len(titled) > 1 and not exact:
+        raise _ambiguity_error(reference, titled)
+    candidate = exact[0] if exact else (titled[0] if titled else None)
+    if candidate is None:
+        raise LookupError(f"no board card matched {reference!r}")
+    return fetch_by_id(candidate.get("id")) or candidate
 
 
 def build_plan(card: dict[str, Any]) -> dict[str, Any]:
@@ -1244,6 +1336,90 @@ def ada_card_context(card_reference: str, max_files: int = 8) -> str:
             "board_api": BOARD_API,
         }, ensure_ascii=False, indent=2)
 
+
+
+@mcp.tool()
+def ada_context_pack(
+    query: str,
+    card_reference: str = "",
+    profile: str = "ssot-research",
+    include_memory: bool = True,
+    include_ssot: bool = True,
+    limit: int = 5,
+) -> str:
+    """Build a bounded read-only context pack for OpenChamber/OpenCode.
+
+    Composes SSOT, Education, Devin-session memory, and an optional safe card
+    snapshot into one provenance-labelled pack. It never reads personal or
+    household banks and never mutates board/MDDB state.
+    """
+    try:
+        profile_name = (profile or "ssot-research").strip() or "ssot-research"
+        if profile_name not in {"ssot-research", "ops-readonly", "dev", "ada", "default"}:
+            profile_name = "ssot-research"
+        bounded_limit = max(1, min(int(limit), 5))
+        deadline = time.monotonic() + 8.0
+        errors: list[str] = []
+        ssot: list[dict[str, Any]] = []
+        memory: dict[str, Any] | None = None
+        card: dict[str, Any] | None = None
+
+        ref = (card_reference or "").strip()
+        if ref:
+            try:
+                card = _safe_card(_context_card(ref, deadline))
+            except Exception as exc:
+                errors.append(f"card:{exc}")
+        if include_ssot:
+            ssot, ssot_errors = _ssot_search(query, deadline, limit=bounded_limit)
+            errors.extend(ssot_errors)
+        if include_memory:
+            memory = recall_memory(query, deadline)
+            errors.extend(memory.get("errors") or [])
+
+        sources = [
+            "board-api:/cards",
+            "education:/lesson",
+            "mddb:ada-ha-bank-devin-tony",
+            "mddb:infrastructure-ssot",
+            "mddb:chaba-glossary",
+        ]
+        if card is not None:
+            sources.append("board-api:/card")
+        return json.dumps({
+            "ok": True,
+            "operation": "context-pack",
+            "profile": profile_name,
+            "query": query,
+            "card_reference": ref or None,
+            "allowed_sources": sources,
+            "write_policy": "read-only; mutations require board-api approval flow",
+            "budgets": {
+                "max_results_per_source": bounded_limit,
+                "excerpt_chars": 1200,
+                "deadline_s": 8.0,
+            },
+            "ssot": ssot,
+            "memory": memory,
+            "card": card,
+            "errors": errors,
+            "provenance": {
+                "board_api": BOARD_API,
+                "mddb_cms": MDDB_CMS,
+                "mddb_memory": MDDB_MEMORY,
+            },
+            "secrets_read": False,
+            "mutations_performed": [],
+            "next_safe_action": "use the excerpts as cited context; verify freshness before acting; do not mutate",
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "operation": "context-pack",
+            "error": str(exc),
+            "board_api": BOARD_API,
+            "mutations_performed": [],
+        }, ensure_ascii=False, indent=2)
 
 READ_ONLY_PROFILES = {"ops-readonly", "ssot-research", "mddb-sequence", "storage-dryrun"}
 
