@@ -2,6 +2,7 @@
 """Read-only Ada control-plane MCP bridge for the DevNest OpenCode project."""
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -1370,12 +1371,46 @@ def ada_context_pack(
                 card = _safe_card(_context_card(ref, deadline))
             except Exception as exc:
                 errors.append(f"card:{exc}")
-        if include_ssot:
-            ssot, ssot_errors = _ssot_search(query, deadline, limit=bounded_limit)
-            errors.extend(ssot_errors)
-        if include_memory:
-            memory = recall_memory(query, deadline)
-            errors.extend(memory.get("errors") or [])
+
+        def _ssot_job() -> tuple[list[dict[str, Any]], list[str]]:
+            if not include_ssot:
+                return [], []
+            return _ssot_search(query, deadline, limit=bounded_limit)
+
+        def _memory_job() -> dict[str, Any] | None:
+            if not include_memory:
+                return None
+            return recall_memory(query, deadline)
+
+        futures: dict[str, concurrent.futures.Future] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            if include_ssot:
+                futures["ssot"] = pool.submit(_ssot_job)
+            if include_memory:
+                futures["memory"] = pool.submit(_memory_job)
+            done, _not_done = (
+                concurrent.futures.wait(
+                    futures.values(), timeout=max(0.1, deadline - time.monotonic())
+                )
+                if futures
+                else (set(), set())
+            )
+            done_set = set(done)
+            for name, future in futures.items():
+                if future not in done_set:
+                    errors.append(f"{name}:deadline")
+                    continue
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    errors.append(f"{name}:{exc}")
+                    continue
+                if name == "ssot":
+                    ssot, ssot_errors = result
+                    errors.extend(ssot_errors)
+                elif result is not None:
+                    memory = result
+                    errors.extend(memory.get("errors") or [])
 
         sources = [
             "board-api:/cards",
