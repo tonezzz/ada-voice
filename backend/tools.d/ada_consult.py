@@ -95,10 +95,8 @@ def _usage_counts(response: Any) -> dict[str, int | None]:
     }
 
 
-def _estimate_cost(
-    usage: dict[str, int | None], model: str
-) -> float | None:
-    """Estimate from deployment-configured prices; never invent a rate."""
+def _cost_rates(model: str) -> tuple[float, float] | None:
+    """Return deployment-configured per-million-token prices."""
     prefixes = {
         "consult-flash": "ADA_CONSULT_FLASH",
         "consult-pro": "ADA_CONSULT_PRO",
@@ -112,16 +110,48 @@ def _estimate_cost(
         output_rate = float(os.environ[f"{prefix}_OUTPUT_USD_PER_MILLION"])
     except (KeyError, ValueError):
         return None
-    if usage["input_tokens"] is None or usage["output_tokens"] is None:
-        return None
     if not all(math.isfinite(rate) and rate >= 0
                for rate in (input_rate, output_rate)):
         return None
+    return input_rate, output_rate
+
+
+def _estimate_cost(
+    usage: dict[str, int | None], model: str
+) -> float | None:
+    """Estimate from deployment-configured prices; never invent a rate."""
+    rates = _cost_rates(model)
+    if not rates:
+        return None
+    if usage["input_tokens"] is None or usage["output_tokens"] is None:
+        return None
+    input_rate, output_rate = rates
     return round(
         usage["input_tokens"] * input_rate / 1_000_000
         + usage["output_tokens"] * output_rate / 1_000_000,
         8,
     )
+
+
+def _estimate_max_call_cost(
+    prompt: str, max_tokens: int, model: str
+) -> tuple[float, float] | None:
+    """Conservatively bound cost using UTF-8 bytes and output-token cap."""
+    rates = _cost_rates(model)
+    try:
+        cap = float(os.environ.get("ADA_CONSULT_MAX_USD", "0.10"))
+    except ValueError:
+        return None
+    if not rates or not math.isfinite(cap) or cap <= 0:
+        return None
+    input_rate, output_rate = rates
+    input_token_ceiling = len(prompt.encode("utf-8"))
+    maximum = round(
+        input_token_ceiling * input_rate / 1_000_000
+        + max_tokens * output_rate / 1_000_000,
+        8,
+    )
+    return maximum, cap
 
 
 def _emit(runner: Any, event: str, detail: str) -> None:
@@ -192,6 +222,23 @@ async def run(runner: Any, **args: Any) -> dict[str, Any]:
         return _refuse(runner, f"consult input refused ({reason})",
                         question_hash)
 
+    prompt = (
+        f"{_PROMPT_HEADER}Question:\n{question}\n\n"
+        f"Context:\n{context}\n\n"
+        "Answer based only on the supplied context. If it is insufficient, "
+        "say what is missing."
+    )
+    cost_bound = _estimate_max_call_cost(prompt, max_tokens, model)
+    if cost_bound is None:
+        return _refuse(
+            runner, "consult cost cap or per-model rates are not configured",
+            question_hash)
+    estimated_max_cost, max_usd = cost_bound
+    if estimated_max_cost > max_usd:
+        return _refuse(
+            runner, "maximum estimated call cost exceeds ADA_CONSULT_MAX_USD",
+            question_hash)
+
     # The dedicated virtual key will carry the monthly spend cap; never
     # fall back to a shared key or direct Gemini while it is unconfigured.
     api_key = os.environ.get("LITELLM_KEY_CONSULT", "").strip()
@@ -209,12 +256,6 @@ async def run(runner: Any, **args: Any) -> dict[str, Any]:
             question_hash)
 
     model = gemini_pool._gateway_model(model)
-    prompt = (
-        f"{_PROMPT_HEADER}Question:\n{question}\n\n"
-        f"Context:\n{context}\n\n"
-        "Answer based only on the supplied context. If it is insufficient, "
-        "say what is missing."
-    )
     t0 = time.monotonic()
 
     try:
@@ -233,6 +274,20 @@ async def run(runner: Any, **args: Any) -> dict[str, Any]:
         usage = _usage_counts(resp)
         estimated_cost = _estimate_cost(usage, model)
         latency_s = time.monotonic() - t0
+        if estimated_cost is not None and estimated_cost > max_usd:
+            _emit(
+                runner, "consult_failed",
+                f"Consult actual estimate exceeded cap model={model}, "
+                f"question_sha256={question_hash}, "
+                f"estimated_cost_usd={estimated_cost}, cap_usd={max_usd}",
+            )
+            return {
+                "ok": False,
+                "error": "consultation exceeded ADA_CONSULT_MAX_USD",
+                "usage": usage,
+                "estimated_cost_usd": estimated_cost,
+                "estimated_max_cost_usd": estimated_max_cost,
+            }
         _emit(
             runner, "consult_completed",
             f"Consult completed model={model}, "
@@ -240,7 +295,9 @@ async def run(runner: Any, **args: Any) -> dict[str, Any]:
             f"question_sha256={question_hash}, "
             f"input_tokens={usage['input_tokens']}, "
             f"output_tokens={usage['output_tokens']}, "
-            f"estimated_cost_usd={estimated_cost}, latency={latency_s:.2f}s",
+            f"estimated_cost_usd={estimated_cost}, "
+            f"estimated_max_cost_usd={estimated_max_cost}, "
+            f"latency={latency_s:.2f}s",
         )
         return {
             "ok": True,
@@ -249,6 +306,7 @@ async def run(runner: Any, **args: Any) -> dict[str, Any]:
             "key_alias": "LITELLM_KEY_CONSULT",
             "usage": usage,
             "estimated_cost_usd": estimated_cost,
+            "estimated_max_cost_usd": estimated_max_cost,
         }
     except asyncio.TimeoutError:
         latency_s = time.monotonic() - t0

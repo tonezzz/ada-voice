@@ -40,6 +40,9 @@ class TestAdaConsult(unittest.IsolatedAsyncioTestCase):
         return patch.dict(os.environ, {
             "ADA_GEMINI_REST_BASE_URL": "https://gateway.invalid/v1beta",
             "LITELLM_KEY_CONSULT": "test-consult-key",
+            "ADA_CONSULT_MAX_USD": "0.10",
+            "ADA_CONSULT_FLASH_INPUT_USD_PER_MILLION": "1",
+            "ADA_CONSULT_FLASH_OUTPUT_USD_PER_MILLION": "2",
         })
 
     @patch("ada_consult.gemini_pool.rest_client")
@@ -57,7 +60,7 @@ class TestAdaConsult(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["model"], "consult-flash")
         self.assertEqual(result["answer"], "expert answer")
         self.assertEqual(result["usage"]["total_tokens"], 32)
-        self.assertIsNone(result["estimated_cost_usd"])
+        self.assertEqual(result["estimated_cost_usd"], 0.000052)
         mock_rest_client.assert_called_once_with(
             gateway_api_key="test-consult-key")
         call = mock_rest_client.return_value.aio.models.generate_content
@@ -128,7 +131,11 @@ class TestAdaConsult(unittest.IsolatedAsyncioTestCase):
     async def test_requires_gateway_key_and_allowlisted_alias(
         self, mock_rest_client,
     ):
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {
+            "ADA_CONSULT_MAX_USD": "0.10",
+            "ADA_CONSULT_FLASH_INPUT_USD_PER_MILLION": "1",
+            "ADA_CONSULT_FLASH_OUTPUT_USD_PER_MILLION": "2",
+        }, clear=True):
             unconfigured = await ada_consult.run(
                 self.runner, question="Question", context="Curated context",
                 context_class="curated")
@@ -164,6 +171,20 @@ class TestAdaConsult(unittest.IsolatedAsyncioTestCase):
                 context_class="curated")
         self.assertFalse(result["ok"])
         self.assertIn("size limit", result["error"])
+        mock_rest_client.assert_not_called()
+
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_per_call_cost_bound_prevents_expensive_request(
+        self, mock_rest_client,
+    ):
+        with self._gateway_env(), patch.dict(os.environ, {
+            "ADA_CONSULT_MAX_USD": "0.000001",
+        }):
+            result = await ada_consult.run(
+                self.runner, question="Question", context="Curated context",
+                context_class="curated")
+        self.assertFalse(result["ok"])
+        self.assertIn("ADA_CONSULT_MAX_USD", result["error"])
         mock_rest_client.assert_not_called()
 
     @patch("ada_consult.gemini_pool.rest_client")
