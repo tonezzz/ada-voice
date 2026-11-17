@@ -58,8 +58,14 @@ CARDS = [
 ]
 
 
-def _with_cards(monkeypatch):
-    monkeypatch.setattr(ada_mcp, "_cards", lambda: CARDS)
+def _with_cards(monkeypatch, cards=None):
+    rows = CARDS if cards is None else cards
+    monkeypatch.setattr(ada_mcp, "_compact_cards", lambda: [])
+    monkeypatch.setattr(ada_mcp, "_board_cards", lambda: rows)
+    monkeypatch.setattr(
+        ada_mcp, "_fetch_card_full",
+        lambda card_id: next(
+            (c for c in rows if c.get("id") == card_id), None))
 
 
 def test_find_card_exact_ref_and_id(monkeypatch):
@@ -104,5 +110,43 @@ def test_find_card_no_match(monkeypatch):
 
 def test_find_card_alias(monkeypatch):
     cards = [dict(CARDS[0], aliases=["media pack", "nest pack contract"])]
-    monkeypatch.setattr(ada_mcp, "_cards", lambda: cards)
+    _with_cards(monkeypatch, cards)
     assert ada_mcp.find_card("nest pack contract")["ref"] == "MED-1032"
+
+
+def test_find_card_compact_fast_path(monkeypatch):
+    """Exact id/ref resolves via the compact index without the full snapshot."""
+    compact = [{"id": "card-a", "ref": "TST-0001", "title": "Compact hit"}]
+    monkeypatch.setattr(ada_mcp, "_compact_cards", lambda: compact)
+    monkeypatch.setattr(
+        ada_mcp, "_board_cards",
+        lambda: (_ for _ in ()).throw(AssertionError("should not fetch snapshot")))
+    hydrated = {"id": "card-a", "ref": "TST-0001", "title": "Compact hit",
+                "comms": [{"text": "done"}]}
+    monkeypatch.setattr(ada_mcp, "_fetch_card_full", lambda card_id: hydrated)
+    assert ada_mcp.find_card("TST-0001") == hydrated
+
+
+def test_context_card_text_tolerates_string_entries():
+    card = {
+        "brief": "b", "spec": "s",
+        "comms": ["legacy string comm", {"text": "real comm", "at": "t", "from": "f"}],
+        "requests": ["legacy string request", {"ask": "q?", "status": "open"}],
+    }
+    text = ada_mcp._context_card_text(card)
+    assert "legacy string comm" in text
+    assert "legacy string request" in text
+    assert "q?" in text
+
+
+def test_card_actionable_tolerates_string_entries():
+    assert ada_mcp._card_actionable({
+        "column": "backlog", "requests": ["legacy string request"],
+    }) is False
+    assert ada_mcp._card_actionable({
+        "column": "backlog", "requests": [{"status": "answered"}],
+        "action": "queued",
+    }) is True
+    assert ada_mcp._card_actionable({
+        "column": "backlog", "action": {"status": "running"},
+    }) is False

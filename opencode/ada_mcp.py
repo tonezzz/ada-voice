@@ -124,11 +124,76 @@ def _memory_mddb_post(path: str, payload: dict[str, Any], timeout: float = 5) ->
         return json.load(response)
 
 
+_SNAPSHOT_TTL = 20.0
+_snapshot_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _get_json_cached(path: str, ttl: float = _SNAPSHOT_TTL) -> Any:
+    """Short-lived cache for board reads so one workflow reuses snapshots."""
+    now = time.monotonic()
+    hit = _snapshot_cache.get(path)
+    if hit and hit[0] > now:
+        return hit[1]
+    for key, (expires, _) in list(_snapshot_cache.items()):
+        if expires <= now:
+            _snapshot_cache.pop(key, None)
+    payload = _get_json(path)
+    _snapshot_cache[path] = (now + ttl, payload)
+    return payload
+
+
+_CARD_PROJECTED_FIELDS = (
+    "id,ref,title,column,priority,updated,brief,spec,action,requests,aliases"
+)
+_CARD_FULL_FIELDS = _CARD_PROJECTED_FIELDS + ",comms"
+
+
+def _cards_payload(payload: Any) -> list[dict[str, Any]]:
+    rows = payload.get("cards") if isinstance(payload, dict) else []
+    return [c for c in rows if isinstance(c, dict)]
+
+
+def _compact_cards() -> list[dict[str, Any]]:
+    """Minimal card index (~200KB) for id/ref/title resolution."""
+    return _cards_payload(_get_json_cached("/cards?compact=1&limit=1000"))
+
+
+def _board_cards() -> list[dict[str, Any]]:
+    """Projected all-card snapshot (~1MB, no comms) vs the 9MB full dump."""
+    return _cards_payload(
+        _get_json_cached(f"/cards?fields={_CARD_PROJECTED_FIELDS}&limit=1000")
+    )
+
+
 def _cards() -> list[dict[str, Any]]:
     payload = _get_json("/cards")
     if not isinstance(payload, dict) or not isinstance(payload.get("cards"), list):
         raise RuntimeError("board response did not contain a cards list")
     return [c for c in payload["cards"] if isinstance(c, dict)]
+
+
+def _fetch_card_full(card_id: Any) -> dict[str, Any] | None:
+    """Fetch one card's full safe fields including comms tail."""
+    if card_id in (None, ""):
+        return None
+    path = (
+        f"/cards?id={urllib.parse.quote(str(card_id), safe='')}"
+        f"&fields={_CARD_FULL_FIELDS}&limit=1"
+    )
+    rows = _cards_payload(_get_json_cached(path, ttl=60.0))
+    return rows[0] if rows else None
+
+
+def _card_action(card: dict[str, Any]) -> dict[str, Any]:
+    action = card.get("action")
+    return action if isinstance(action, dict) else {}
+
+
+def _request_open(request: Any) -> bool:
+    """Non-dict request rows count as open (conservative)."""
+    if not isinstance(request, dict):
+        return True
+    return request.get("status") not in ("answered", "closed")
 
 
 def _terms(text: str) -> set[str]:
@@ -920,7 +985,7 @@ def build_adobe_stock_reuse_report(
     indexes = indexes if indexes is not None else _read_adobe_stock_indexes()[0]
     if missing_indexes is None:
         _, missing_indexes = _read_adobe_stock_indexes()
-    cards = cards if cards is not None else _cards()
+    cards = cards if cards is not None else _board_cards()
     memory = memory if memory is not None else recall_memory(idea)
     related_cards = _rank_adobe_items(cards, idea, limit=10)
     lessons = memory.get("lessons", []) if isinstance(memory, dict) else []
@@ -985,7 +1050,7 @@ def _rank_next_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
     safe_terms = ("test", "docs", "schema", "readonly", "read-only", "report", "opencode", "ada")
     ranked = []
     for card in cards:
-        action = card.get("action") or {}
+        action = _card_action(card)
         status = str(action.get("status") or "").lower()
         if status in {"done", "running", "claimed", "idle", "held", "failed"}:
             continue
@@ -1099,22 +1164,43 @@ def _ambiguity_error(reference: str, matches: list[dict[str, Any]]) -> LookupErr
     )
 
 
+def _hydrate_card(row: dict[str, Any]) -> dict[str, Any]:
+    """Return the full single-card record; fall back to the index row."""
+    full = _fetch_card_full(row.get("id"))
+    return full if full is not None else row
+
+
 def find_card(reference: str) -> dict[str, Any]:
     """Resolve a card by exact id/ref/alias, title substring, then scored
     natural-language token overlap. Ambiguous matches list candidates so the
-    caller can retry with an exact ref."""
+    caller can retry with an exact ref.
+
+    Resolution runs against the compact index first (id/ref only, ~0.6s),
+    then the projected snapshot for aliases/title/token matching (~2s), and
+    hydrates the winner with a single-card fetch — avoiding the 9MB/16s
+    full /cards dump that used to blow the MCP client timeout.
+    """
     needle = reference.strip().lower()
     if not needle:
         raise ValueError("card reference is required")
-    cards = _cards()
 
+    def ids(row: dict[str, Any]) -> set[str]:
+        return {str(row.get("id", "")).lower(), str(row.get("ref", "")).lower()}
+
+    compact = _compact_cards()
+    exact = [c for c in compact if needle in ids(c)]
+    if len(exact) == 1:
+        return _hydrate_card(exact[0])
+    if len(exact) > 1:
+        raise _ambiguity_error(reference, exact)
+
+    cards = _board_cards()
     exact = [
         c for c in cards
-        if needle in {str(c.get("id", "")).lower(), str(c.get("ref", "")).lower()}
-        or needle in _card_aliases(c)
+        if needle in ids(c) or needle in _card_aliases(c)
     ]
     if len(exact) == 1:
-        return exact[0]
+        return _hydrate_card(exact[0])
     if len(exact) > 1:
         raise _ambiguity_error(reference, exact)
 
@@ -1123,7 +1209,7 @@ def find_card(reference: str) -> dict[str, Any]:
         if needle in str(c.get("title", "")).lower()
     ]
     if len(titled) == 1:
-        return titled[0]
+        return _hydrate_card(titled[0])
     if len(titled) > 1:
         raise _ambiguity_error(reference, titled)
 
@@ -1142,7 +1228,7 @@ def find_card(reference: str) -> dict[str, Any]:
             best = max(hits for hits, _ in scored)
             tops = [c for hits, c in scored if hits == best]
             if len(tops) == 1:
-                return tops[0]
+                return _hydrate_card(tops[0])
             raise _ambiguity_error(reference, tops)
 
     raise LookupError(f"no board card matched {reference!r}")
@@ -1159,7 +1245,7 @@ def _safe_card(card: dict[str, Any]) -> dict[str, Any]:
         "updated": card.get("updated"),
         "brief": card.get("brief"),
         "spec": card.get("spec"),
-        "action": card.get("action") or {},
+        "action": _card_action(card),
         "requests": card.get("requests") or [],
         "comms_tail": (card.get("comms") or [])[-5:],
     }
@@ -1515,9 +1601,9 @@ def _card_actionable(card: dict[str, Any]) -> bool:
     if card.get("column") in ("done", "archive"):
         return False
     for r in card.get("requests") or []:
-        if r.get("status") not in ("answered", "closed"):
+        if _request_open(r):
             return False
-    if (card.get("action") or {}).get("status") in ("claimed", "running"):
+    if _card_action(card).get("status") in ("claimed", "running"):
         return False
     return True
 
@@ -1526,13 +1612,13 @@ def _pick_cards(strategy: str, days: int, limit: int) -> list[dict[str, Any]]:
     """Score actionable cards for one strategy; returns best-first rows."""
     now = datetime.now(timezone.utc)
     scored: list[tuple[dict[str, Any], str, tuple]] = []
-    for card in _cards():
+    for card in _board_cards():
         if not _card_actionable(card):
             continue
         age = (now - _card_updated_ts(card)).days
         col = card.get("column") or "backlog"
         if strategy == "queue":
-            if (card.get("action") or {}).get("status") == "queued":
+            if _card_action(card).get("status") == "queued":
                 scored.append((card, "queued for dispatch", (0,)))
         elif strategy == "stale":
             if col == "doing" and age >= days:
@@ -1617,10 +1703,13 @@ _CONTEXT_MAX_COMMS = 5
 def _context_card_text(card: dict[str, Any]) -> str:
     parts = [card.get("brief") or "", card.get("spec") or ""]
     for c in (card.get("comms") or [])[-_CONTEXT_MAX_COMMS:]:
-        parts.append(str(c.get("text") or ""))
+        parts.append(str(c.get("text") if isinstance(c, dict) else c) or "")
     for r in card.get("requests") or []:
-        parts.append(str(r.get("ask") or ""))
-        parts.append(str(r.get("answer") or ""))
+        if isinstance(r, dict):
+            parts.append(str(r.get("ask") or ""))
+            parts.append(str(r.get("answer") or ""))
+        else:
+            parts.append(str(r))
     return "\n".join(parts)
 
 
@@ -1669,20 +1758,25 @@ def _context_pack(card: dict[str, Any], root: Path,
         md += ["", "## Brief", "", card["brief"]]
     if card.get("spec"):
         md += ["", "## Spec (verbatim)", "", card["spec"]]
-    open_reqs = [r for r in (card.get("requests") or [])
-                 if r.get("status") not in ("answered", "closed")]
+    open_reqs = [r for r in (card.get("requests") or []) if _request_open(r)]
     if open_reqs:
         md += ["", "## Open requests (needs human input first)"]
         for r in open_reqs:
+            if not isinstance(r, dict):
+                md.append(f"- {r}")
+                continue
             md.append(f"- {r.get('ask')} "
                       f"(options: {', '.join(r.get('options') or [])})")
-    comms = (card.get("comms") or [])[-_CONTEXT_MAX_COMMS:]
+    comms = [c for c in (card.get("comms") or [])[-_CONTEXT_MAX_COMMS:]]
     if comms:
         md += ["", "## Recent comms"]
         for c in comms:
-            body = str(c.get("text") or "")
-            md.append(f"- `{c.get('at')}` {c.get('from')}: "
-                      f"{body[:300]}{'…' if len(body) > 300 else ''}")
+            if isinstance(c, dict):
+                body = str(c.get("text") or "")
+                md.append(f"- `{c.get('at')}` {c.get('from')}: "
+                          f"{body[:300]}{'…' if len(body) > 300 else ''}")
+            else:
+                md.append(f"- {str(c)[:300]}")
     for f in files:
         try:
             lines = f.read_text(errors="replace").splitlines()[:head]
@@ -1976,7 +2070,7 @@ def ada_preflight(
             }, ensure_ascii=False, indent=2)
 
         card = find_card(card_reference)
-        action = card.get("action") or {}
+        action = _card_action(card)
         text = " ".join(str(card.get(k) or "") for k in ("title", "brief", "spec")).lower()
         risky = _positive_risk_terms(text)
         start_gates = {
@@ -2048,7 +2142,7 @@ def ada_start_check(card_reference: str, handoff_confirmation: str = "") -> str:
                 "next_safe_action": "show the handoff decision menu before retrying",
             }, ensure_ascii=False, indent=2)
         card = find_card(card_reference)
-        action = card.get("action") or {}
+        action = _card_action(card)
         text = " ".join(str(card.get(k) or "") for k in ("title", "brief", "spec")).lower()
         risky = _positive_risk_terms(text)
         gates = {
@@ -2081,7 +2175,7 @@ def ada_dispatch_check(card_reference: str) -> str:
     """Validate the typed dispatch envelope without creating a job."""
     try:
         card = find_card(card_reference)
-        action = card.get("action") or {}
+        action = _card_action(card)
         required = ("type", "repo", "executor", "model", "profile", "target_host", "artifact")
         aliases = {"profile": ("profile", "agent_profile"), "artifact": ("artifact", "output_artifact")}
         missing = []
@@ -2217,7 +2311,7 @@ def ada_debug_opencode() -> str:
         "board_api": BOARD_API,
     }
     try:
-        cards = _cards()
+        cards = _compact_cards()
         checks["board_reachable"] = True
         checks["ada_1010_present"] = any(c.get("id") == "ada-dev-control-plane-envelope" or c.get("ref") == "ADA-1010" for c in cards)
     except Exception as exc:
@@ -2317,7 +2411,8 @@ def ada_wiki_extension(
 
 
 def _open_requests(card: dict) -> list:
-    return [r for r in (card.get("requests") or []) if r.get("status") != "answered"]
+    return [r for r in (card.get("requests") or [])
+            if isinstance(r, dict) and r.get("status") != "answered"]
 
 
 @mcp.tool()
