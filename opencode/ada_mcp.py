@@ -494,6 +494,199 @@ def _ssot_search(query: str, deadline: float, limit: int = 3) -> tuple[list[dict
     return hits, errors
 
 
+SSOT_GET_COLLECTIONS = ("infrastructure-ssot", "chaba-glossary")
+
+
+def _ssot_key_candidates(collection: str, key: str) -> list[str]:
+    """Return MDDB key candidates for a user/agent supplied SSOT reference."""
+    raw = (key or "").strip().strip("/")
+    if not raw:
+        return []
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        value = value.strip().strip("/")
+        if value and value not in candidates:
+            candidates.append(value)
+
+    add(raw)
+    if "/" not in raw and not raw.startswith(f"{collection}."):
+        add(f"{collection}.{raw}")
+    base = raw.rsplit("/", 1)[-1]
+    if base.endswith((".yml", ".yaml")):
+        base = base.rsplit(".", 1)[0]
+    if base.startswith("ssot."):
+        base = base[len("ssot."):]
+    if base and base != raw:
+        add(base)
+        if "/" not in base and not base.startswith(f"{collection}."):
+            add(f"{collection}.{base}")
+    return candidates
+
+
+def _ssot_get_doc(collection: str, key: str, timeout: float = 6.0) -> tuple[str, dict[str, Any]]:
+    """Fetch one SSOT doc by key, tolerating bare/path-like key spellings."""
+    candidates = _ssot_key_candidates(collection, key)
+    if not candidates:
+        raise LookupError("ssot key is required")
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            doc = _mddb_post(
+                "get",
+                {"collection": collection, "key": candidate, "lang": "en"},
+                timeout=timeout,
+            )
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            last_error = exc
+            continue
+        if isinstance(doc, dict) and (
+            doc.get("key") or doc.get("contentMd") or doc.get("content")
+        ):
+            return candidate, doc
+        last_error = RuntimeError("mddb get returned an empty document")
+    raise LookupError(
+        f"ssot doc not found in {collection}: {key}"
+        + (f" ({last_error})" if last_error else "")
+    )
+
+
+def _ssot_timestamp(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def _norm_selector_text(text: str) -> str:
+    return re.sub(r"[-_\s]+", "-", (text or "").lower())
+
+
+def _selector_variants(selector: str) -> set[str]:
+    value = (selector or "").strip()
+    for separator in ("=", ":"):
+        if separator in value:
+            value = value.rsplit(separator, 1)[-1]
+    base = _norm_selector_text(value)
+    if not base:
+        return set()
+    variants = {base}
+    if base.startswith("tony-"):
+        variants.add(base[len("tony-"):])
+    else:
+        variants.add(f"tony-{base}")
+    return {variant for variant in variants if variant}
+
+
+def _selector_block(content: str, selector: str, max_chars: int) -> dict[str, Any]:
+    """Return a bounded block centered on a YAML/list selector when possible."""
+    if not selector:
+        return {
+            "text": content[:max_chars],
+            "matched": False,
+            "line": None,
+            "block_chars": len(content),
+        }
+    lines = content.split("\n")
+    variants = _selector_variants(selector)
+    norm_lines = [_norm_selector_text(line) for line in lines]
+    best_score = 0
+    best_index: int | None = None
+    for index, norm_line in enumerate(norm_lines):
+        stripped = norm_line.strip()
+        score = 0
+        for variant in variants:
+            if variant not in norm_line:
+                continue
+            score += 1
+            if stripped.startswith(f"{variant}:") or stripped.startswith(f"-{variant}:"):
+                score += 3
+        if score > best_score:
+            best_score = score
+            best_index = index
+    if best_index is None or best_score == 0:
+        return {
+            "text": _excerpt_window(content, selector, max_chars),
+            "matched": False,
+            "line": None,
+            "block_chars": len(content),
+        }
+    line = lines[best_index]
+    indent = len(line) - len(line.lstrip())
+    end = len(lines)
+    for index in range(best_index + 1, len(lines)):
+        candidate = lines[index]
+        if not candidate.strip():
+            continue
+        candidate_indent = len(candidate) - len(candidate.lstrip())
+        if candidate_indent <= indent:
+            end = index
+            break
+    while end > best_index and not lines[end - 1].strip():
+        end -= 1
+    block = "\n".join(lines[best_index:end])
+    text = block if len(block) <= max_chars else _excerpt_window(block, selector, max_chars)
+    return {
+        "text": text,
+        "matched": True,
+        "line": best_index + 1,
+        "block_chars": len(block),
+    }
+
+
+def _related_pointers(content: str, exclude: tuple[str, ...] = (), limit: int = 8) -> list[str]:
+    """Extract declared SSOT/doc pointers without treating them as truth."""
+    if not content:
+        return []
+    excluded = {str(value).strip().lower() for value in exclude if value}
+    patterns = (
+        r"docs/ssot/[A-Za-z0-9_./-]+?\.yml",
+        r"ssot\.[A-Za-z0-9][A-Za-z0-9._-]*?\.yml",
+        r"(?:infrastructure|chaba|kanban|apps)-ssot\.[A-Za-z0-9][A-Za-z0-9._-]+",
+    )
+    found: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, content):
+            value = match.group(0).rstrip(".,);`")
+            lowered = value.lower()
+            if lowered in excluded or lowered in seen:
+                continue
+            seen.add(lowered)
+            found.append(value)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def _ssot_doc_provenance(doc: dict[str, Any]) -> dict[str, Any]:
+    meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}
+    freshness = (
+        doc.get("updatedAt")
+        or _ssot_meta_first(meta, "updated")
+        or _ssot_meta_first(meta, "last_verified")
+        or _ssot_meta_first(meta, "generated_at")
+    )
+    return {
+        "key": doc.get("key"),
+        "lang": doc.get("lang") or "en",
+        "path": _ssot_meta_first(meta, "original_path") or "",
+        "title": _ssot_meta_first(meta, "title"),
+        "content_md5": _ssot_meta_first(meta, "content_md5"),
+        "revision": doc.get("revision"),
+        "added_at": _ssot_timestamp(doc.get("addedAt")),
+        "updated_at": _ssot_timestamp(freshness),
+        "freshness": _ssot_timestamp(freshness),
+        "status": _ssot_meta_first(meta, "status") or "unknown",
+    }
+
+
 def _adobe_stock_index_root() -> Path:
     """Return the bounded workspace or read-only GDrive index directory."""
     default_gdrive = Path("/data/gdrive/ada-nest-adobe-stock/indexes")
@@ -1655,6 +1848,93 @@ def ada_context_pack(
             "board_api": BOARD_API,
             "mutations_performed": [],
         }, ensure_ascii=False, indent=2)
+
+@mcp.tool()
+def ada_ssot_get(collection: str, key: str, selector: str = "", max_chars: int = 12000) -> str:
+    """Fetch one allowlisted SSOT document by collection/key after discovery.
+
+    Use after ada_context_pack/vector search identifies the canonical SSOT key.
+    Returns a bounded authoritative excerpt (optionally one YAML/list block via
+    selector), provenance/freshness, related pointers, and mutations_performed=[].
+    """
+    operation = "ssot-get"
+    try:
+        coll = (collection or "").strip()
+        doc_key = (key or "").strip()
+        if coll not in SSOT_GET_COLLECTIONS:
+            return json.dumps({
+                "ok": False,
+                "operation": operation,
+                "error": f"collection not allowlisted: {coll}",
+                "allowed_collections": list(SSOT_GET_COLLECTIONS),
+                "mutations_performed": [],
+            }, ensure_ascii=False, indent=2)
+        if not doc_key:
+            return json.dumps({
+                "ok": False,
+                "operation": operation,
+                "error": "key is required",
+                "mutations_performed": [],
+            }, ensure_ascii=False, indent=2)
+        try:
+            bounded = int(max_chars)
+        except (TypeError, ValueError):
+            bounded = 12000
+        bounded = max(1000, min(bounded, 40000))
+        resolved_key, doc = _ssot_get_doc(coll, doc_key, timeout=6.0)
+        content = str(doc.get("contentMd") or doc.get("content") or "")
+        block = _selector_block(content, selector, bounded)
+        provenance = _ssot_doc_provenance(doc)
+        doc_path = str(provenance.get("path") or "")
+        doc_base = doc_path.rsplit("/", 1)[-1] if doc_path else ""
+        related = _related_pointers(
+            content,
+            exclude=(
+                doc_path,
+                f"docs/ssot/{doc_path}" if doc_path else "",
+                doc_base,
+                resolved_key,
+                doc_key,
+            ),
+            limit=8,
+        )
+        excerpt = block["text"]
+        return json.dumps({
+            "ok": True,
+            "operation": operation,
+            "collection": coll,
+            "requested_key": doc_key,
+            "key": resolved_key,
+            "selector": selector or None,
+            "matched_selector": block["matched"],
+            "selector_line": block["line"],
+            "doc": provenance,
+            "content": excerpt,
+            "content_chars": len(content),
+            "excerpt_chars": len(excerpt),
+            "block_chars": block["block_chars"],
+            "bounded": True,
+            "related": related,
+            "allowed_sources": [f"mddb:{coll}"],
+            "write_policy": "read-only; mutations require board-api approval flow",
+            "budgets": {"max_chars": bounded},
+            "errors": [],
+            "provenance": {
+                "board_api": BOARD_API,
+                "mddb_cms": MDDB_CMS,
+            },
+            "secrets_read": False,
+            "mutations_performed": [],
+            "next_safe_action": "cite doc.path/key/freshness; if the block is still not enough, narrow selector or ask for the specific field",
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "operation": operation,
+            "error": str(exc),
+            "mutations_performed": [],
+        }, ensure_ascii=False, indent=2)
+
 
 READ_ONLY_PROFILES = {"ops-readonly", "ssot-research", "mddb-sequence", "storage-dryrun"}
 
