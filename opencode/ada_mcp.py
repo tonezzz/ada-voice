@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import functools
 import hashlib
 import json
 import os
@@ -28,7 +29,12 @@ MDDB_MEMORY = os.environ.get(
     "ADA_MEMORY_MDDB_URL",
     "http://100.102.134.91:11023/v1",
 ).rstrip("/")
-WORKSPACE = Path.cwd()
+try:
+    WORKSPACE = Path.cwd()
+except FileNotFoundError:
+    # OpenChamber chat dirs can be deleted before the MCP child spawns;
+    # Path.cwd() then raises. Fall back so the bridge still starts.
+    WORKSPACE = Path.home()
 ADOBE_STOCK_INDEX_FILES = (
     "campaigns.json",
     "assets.json",
@@ -2194,6 +2200,90 @@ def ada_adobe_stock_qc_decide(
         return json.dumps({"ok": False,
                            "operation": "adobe-stock-qc-decide",
                            "error": str(exc)})
+
+
+def _safe_cwd() -> str:
+    try:
+        return os.getcwd()
+    except FileNotFoundError:
+        return ""
+
+
+def _audit_log(tool_name: str, kwargs: dict[str, Any], result: Any,
+               elapsed: float, error: str = "") -> None:
+    """Append one JSONL line per MCP tool call for session debugging."""
+    try:
+        audit_dir = Path.home() / ".local" / "share" / "ada-control"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        entry: dict[str, Any] = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "tool": tool_name,
+            "cwd": _safe_cwd(),
+            "elapsed_s": round(elapsed, 3),
+            "args": {
+                k: (v if isinstance(v, (int, float, bool, type(None))) else str(v)[:200])
+                for k, v in kwargs.items()
+            },
+        }
+        if error:
+            entry["error"] = error[:300]
+        else:
+            text = result if isinstance(result, str) else json.dumps(result, default=str)
+            entry["result_preview"] = str(text)[:500]
+            try:
+                parsed = json.loads(text) if isinstance(text, str) else result
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                entry["ok"] = parsed.get("ok")
+                if parsed.get("errors"):
+                    entry["errors"] = parsed["errors"]
+        with open(audit_dir / "calls.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _install_call_audit() -> None:
+    """Wrap every registered MCP tool with the JSONL call audit."""
+    import inspect as _inspect
+
+    manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None) if manager else None
+    if not isinstance(tools, dict):
+        return
+    for name, tool in list(tools.items()):
+        fn = getattr(tool, "fn", None)
+        if fn is None or getattr(fn, "_ada_audited", False):
+            continue
+        if _inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def _aw(*args, _fn=fn, _name=name, **kwargs):
+                t0 = time.monotonic()
+                try:
+                    res = await _fn(*args, **kwargs)
+                except Exception as exc:
+                    _audit_log(_name, kwargs, None, time.monotonic() - t0, error=str(exc))
+                    raise
+                _audit_log(_name, kwargs, res, time.monotonic() - t0)
+                return res
+            tool.fn = _aw
+        else:
+            @functools.wraps(fn)
+            def _sw(*args, _fn=fn, _name=name, **kwargs):
+                t0 = time.monotonic()
+                try:
+                    res = _fn(*args, **kwargs)
+                except Exception as exc:
+                    _audit_log(_name, kwargs, None, time.monotonic() - t0, error=str(exc))
+                    raise
+                _audit_log(_name, kwargs, res, time.monotonic() - t0)
+                return res
+            tool.fn = _sw
+        tool.fn._ada_audited = True
+
+
+_install_call_audit()
 
 
 if __name__ == "__main__":
