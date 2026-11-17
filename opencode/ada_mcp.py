@@ -340,6 +340,38 @@ def recall_memory(query: str, deadline: float | None = None) -> dict[str, Any]:
 
 
 
+def _excerpt_window(content: str, query: str, width: int = 1200) -> str:
+    """Return ~width chars centered on the best query-term match.
+
+    SSOT docs are long YAML documents whose answer blocks (e.g. a host's
+    spec) sit far below the head, so excerpting content[:width] surfaces
+    only metadata and forces agents to re-query. Score each line by query
+    term overlap, window around the best line, and fall back to the head.
+    """
+    if len(content) <= width:
+        return content
+    terms = _terms(query)
+    if not terms:
+        return content[:width]
+    best_off, best_score, offset = 0, 0, 0
+    for line in content.split("\n"):
+        low = line.lower()
+        score = sum(1 for t in terms if t in low)
+        if score > best_score:
+            best_score, best_off = score, offset
+        offset += len(line) + 1
+    if best_score == 0:
+        return content[:width]
+    start = max(0, best_off - width // 3)
+    nl = content.rfind("\n", 0, start)
+    if nl != -1:
+        start = nl + 1
+    excerpt = content[start:start + width]
+    prefix = "\u2026" if start > 0 else ""
+    suffix = "\u2026" if start + width < len(content) else ""
+    return prefix + excerpt + suffix
+
+
 def _ssot_meta_first(meta: dict[str, Any], name: str) -> Any:
     value = meta.get(name)
     if isinstance(value, list):
@@ -347,7 +379,8 @@ def _ssot_meta_first(meta: dict[str, Any], name: str) -> Any:
     return value
 
 
-def _ssot_hit(collection: str, doc: dict[str, Any], score: Any, content: str) -> dict[str, Any]:
+def _ssot_hit(collection: str, doc: dict[str, Any], score: Any, content: str,
+              query: str = "") -> dict[str, Any]:
     meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}
     return {
         "source": "ssot",
@@ -357,7 +390,7 @@ def _ssot_hit(collection: str, doc: dict[str, Any], score: Any, content: str) ->
         "path": _ssot_meta_first(meta, "original_path") or "",
         "title": _ssot_meta_first(meta, "title"),
         "score": score,
-        "excerpt": content[:1200],
+        "excerpt": _excerpt_window(content, query),
     }
 
 
@@ -457,7 +490,7 @@ def _ssot_search(query: str, deadline: float, limit: int = 3) -> tuple[list[dict
                         content = str(full.get("contentMd") or full.get("content") or "")
                 except Exception:
                     pass
-            hits.append(_ssot_hit(collection, doc, score, content))
+            hits.append(_ssot_hit(collection, doc, score, content, query))
     return hits, errors
 
 
