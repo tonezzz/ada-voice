@@ -334,46 +334,124 @@ def recall_memory(query: str, deadline: float | None = None) -> dict[str, Any]:
 
 
 
+def _ssot_meta_first(meta: dict[str, Any], name: str) -> Any:
+    value = meta.get(name)
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _ssot_hit(collection: str, doc: dict[str, Any], score: Any, content: str) -> dict[str, Any]:
+    meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}
+    return {
+        "source": "ssot",
+        "storage": "mddb",
+        "collection": collection,
+        "key": doc.get("key"),
+        "path": _ssot_meta_first(meta, "original_path") or "",
+        "title": _ssot_meta_first(meta, "title"),
+        "score": score,
+        "excerpt": content[:1200],
+    }
+
+
 def _ssot_search(query: str, deadline: float, limit: int = 3) -> tuple[list[dict[str, Any]], list[str]]:
-    """Search canonical SSOT documents in MDDB; read-only and collection-allowlisted."""
+    """Search canonical SSOT documents in MDDB; read-only and collection-allowlisted.
+
+    Primary path is /vector-search for real relevance — CMS /search ignores
+    `query` and returns the collection head. vector-search strips content,
+    so each hit is hydrated with a single /get call. Falls back to /search
+    per collection when vector-search fails.
+    """
     hits: list[dict[str, Any]] = []
     errors: list[str] = []
     collections = ("infrastructure-ssot", "chaba-glossary")
     for collection in collections:
-        remaining = max(0.25, min(1.5, deadline - time.monotonic()))
+        remaining = max(0.25, min(3.0, deadline - time.monotonic()))
         if remaining <= 0.25:
             break
+        docs: list[tuple[dict[str, Any], Any]] = []
         try:
             payload = _mddb_post(
-                "search",
-                {"collection": collection, "query": query, "limit": limit},
+                "vector-search",
+                {
+                    "collection": collection,
+                    "query": query,
+                    "top_k": limit * 2,
+                    "retrieval_mode": "parent",
+                    "include_content": False,
+                },
                 timeout=remaining,
             )
+            results = payload.get("results") if isinstance(payload, dict) else None
+            if isinstance(results, list):
+                seen_keys: set[str] = set()
+                for hit in results:
+                    if not isinstance(hit, dict):
+                        continue
+                    doc = hit.get("document")
+                    if not isinstance(doc, dict):
+                        continue
+                    key = doc.get("key")
+                    if not key or key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    docs.append((doc, hit.get("score")))
+                    if len(docs) >= limit:
+                        break
         except Exception as exc:
-            errors.append(f"{collection}:{exc}")
-            continue
-        if not isinstance(payload, list):
-            continue
-        for row in payload[:limit]:
-            if not isinstance(row, dict):
+            errors.append(f"{collection}-vector:{exc}")
+        if not docs:
+            try:
+                payload = _mddb_post(
+                    "search",
+                    {"collection": collection, "limit": limit},
+                    timeout=max(0.25, min(1.5, deadline - time.monotonic())),
+                )
+                if isinstance(payload, dict):
+                    payload = payload.get("result", payload.get("docs", []))
+                if isinstance(payload, list):
+                    q_terms = _terms(query)
+                    scored = []
+                    for row in payload:
+                        if not isinstance(row, dict):
+                            continue
+                        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+                        text = " ".join(
+                            str(v or "")
+                            for v in (
+                                _ssot_meta_first(meta, "title"),
+                                _ssot_meta_first(meta, "original_path"),
+                                row.get("key"),
+                            )
+                        )
+                        body = str(row.get("contentMd") or row.get("content") or "")[:4000]
+                        score = len(q_terms & _terms(text)) * 3 + len(q_terms & _terms(body))
+                        if score:
+                            scored.append((score, row))
+                    for _score, row in sorted(scored, key=lambda i: -i[0])[:limit]:
+                        docs.append((row, _score))
+            except Exception as exc:
+                errors.append(f"{collection}:{exc}")
                 continue
-            meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
-            def _meta_first(name: str) -> Any:
-                value = meta.get(name)
-                if isinstance(value, list):
-                    return value[0] if value else None
-                return value
-            content = str(row.get("contentMd") or row.get("content") or "")
-            hits.append({
-                "source": "ssot",
-                "storage": "mddb",
-                "collection": collection,
-                "key": row.get("key"),
-                "path": _meta_first("original_path") or "",
-                "title": _meta_first("title"),
-                "score": row.get("score"),
-                "excerpt": content[:1200],
-            })
+        for doc, score in docs[:limit]:
+            content = str(doc.get("contentMd") or doc.get("content") or "")
+            if not content and time.monotonic() < deadline - 0.3:
+                try:
+                    full = _mddb_post(
+                        "get",
+                        {
+                            "collection": collection,
+                            "key": doc.get("key"),
+                            "lang": doc.get("lang") or "en",
+                        },
+                        timeout=max(0.25, min(1.0, deadline - time.monotonic())),
+                    )
+                    if isinstance(full, dict):
+                        content = str(full.get("contentMd") or full.get("content") or "")
+                except Exception:
+                    pass
+            hits.append(_ssot_hit(collection, doc, score, content))
     return hits, errors
 
 
