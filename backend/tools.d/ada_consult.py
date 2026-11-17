@@ -190,6 +190,10 @@ async def run(runner: Any, **args: Any) -> dict[str, Any]:
         return _refuse(
             runner, "consult_model is not an allowed consult alias",
             question_hash)
+    if os.environ.get("ADA_INSTANCE_ID", "").strip() != "ada-dev":
+        return _refuse(
+            runner, "consult is enabled only on ada-dev during the v1 soak",
+            question_hash)
     if not channel:
         return _refuse(
             runner, "consult is available only in text-only channels",

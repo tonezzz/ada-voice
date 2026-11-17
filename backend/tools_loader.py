@@ -139,6 +139,15 @@ def load(tools_dir: Path | None = None) -> ToolRegistry:
         try:
             if cfg.get("enabled") is False:
                 continue
+            if "instances" in cfg:
+                instances = cfg.get("instances")
+                if not isinstance(instances, list) or not instances:
+                    raise ValueError(
+                        "instances must be a non-empty list when specified")
+                current = os.environ.get("ADA_INSTANCE_ID", "").strip()
+                if current not in {str(value).strip()
+                                   for value in instances}:
+                    continue
             mod_path = root / f"{cfg.get('module') or name}.py"
             mod = _load_module(mod_path)
             reg.tools[name] = _validate(name, cfg, mod)

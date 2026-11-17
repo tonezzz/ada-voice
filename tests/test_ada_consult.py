@@ -38,6 +38,7 @@ class TestAdaConsult(unittest.IsolatedAsyncioTestCase):
 
     def _gateway_env(self):
         return patch.dict(os.environ, {
+            "ADA_INSTANCE_ID": "ada-dev",
             "ADA_GEMINI_REST_BASE_URL": "https://gateway.invalid/v1beta",
             "LITELLM_KEY_CONSULT": "test-consult-key",
             "ADA_CONSULT_MAX_USD": "0.10",
@@ -132,6 +133,7 @@ class TestAdaConsult(unittest.IsolatedAsyncioTestCase):
         self, mock_rest_client,
     ):
         with patch.dict(os.environ, {
+            "ADA_INSTANCE_ID": "ada-dev",
             "ADA_CONSULT_MAX_USD": "0.10",
             "ADA_CONSULT_FLASH_INPUT_USD_PER_MILLION": "1",
             "ADA_CONSULT_FLASH_OUTPUT_USD_PER_MILLION": "2",
@@ -160,6 +162,17 @@ class TestAdaConsult(unittest.IsolatedAsyncioTestCase):
                 context_class="curated")
         self.assertFalse(result["ok"])
         self.assertIn("text-only", result["error"])
+        mock_rest_client.assert_not_called()
+
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_non_dev_instance_is_refused(self, mock_rest_client):
+        with self._gateway_env(), patch.dict(
+            os.environ, {"ADA_INSTANCE_ID": "ada-ha-tony"}):
+            result = await ada_consult.run(
+                self.runner, question="Question", context="Curated context",
+                context_class="curated")
+        self.assertFalse(result["ok"])
+        self.assertIn("only on ada-dev", result["error"])
         mock_rest_client.assert_not_called()
 
     @patch("ada_consult.gemini_pool.rest_client")

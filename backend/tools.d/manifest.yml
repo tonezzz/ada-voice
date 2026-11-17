@@ -159,3 +159,4 @@ tools:
     policy: read
     secondary_allowed: false
     timeout_s: 180
+    instances: [ada-dev]
