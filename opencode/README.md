@@ -15,3 +15,12 @@ Deploy path: ~/.local/share/ada-code/workspace/
   commands/ada.md          -> workspace/.opencode/commands/ada.md
 
 Edit here, copy to the workspace, then `systemctl --user restart ada-code`.
+
+**Bridge version (2026-11-17):** every tool response carries a top-level
+`bridge` object `{version, tools_count}` and each `calls.jsonl` line records
+`bridge_version`, so a session's audit trail proves which ada_mcp.py copy
+served it. Resolution order: `ADA_BRIDGE_VERSION` env > `.opencode/VERSION`
+file > `git describe --always --dirty` in the file's dir > content hash of
+the file (`dev-<sha10>`). When deploying outside a git checkout, stamp it:
+`git -C <repo> rev-parse HEAD > workspace/.opencode/VERSION`. The
+`ada_bridge_info` tool returns version + tool list + features on demand.

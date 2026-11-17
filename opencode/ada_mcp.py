@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.error
@@ -41,6 +42,50 @@ ADOBE_STOCK_INDEX_FILES = (
     "rejection-patterns.json",
     "prompt-patterns.json",
 )
+
+def _resolve_bridge_version() -> str:
+    """Identify which bridge copy is serving: env > VERSION file > git > content hash.
+
+    Deploy can inject ADA_BRIDGE_VERSION or write .opencode/VERSION
+    (e.g. `git rev-parse HEAD > .opencode/VERSION`). A repo checkout
+    resolves `git describe --always --dirty`. Anything else falls back to
+    a hash of this file so a stale copy still reports a different version.
+    """
+    env_version = os.environ.get("ADA_BRIDGE_VERSION", "").strip()
+    if env_version:
+        return env_version
+    here = Path(__file__).resolve().parent
+    try:
+        file_version = (here / "VERSION").read_text(encoding="utf-8").splitlines()[0].strip()
+        if file_version:
+            return file_version
+    except (OSError, IndexError):
+        pass
+    try:
+        proc = subprocess.run(
+            ["git", "describe", "--always", "--dirty", "--tags"],
+            cwd=here, capture_output=True, text=True, timeout=5,
+        )
+        sha = proc.stdout.strip()
+        if proc.returncode == 0 and sha:
+            return f"git-{sha}"
+    except Exception:
+        pass
+    try:
+        digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:10]
+        return f"dev-{digest}"
+    except OSError:
+        return "dev-unknown"
+
+
+BRIDGE_VERSION = _resolve_bridge_version()
+
+
+def _audit_dir() -> Path:
+    """calls.jsonl location; ADA_CONTROL_AUDIT_DIR overrides for tests/debug."""
+    override = os.environ.get("ADA_CONTROL_AUDIT_DIR", "").strip()
+    return Path(override) if override else Path.home() / ".local" / "share" / "ada-control"
+
 
 mcp = FastMCP("ada-control")
 PENDING_NEXT_SELECTIONS: dict[str, tuple[str, float]] = {}
@@ -2617,14 +2662,41 @@ def _safe_cwd() -> str:
         return ""
 
 
+def _bridge_meta() -> dict[str, Any]:
+    """The top-level 'bridge' object attached to every tool response."""
+    manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None) if manager else None
+    return {
+        "version": BRIDGE_VERSION,
+        "tools_count": len(tools) if isinstance(tools, dict) else 0,
+    }
+
+
+def _with_bridge_envelope(result: Any) -> Any:
+    """Attach the top-level bridge object to a JSON tool response."""
+    if isinstance(result, dict):
+        return {"bridge": _bridge_meta(), **result}
+    if not isinstance(result, str):
+        return result
+    try:
+        parsed = json.loads(result)
+    except Exception:
+        return result
+    if not isinstance(parsed, dict):
+        return result
+    return json.dumps({"bridge": _bridge_meta(), **parsed},
+                      ensure_ascii=False, indent=2)
+
+
 def _audit_log(tool_name: str, kwargs: dict[str, Any], result: Any,
                elapsed: float, error: str = "") -> None:
     """Append one JSONL line per MCP tool call for session debugging."""
     try:
-        audit_dir = Path.home() / ".local" / "share" / "ada-control"
+        audit_dir = _audit_dir()
         audit_dir.mkdir(parents=True, exist_ok=True)
         entry: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "bridge_version": BRIDGE_VERSION,
             "tool": tool_name,
             "cwd": _safe_cwd(),
             "elapsed_s": round(elapsed, 3),
@@ -2652,6 +2724,37 @@ def _audit_log(tool_name: str, kwargs: dict[str, Any], result: Any,
         pass
 
 
+@mcp.tool()
+def ada_bridge_info() -> str:
+    """Report which bridge copy is serving: version, tool list, features.
+
+    Two ada_mcp.py copies at different revisions return different
+    versions — use this to prove which copy served a session.
+    """
+    manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None) if manager else None
+    tool_names = sorted(tools) if isinstance(tools, dict) else []
+    return json.dumps({
+        "ok": True,
+        "operation": "bridge-info",
+        "bridge": {
+            "version": BRIDGE_VERSION,
+            "tools_count": len(tool_names),
+            "tools": tool_names,
+        },
+        "features": {
+            "response_bridge_envelope": True,
+            "call_audit_jsonl": str(_audit_dir() / "calls.jsonl"),
+            "version_resolution": (
+                "ADA_BRIDGE_VERSION env > .opencode/VERSION file > "
+                "git describe --always --dirty > content hash"
+            ),
+        },
+        "workspace": str(WORKSPACE),
+        "board_api": BOARD_API,
+    }, ensure_ascii=False, indent=2)
+
+
 def _install_call_audit() -> None:
     """Wrap every registered MCP tool with the JSONL call audit."""
     import inspect as _inspect
@@ -2669,7 +2772,7 @@ def _install_call_audit() -> None:
             async def _aw(*args, _fn=fn, _name=name, **kwargs):
                 t0 = time.monotonic()
                 try:
-                    res = await _fn(*args, **kwargs)
+                    res = _with_bridge_envelope(await _fn(*args, **kwargs))
                 except Exception as exc:
                     _audit_log(_name, kwargs, None, time.monotonic() - t0, error=str(exc))
                     raise
@@ -2681,7 +2784,7 @@ def _install_call_audit() -> None:
             def _sw(*args, _fn=fn, _name=name, **kwargs):
                 t0 = time.monotonic()
                 try:
-                    res = _fn(*args, **kwargs)
+                    res = _with_bridge_envelope(_fn(*args, **kwargs))
                 except Exception as exc:
                     _audit_log(_name, kwargs, None, time.monotonic() - t0, error=str(exc))
                     raise
@@ -2694,5 +2797,30 @@ def _install_call_audit() -> None:
 _install_call_audit()
 
 
+def _audit_startup() -> None:
+    """Record which bridge copy spawned so sessions have version evidence."""
+    try:
+        audit_dir = _audit_dir()
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event": "startup",
+            "bridge_version": BRIDGE_VERSION,
+            "tools_count": _bridge_meta()["tools_count"],
+            "cwd": _safe_cwd(),
+            "pid": os.getpid(),
+        }
+        with open(audit_dir / "calls.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    _audit_startup()
+    print(
+        f"ada-control bridge {BRIDGE_VERSION} starting "
+        f"(tools={_bridge_meta()['tools_count']} pid={os.getpid()} cwd={_safe_cwd()})",
+        file=sys.stderr,
+    )
     mcp.run(transport="stdio")
