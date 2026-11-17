@@ -70,7 +70,7 @@ checks = [
 
 # long-running units vs timer-driven oneshots — inactive is only bad
 # for the first kind. gev-gemini lives on tony-dell, not here.
-SERVICES = ["mddb", "ada-ha-tony", "jev-student", "ada-pi-pwa"]
+SERVICES = ["mddb", "ada-ha-tony", "jev-student"]
 TIMERS = ["news-flood", "ada-scenario-smoke", "jev-bench",
           "ada-memory-sync", "doc-mirror"]
 svc_rows = []
