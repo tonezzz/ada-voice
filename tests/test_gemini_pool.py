@@ -111,6 +111,21 @@ class PoolTests(unittest.TestCase):
             self.assertIn("t", st["last_quota_errors"])
             self.assertNotIn("secretkeyvalue", json.dumps(st))
 
+    def test_rest_client_uses_dedicated_gateway_key(self):
+        with patch.dict(os.environ, {
+            "ADA_GEMINI_REST_BASE_URL": "https://gateway.invalid/v1beta",
+            "ADA_GEMINI_REST_API_KEY": "shared-key",
+        }), patch("google.genai.Client") as client:
+            gemini_pool.rest_client(gateway_api_key="consult-key")
+        self.assertEqual(
+            client.call_args.kwargs["api_key"], "consult-key")
+
+    def test_gateway_key_refuses_direct_transport(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(
+                    RuntimeError, "requires ADA_GEMINI_REST_BASE_URL"):
+                gemini_pool.rest_client(gateway_api_key="consult-key")
+
 
 class ParkSplitTests(unittest.TestCase):
     """429-vs-quota split (render-flow-quality-pass): transient
