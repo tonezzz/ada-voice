@@ -1,97 +1,197 @@
 import asyncio
+import importlib.util
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# In tests, we need to load modules from tools.d properly if they aren't part of standard python package
-import importlib.util
-spec = importlib.util.spec_from_file_location("ada_consult", "backend/tools.d/ada_consult.py")
+spec = importlib.util.spec_from_file_location(
+    "ada_consult", "backend/tools.d/ada_consult.py")
 ada_consult = importlib.util.module_from_spec(spec)
 sys.modules["ada_consult"] = ada_consult
 spec.loader.exec_module(ada_consult)
 
 
 class TestAdaConsult(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    def setUp(self):
         self.runner = MagicMock()
         self.runner.context.emit_ops_event = MagicMock()
-        self.runner.mddb = MagicMock()
-        self.time_patch = patch('ada_consult.time.monotonic', return_value=100.0)
-        self.mock_time = self.time_patch.start()
-
-    async def asyncTearDown(self):
-        self.time_patch.stop()
+        self.runner.current_channel = "webchat"
 
     def _mock_client(self, response_text="expert answer", error=None):
         client = MagicMock()
-        generate_mock = AsyncMock()
+        generate = AsyncMock()
         if error:
-            generate_mock.side_effect = error
+            generate.side_effect = error
         else:
-            resp = MagicMock()
-            resp.text = response_text
-            generate_mock.return_value = resp
-
-        client.aio.models.generate_content = generate_mock
+            response = MagicMock()
+            response.text = response_text
+            response.usage_metadata = SimpleNamespace(
+                prompt_token_count=12,
+                candidates_token_count=20,
+                total_token_count=32,
+            )
+            generate.return_value = response
+        client.aio.models.generate_content = generate
         return client
 
-    @patch('ada_consult.gemini_pool.rest_client')
-    async def test_success_call(self, mock_rest_client):
+    def _gateway_env(self):
+        return patch.dict(os.environ, {
+            "ADA_GEMINI_REST_BASE_URL": "https://gateway.invalid/v1beta",
+            "LITELLM_KEY_CONSULT": "test-consult-key",
+        })
+
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_success_uses_dedicated_gateway_key_and_safe_events(
+        self, mock_rest_client,
+    ):
         mock_rest_client.return_value = self._mock_client()
+        with self._gateway_env():
+            result = await ada_consult.run(
+                self.runner, question="What is life?", context="In the universe",
+                context_class="curated",
+                consult_model="consult-flash")
 
-        args = {
-            "question": "What is life?",
-            "context": "In the universe",
-            "consult_model": "gemini-3.5-flash-test"
-        }
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model"], "consult-flash")
+        self.assertEqual(result["answer"], "expert answer")
+        self.assertEqual(result["usage"]["total_tokens"], 32)
+        self.assertIsNone(result["estimated_cost_usd"])
+        mock_rest_client.assert_called_once_with(
+            gateway_api_key="test-consult-key")
+        call = mock_rest_client.return_value.aio.models.generate_content
+        self.assertEqual(call.call_args.kwargs["model"], "consult-flash")
+        self.assertIn("untrusted reference context",
+                      call.call_args.kwargs["contents"])
+        self.assertEqual(call.call_args.kwargs["config"].max_output_tokens, 3072)
+        event_details = [
+            call.kwargs["detail"]
+            for call in self.runner.context.emit_ops_event.call_args_list
+        ]
+        self.assertTrue(any("question_sha256=" in detail
+                            for detail in event_details))
+        self.assertFalse(any("What is life?" in detail
+                             for detail in event_details))
 
-        res = await ada_consult.run(self.runner, **args)
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_failure_event_does_not_include_provider_exception_text(
+        self, mock_rest_client,
+    ):
+        mock_rest_client.return_value = self._mock_client(
+            error=RuntimeError("request included secret text"))
+        with self._gateway_env():
+            result = await ada_consult.run(
+                self.runner, question="Question", context="Curated context",
+                context_class="curated")
 
-        self.assertTrue(res["ok"])
-        self.assertEqual(res["model"], "gemini-3.5-flash-test")
-        self.assertEqual(res["answer"], "expert answer")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "consultation failed (RuntimeError)")
+        details = [
+            call.kwargs["detail"]
+            for call in self.runner.context.emit_ops_event.call_args_list
+        ]
+        self.assertFalse(any("secret text" in detail for detail in details))
 
-        mock_rest_client.assert_called_once()
-        self.runner.context.emit_ops_event.assert_any_call(
-            ev_type="consult_requested",
-            detail="Consult requested for model=gemini-3.5-flash-test, question=What is life?...",
-            tool="ada_consult"
-        )
-        self.runner.context.emit_ops_event.assert_any_call(
-            ev_type="consult_completed",
-            detail="Consult completed for model=gemini-3.5-flash-test, latency=0.00s",
-            tool="ada_consult"
-        )
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_secret_and_transcript_inputs_are_refused(self, mock_rest_client):
+        with self._gateway_env():
+            secret = await ada_consult.run(
+                self.runner, question="Question",
+                context="api_key=not-a-real-secret-value",
+                context_class="curated")
+            transcript = await ada_consult.run(
+                self.runner, question="Question",
+                context=("=== MESSAGE 1 - User ===\nhello\n"
+                         "=== MESSAGE 2 - Assistant ===\nanswer"),
+                context_class="curated")
 
-    @patch('ada_consult.gemini_pool.rest_client')
-    async def test_failure_call(self, mock_rest_client):
-        mock_rest_client.return_value = self._mock_client(error=RuntimeError("API down"))
+        self.assertFalse(secret["ok"])
+        self.assertIn("refused", secret["error"])
+        self.assertFalse(transcript["ok"])
+        self.assertIn("transcript", transcript["error"])
+        mock_rest_client.assert_not_called()
 
-        args = {
-            "question": "What is life?",
-            "context": "In the universe",
-        }
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_explicit_private_transcript_class_is_refused(
+        self, mock_rest_client,
+    ):
+        with self._gateway_env():
+            result = await ada_consult.run(
+                self.runner, question="Question", context="Curated excerpt",
+                context_class="private_transcript")
+        self.assertFalse(result["ok"])
+        self.assertIn("transcript", result["error"])
+        mock_rest_client.assert_not_called()
 
-        res = await ada_consult.run(self.runner, **args)
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_requires_gateway_key_and_allowlisted_alias(
+        self, mock_rest_client,
+    ):
+        with patch.dict(os.environ, {}, clear=True):
+            unconfigured = await ada_consult.run(
+                self.runner, question="Question", context="Curated context",
+                context_class="curated")
+        with self._gateway_env():
+            raw_model = await ada_consult.run(
+                self.runner, question="Question", context="Curated context",
+                context_class="curated",
+                consult_model="gemini-3.5-flash")
 
-        self.assertFalse(res["ok"])
-        self.assertIn("API down", res["error"])
+        self.assertFalse(unconfigured["ok"])
+        self.assertIn("not configured", unconfigured["error"])
+        self.assertFalse(raw_model["ok"])
+        self.assertIn("allowed consult alias", raw_model["error"])
+        mock_rest_client.assert_not_called()
 
-        self.runner.context.emit_ops_event.assert_any_call(
-            ev_type="consult_failed",
-            detail="Consult failed for model=gemini-3.5-flash, latency=0.00s: API down",
-            tool="ada_consult"
-        )
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_voice_channel_is_refused(self, mock_rest_client):
+        self.runner.current_channel = None
+        with self._gateway_env():
+            result = await ada_consult.run(
+                self.runner, question="Question", context="Curated context",
+                context_class="curated")
+        self.assertFalse(result["ok"])
+        self.assertIn("text-only", result["error"])
+        mock_rest_client.assert_not_called()
 
-    async def test_missing_args(self):
-        res1 = await ada_consult.run(self.runner, context="context")
-        self.assertFalse(res1["ok"])
-        self.assertEqual(res1["error"], "question is required")
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_input_size_is_bounded(self, mock_rest_client):
+        with self._gateway_env(), patch.dict(
+            os.environ, {"ADA_CONSULT_MAX_CONTEXT_CHARS": "3"}):
+            result = await ada_consult.run(
+                self.runner, question="Q", context="long context",
+                context_class="curated")
+        self.assertFalse(result["ok"])
+        self.assertIn("size limit", result["error"])
+        mock_rest_client.assert_not_called()
 
-        res2 = await ada_consult.run(self.runner, question="Q")
-        self.assertFalse(res2["ok"])
-        self.assertEqual(res2["error"], "context is required")
+    @patch("ada_consult.gemini_pool.rest_client")
+    async def test_wall_time_is_bounded(self, mock_rest_client):
+        client = self._mock_client(error=asyncio.TimeoutError())
+        mock_rest_client.return_value = client
+        with self._gateway_env():
+            result = await ada_consult.run(
+                self.runner, question="Question", context="Curated context",
+                context_class="curated")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "consultation timed out")
 
-if __name__ == '__main__':
+    async def test_context_class_is_required(self):
+        result = await ada_consult.run(
+            self.runner, question="Question", context="Curated context")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "context_class is required")
+
+    def test_cost_estimate_requires_configured_rates(self):
+        usage = {"input_tokens": 1000, "output_tokens": 2000}
+        with patch.dict(os.environ, {
+            "ADA_CONSULT_FLASH_INPUT_USD_PER_MILLION": "1",
+            "ADA_CONSULT_FLASH_OUTPUT_USD_PER_MILLION": "2",
+        }):
+            self.assertEqual(
+                ada_consult._estimate_cost(usage, "consult-flash"), 0.005)
+
+
+if __name__ == "__main__":
     unittest.main()
