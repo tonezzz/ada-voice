@@ -137,7 +137,71 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", " ", text or "").replace("&nbsp;", " ")
 
 
-def _lesson_memory(query: str, deadline: float, limit: int = 3) -> list[dict[str, Any]]:
+def _meta_value(meta: dict[str, Any], name: str) -> Any:
+    value = meta.get(name)
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _lesson_memory_mddb(query: str, deadline: float, limit: int = 3) -> list[dict[str, Any]]:
+    """Read Education lessons from the fast MDDB chaba-lessons mirror.
+
+    The CMS /search endpoint returns the mirrored docs with contentMd in a
+    single call (~0.3s for the full corpus); relevance is ranked locally.
+    """
+    remaining = max(0.25, min(2.5, deadline - time.monotonic()))
+    payload = _mddb_post(
+        "search",
+        {"collection": "chaba-lessons", "limit": 500},
+        timeout=remaining,
+    )
+    if isinstance(payload, dict):
+        payload = payload.get("result", payload.get("docs", []))
+    if not isinstance(payload, list):
+        return []
+    q = _terms(query)
+    ranked = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+        head = " ".join(
+            str(value or "")
+            for value in (
+                _meta_value(meta, "topic"),
+                _meta_value(meta, "slug"),
+                _meta_value(meta, "wiki_title"),
+                _meta_value(meta, "title"),
+                row.get("key"),
+            )
+        )
+        body = str(row.get("contentMd") or row.get("content") or "")
+        score = len(q & _terms(head)) * 3 + len(q & _terms(body[:4000]))
+        if score:
+            ranked.append((score, row, meta))
+    hits = []
+    for score, row, meta in sorted(
+        ranked, key=lambda item: (-item[0], str(item[1].get("key") or ""))
+    )[:limit]:
+        hits.append({
+            "source": "education",
+            "storage": "mddb",
+            "collection": "chaba-lessons",
+            "key": row.get("key"),
+            "slug": _meta_value(meta, "slug"),
+            "topic": _meta_value(meta, "topic"),
+            "wiki_title": _meta_value(meta, "wiki_title"),
+            "url": _meta_value(meta, "url"),
+            "level": _meta_value(meta, "level"),
+            "score": score,
+            "excerpt": str(row.get("contentMd") or row.get("content") or "")[:1200],
+        })
+    return hits
+
+
+def _lesson_memory_board(query: str, deadline: float, limit: int = 3) -> list[dict[str, Any]]:
+    """Fallback: read Education lessons via the slow WP-backed board-api."""
     remaining = max(0.25, min(1.5, deadline - time.monotonic()))
     payload = _post_json("/lesson", {"op": "list", "from": "devin"}, timeout=remaining)
     rows = payload.get("lessons", []) if isinstance(payload, dict) else []
@@ -162,8 +226,26 @@ def _lesson_memory(query: str, deadline: float, limit: int = 3) -> list[dict[str
             body = _strip_html(detail.get("content", ""))
         except Exception as exc:
             body = f"lesson read failed: {exc}"
-        hits.append({"source": "education", "slug": row.get("slug"), "topic": row.get("topic"), "score": score, "excerpt": body[:1200]})
+        hits.append({
+            "source": "education",
+            "storage": "board-api",
+            "slug": row.get("slug"),
+            "topic": row.get("topic"),
+            "score": score,
+            "excerpt": body[:1200],
+        })
     return hits
+
+
+def _lesson_memory(query: str, deadline: float, limit: int = 3) -> list[dict[str, Any]]:
+    """Prefer the MDDB chaba-lessons mirror; fall back to board-api /lesson."""
+    try:
+        return _lesson_memory_mddb(query, deadline, limit)
+    except Exception as mddb_exc:
+        try:
+            return _lesson_memory_board(query, deadline, limit)
+        except Exception as board_exc:
+            raise RuntimeError(f"mddb:{mddb_exc}; board-api:{board_exc}") from board_exc
 
 
 def _devin_memory(query: str, deadline: float, limit: int = 3) -> list[dict[str, Any]]:
@@ -1414,7 +1496,8 @@ def ada_context_pack(
 
         sources = [
             "board-api:/cards",
-            "education:/lesson",
+            "mddb:chaba-lessons",
+            "education:/lesson(fallback)",
             "mddb:ada-ha-bank-devin-tony",
             "mddb:infrastructure-ssot",
             "mddb:chaba-glossary",
