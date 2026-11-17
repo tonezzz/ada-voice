@@ -2,6 +2,7 @@
 """Read-only Ada control-plane MCP bridge for the DevNest OpenCode project."""
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import time
 import urllib.parse
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -80,9 +82,9 @@ def _selection_gate(card_reference: str, selection_token: str) -> str | None:
     return None
 
 
-def _get_json(path: str) -> Any:
+def _get_json(path: str, timeout: float = 15) -> Any:
     req = urllib.request.Request(f"{BOARD_API}{path}", headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=15) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -226,10 +228,10 @@ def _devin_mddb_memory(query: str, deadline: float, limit: int = 3) -> list[dict
     return hits
 
 
-def recall_memory(query: str) -> dict[str, Any]:
+def recall_memory(query: str, deadline: float | None = None) -> dict[str, Any]:
     """Read Education and canonical Devin summaries with local fallback."""
     errors = []
-    deadline = time.monotonic() + 4.5
+    deadline = deadline if deadline is not None else time.monotonic() + 4.5
     try:
         lessons = _lesson_memory(query, deadline)
     except Exception as exc:
@@ -247,6 +249,50 @@ def recall_memory(query: str) -> dict[str, Any]:
             sessions = []
             errors.append(f"devin-session:{local_exc}")
     return {"query": query, "lessons": lessons, "devin_sessions": sessions, "errors": errors}
+
+
+
+def _ssot_search(query: str, deadline: float, limit: int = 3) -> tuple[list[dict[str, Any]], list[str]]:
+    """Search canonical SSOT documents in MDDB; read-only and collection-allowlisted."""
+    hits: list[dict[str, Any]] = []
+    errors: list[str] = []
+    collections = ("infrastructure-ssot", "chaba-glossary")
+    for collection in collections:
+        remaining = max(0.25, min(1.5, deadline - time.monotonic()))
+        if remaining <= 0.25:
+            break
+        try:
+            payload = _mddb_post(
+                "search",
+                {"collection": collection, "query": query, "limit": limit},
+                timeout=remaining,
+            )
+        except Exception as exc:
+            errors.append(f"{collection}:{exc}")
+            continue
+        if not isinstance(payload, list):
+            continue
+        for row in payload[:limit]:
+            if not isinstance(row, dict):
+                continue
+            meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            def _meta_first(name: str) -> Any:
+                value = meta.get(name)
+                if isinstance(value, list):
+                    return value[0] if value else None
+                return value
+            content = str(row.get("contentMd") or row.get("content") or "")
+            hits.append({
+                "source": "ssot",
+                "storage": "mddb",
+                "collection": collection,
+                "key": row.get("key"),
+                "path": _meta_first("original_path") or "",
+                "title": _meta_first("title"),
+                "score": row.get("score"),
+                "excerpt": content[:1200],
+            })
+    return hits, errors
 
 
 def _adobe_stock_index_root() -> Path:
@@ -727,6 +773,54 @@ def _safe_card(card: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _context_card(reference: str, deadline: float) -> dict[str, Any]:
+    """Resolve one card through board-api projected reads for context packs.
+
+    Uses the compact board projection to map id/ref/title to a card id, then
+    fetches only the fields `_safe_card` needs. This avoids the legacy full
+    `/cards` dump inside an MCP request budget.
+    """
+    needle = reference.strip()
+    if not needle:
+        raise ValueError("card reference is required")
+    lowered = needle.lower()
+    fields = "id,ref,title,column,priority,updated,brief,spec,action,requests,comms"
+
+    def remaining() -> float:
+        return max(0.5, deadline - time.monotonic())
+
+    def fetch_by_id(card_id: Any) -> dict[str, Any] | None:
+        if card_id in (None, ""):
+            return None
+        payload = _get_json(
+            f"/cards?id={urllib.parse.quote(str(card_id), safe='')}&limit=1&fields={fields}",
+            timeout=remaining(),
+        )
+        rows = payload.get("cards") if isinstance(payload, dict) else []
+        return rows[0] if rows and isinstance(rows[0], dict) else None
+
+    exact_id = fetch_by_id(needle)
+    if exact_id is not None:
+        return exact_id
+
+    compact = _get_json("/cards?compact=1&limit=1000", timeout=remaining())
+    rows = compact.get("cards") if isinstance(compact, dict) else []
+    rows = [row for row in rows if isinstance(row, dict)]
+    exact = [
+        row for row in rows
+        if lowered in {str(row.get("id") or "").lower(), str(row.get("ref") or "").lower()}
+    ]
+    if len(exact) > 1:
+        raise _ambiguity_error(reference, exact)
+    titled = [row for row in rows if lowered in str(row.get("title") or "").lower()]
+    if len(titled) > 1 and not exact:
+        raise _ambiguity_error(reference, titled)
+    candidate = exact[0] if exact else (titled[0] if titled else None)
+    if candidate is None:
+        raise LookupError(f"no board card matched {reference!r}")
+    return fetch_by_id(candidate.get("id")) or candidate
+
+
 def build_plan(card: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
@@ -1009,6 +1103,358 @@ def ada_handoff_preview(card_reference: str, plan_confirmation: str = "") -> str
     except Exception as exc:
         return json.dumps({"ok": False, "operation": "handoff-preview", "error": str(exc), "board_api": BOARD_API})
 
+
+_PICK_STRATEGIES = ("sweep", "high-value", "stale", "queue")
+_CARD_PRIORITY_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _card_updated_ts(card: dict[str, Any]) -> datetime:
+    raw = str(card.get("updated") or card.get("created") or "")
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw[:16], fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return datetime.now(timezone.utc)
+
+
+def _card_actionable(card: dict[str, Any]) -> bool:
+    """Not finished, not waiting on a human, not already owned."""
+    if card.get("column") in ("done", "archive"):
+        return False
+    for r in card.get("requests") or []:
+        if r.get("status") not in ("answered", "closed"):
+            return False
+    if (card.get("action") or {}).get("status") in ("claimed", "running"):
+        return False
+    return True
+
+
+def _pick_cards(strategy: str, days: int, limit: int) -> list[dict[str, Any]]:
+    """Score actionable cards for one strategy; returns best-first rows."""
+    now = datetime.now(timezone.utc)
+    scored: list[tuple[dict[str, Any], str, tuple]] = []
+    for card in _cards():
+        if not _card_actionable(card):
+            continue
+        age = (now - _card_updated_ts(card)).days
+        col = card.get("column") or "backlog"
+        if strategy == "queue":
+            if (card.get("action") or {}).get("status") == "queued":
+                scored.append((card, "queued for dispatch", (0,)))
+        elif strategy == "stale":
+            if col == "doing" and age >= days:
+                scored.append((card, f"doing, idle {age}d", (age,)))
+        elif strategy == "sweep":
+            scored.append((
+                card,
+                f"{col}, untouched {age}d",
+                (1 if col == "doing" else 0, age),
+            ))
+        elif strategy == "high-value":
+            rank = _CARD_PRIORITY_RANK.get(
+                str(card.get("priority") or "").lower(), 0)
+            if rank:
+                scored.append((
+                    card,
+                    f"priority {card.get('priority')}, untouched {age}d",
+                    (rank, age),
+                ))
+    if strategy in ("sweep", "high-value", "stale"):
+        scored.sort(key=lambda t: t[2], reverse=True)
+    return [{"card": c, "why": w} for c, w, _ in scored[:limit]]
+
+
+@mcp.tool()
+def ada_card_pick(strategy: str = "sweep", limit: int = 3, days: int = 7) -> str:
+    """Pick actionable board cards by strategy; read-only, issues tokens.
+
+    sweep      — stalest actionable card (doing first, then backlog)
+    high-value — priority high>medium>low, ties by oldest updated
+    stale      — doing cards idle >= `days` (default 7)
+    queue      — cards with action.status == queued, board order
+
+    Candidates carry a selection_token usable with ada_plan/ada_preflight.
+    """
+    try:
+        if strategy not in _PICK_STRATEGIES:
+            return json.dumps({
+                "ok": False,
+                "operation": "card-pick",
+                "error": f"strategy must be one of {list(_PICK_STRATEGIES)}",
+            }, ensure_ascii=False, indent=2)
+        picks = _pick_cards(strategy, days, max(1, min(int(limit), 10)))
+        PENDING_NEXT_SELECTIONS.clear()
+        for pick in picks:
+            card = pick["card"]
+            ref = str(card.get("ref") or card.get("id") or "").lower()
+            if ref:
+                token = secrets.token_urlsafe(12)
+                pick["selection_token"] = token
+                PENDING_NEXT_SELECTIONS[ref] = (token, time.monotonic() + 900)
+            pick["card"] = _safe_card(card)
+        return json.dumps({
+            "ok": True,
+            "operation": "card-pick",
+            "strategy": strategy,
+            "picks": picks,
+            "mutations_performed": [],
+            "next_safe_action": (
+                "confirm a pick, then call ada_card_context for the work "
+                "pack or ada_preflight for the gated receipt"
+            ),
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False, "operation": "card-pick", "error": str(exc),
+            "board_api": BOARD_API,
+        }, ensure_ascii=False, indent=2)
+
+
+_CONTEXT_PATH_RE = re.compile(
+    r"(?:^|[\s'\"(])((?:docs|scripts|integrations|stacks|apps|tests|"
+    r"opencode|\.github|reports)/[\w./~:@+-]+)")
+_CONTEXT_FILE_RE = re.compile(
+    r"(?:^|[\s'\"(])([\w.+-]+\.(?:py|mjs|js|ts|sh|yml|yaml|md|json|php))")
+_DONE_HINTS_RE = re.compile(
+    r"(verif|done|deploy|expect|must|should|gate|check|test|confirm)",
+    re.IGNORECASE)
+_CONTEXT_MAX_COMMS = 5
+
+
+def _context_card_text(card: dict[str, Any]) -> str:
+    parts = [card.get("brief") or "", card.get("spec") or ""]
+    for c in (card.get("comms") or [])[-_CONTEXT_MAX_COMMS:]:
+        parts.append(str(c.get("text") or ""))
+    for r in card.get("requests") or []:
+        parts.append(str(r.get("ask") or ""))
+        parts.append(str(r.get("answer") or ""))
+    return "\n".join(parts)
+
+
+def _context_files(text: str, root: Path, max_files: int) -> list[Path]:
+    """Path-shaped tokens that exist under the workspace, deduped."""
+    seen, found = set(), []
+    for m in _CONTEXT_PATH_RE.finditer(text):
+        p = m.group(1).rstrip(".,;:)]")
+        f = root / p
+        if f.is_file() and p not in seen:
+            seen.add(p)
+            found.append(f)
+    for m in _CONTEXT_FILE_RE.finditer(text):
+        name = m.group(1)
+        if "/" in name:
+            continue
+        for f in list(root.glob(f"**/{name}"))[:1]:
+            rel = str(f.relative_to(root))
+            if rel not in seen:
+                seen.add(rel)
+                found.append(f)
+    return found[:max_files]
+
+
+def _context_done_condition(card: dict[str, Any]) -> str:
+    spec = (card.get("spec") or "").replace("\n", " ")
+    hinted = [s.strip() for s in re.split(r"(?<=[.;:])\s+", spec)
+              if _DONE_HINTS_RE.search(s)]
+    if hinted:
+        return hinted[-1]
+    brief = (card.get("brief") or "").strip()
+    return (brief[:200] if brief
+            else "(no explicit done-condition — derive one from spec "
+                 "before starting)")
+
+
+def _context_pack(card: dict[str, Any], root: Path,
+                  max_files: int = 8, head: int = 40) -> str:
+    text = _context_card_text(card)
+    files = _context_files(text, root, max_files)
+    md = [f"# Card {card.get('ref') or card.get('id')}: {card.get('title')}", ""]
+    md.append(f"- id: `{card.get('id')}`  ref: `{card.get('ref')}`")
+    md.append(f"- column: `{card.get('column')}`  "
+              f"priority: `{card.get('priority')}`")
+    if card.get("brief"):
+        md += ["", "## Brief", "", card["brief"]]
+    if card.get("spec"):
+        md += ["", "## Spec (verbatim)", "", card["spec"]]
+    open_reqs = [r for r in (card.get("requests") or [])
+                 if r.get("status") not in ("answered", "closed")]
+    if open_reqs:
+        md += ["", "## Open requests (needs human input first)"]
+        for r in open_reqs:
+            md.append(f"- {r.get('ask')} "
+                      f"(options: {', '.join(r.get('options') or [])})")
+    comms = (card.get("comms") or [])[-_CONTEXT_MAX_COMMS:]
+    if comms:
+        md += ["", "## Recent comms"]
+        for c in comms:
+            body = str(c.get("text") or "")
+            md.append(f"- `{c.get('at')}` {c.get('from')}: "
+                      f"{body[:300]}{'…' if len(body) > 300 else ''}")
+    for f in files:
+        try:
+            lines = f.read_text(errors="replace").splitlines()[:head]
+        except OSError:
+            continue
+        md += ["", f"### {f.relative_to(root)}", "", "```",
+               "\n".join(lines), "```"]
+    md += ["", "## Gates & conventions", "",
+           "- Work in a dispatch worktree; never edit the live checkout.",
+           "- Card mutations go through board-api, never card-YAML edits.",
+           "- Push via scripts/git-safe-push.sh; open a PR, let CI gate.",
+           "- Verify real state before asserting done.",
+           "- No secrets in chat/commits; never print token values.",
+           "", "## Done-condition (synthesized — check before finishing)",
+           "", _context_done_condition(card)]
+    return "\n".join(md)
+
+
+@mcp.tool()
+def ada_card_context(card_reference: str, max_files: int = 8) -> str:
+    """Build a compact work pack for one card; read-only.
+
+    Card fields + open requests + recent comms + workspace files
+    referenced by the card + gates + a synthesized done-condition.
+    The pack is sized to start an opencode session without the whole board.
+    """
+    try:
+        card = find_card(card_reference)
+        pack = _context_pack(card, WORKSPACE, max(0, min(int(max_files), 12)))
+        return json.dumps({
+            "ok": True,
+            "operation": "card-context",
+            "card": _safe_card(card),
+            "pack_markdown": pack,
+            "mutations_performed": [],
+            "next_safe_action": (
+                "work the pack in this session, verify the done-condition, "
+                "then hand the diff back for human review/commit"
+            ),
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False, "operation": "card-context", "error": str(exc),
+            "board_api": BOARD_API,
+        }, ensure_ascii=False, indent=2)
+
+
+
+@mcp.tool()
+def ada_context_pack(
+    query: str,
+    card_reference: str = "",
+    profile: str = "ssot-research",
+    include_memory: bool = True,
+    include_ssot: bool = True,
+    limit: int = 5,
+) -> str:
+    """Build a bounded read-only context pack for OpenChamber/OpenCode.
+
+    Composes SSOT, Education, Devin-session memory, and an optional safe card
+    snapshot into one provenance-labelled pack. It never reads personal or
+    household banks and never mutates board/MDDB state.
+    """
+    try:
+        profile_name = (profile or "ssot-research").strip() or "ssot-research"
+        if profile_name not in {"ssot-research", "ops-readonly", "dev", "ada", "default"}:
+            profile_name = "ssot-research"
+        bounded_limit = max(1, min(int(limit), 5))
+        deadline = time.monotonic() + 8.0
+        errors: list[str] = []
+        ssot: list[dict[str, Any]] = []
+        memory: dict[str, Any] | None = None
+        card: dict[str, Any] | None = None
+
+        ref = (card_reference or "").strip()
+        if ref:
+            try:
+                card = _safe_card(_context_card(ref, deadline))
+            except Exception as exc:
+                errors.append(f"card:{exc}")
+
+        def _ssot_job() -> tuple[list[dict[str, Any]], list[str]]:
+            if not include_ssot:
+                return [], []
+            return _ssot_search(query, deadline, limit=bounded_limit)
+
+        def _memory_job() -> dict[str, Any] | None:
+            if not include_memory:
+                return None
+            return recall_memory(query, deadline)
+
+        futures: dict[str, concurrent.futures.Future] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            if include_ssot:
+                futures["ssot"] = pool.submit(_ssot_job)
+            if include_memory:
+                futures["memory"] = pool.submit(_memory_job)
+            done, _not_done = (
+                concurrent.futures.wait(
+                    futures.values(), timeout=max(0.1, deadline - time.monotonic())
+                )
+                if futures
+                else (set(), set())
+            )
+            done_set = set(done)
+            for name, future in futures.items():
+                if future not in done_set:
+                    errors.append(f"{name}:deadline")
+                    continue
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    errors.append(f"{name}:{exc}")
+                    continue
+                if name == "ssot":
+                    ssot, ssot_errors = result
+                    errors.extend(ssot_errors)
+                elif result is not None:
+                    memory = result
+                    errors.extend(memory.get("errors") or [])
+
+        sources = [
+            "board-api:/cards",
+            "education:/lesson",
+            "mddb:ada-ha-bank-devin-tony",
+            "mddb:infrastructure-ssot",
+            "mddb:chaba-glossary",
+        ]
+        if card is not None:
+            sources.append("board-api:/card")
+        return json.dumps({
+            "ok": True,
+            "operation": "context-pack",
+            "profile": profile_name,
+            "query": query,
+            "card_reference": ref or None,
+            "allowed_sources": sources,
+            "write_policy": "read-only; mutations require board-api approval flow",
+            "budgets": {
+                "max_results_per_source": bounded_limit,
+                "excerpt_chars": 1200,
+                "deadline_s": 8.0,
+            },
+            "ssot": ssot,
+            "memory": memory,
+            "card": card,
+            "errors": errors,
+            "provenance": {
+                "board_api": BOARD_API,
+                "mddb_cms": MDDB_CMS,
+                "mddb_memory": MDDB_MEMORY,
+            },
+            "secrets_read": False,
+            "mutations_performed": [],
+            "next_safe_action": "use the excerpts as cited context; verify freshness before acting; do not mutate",
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "operation": "context-pack",
+            "error": str(exc),
+            "board_api": BOARD_API,
+            "mutations_performed": [],
+        }, ensure_ascii=False, indent=2)
 
 READ_ONLY_PROFILES = {"ops-readonly", "ssot-research", "mddb-sequence", "storage-dryrun"}
 
