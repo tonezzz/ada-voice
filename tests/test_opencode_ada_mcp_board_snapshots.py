@@ -131,6 +131,8 @@ def test_compact_hit_resolves_without_projected_snapshot(ada_mcp, monkeypatch):
     assert all("compact=1" not in p for p in calls[1:])
     assert all("id=ada-ocb-board-read-latency" in p for p in calls[1:])
     assert len(calls) == 2  # compact + single-card hydrate only
+    # hydration asks board-api for a bounded comms tail (KNB-0176)
+    assert f"comms_tail={ada_mcp._HYDRATE_COMMS_TAIL}" in calls[1]
 
 
 def test_projected_snapshot_used_for_alias_title_token(ada_mcp, monkeypatch):

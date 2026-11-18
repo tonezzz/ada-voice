@@ -206,7 +206,12 @@ def _compact_cards() -> list[dict[str, Any]]:
 
 
 def _board_cards() -> list[dict[str, Any]]:
-    """Projected all-card snapshot (~1MB, no comms) vs the 9MB full dump."""
+    """Projected all-card snapshot (~1MB, no comms) vs the 9MB full dump.
+
+    Uses fields= rather than compact=2 because board-api's compact=2 tier
+    drops action/requests/aliases, which find_card scoring, _pick_cards
+    and preflight gates all need.
+    """
     return _cards_payload(
         _get_json_cached(f"/cards?fields={_CARD_PROJECTED_FIELDS}&limit=1000")
     )
@@ -219,13 +224,19 @@ def _cards() -> list[dict[str, Any]]:
     return [c for c in payload["cards"] if isinstance(c, dict)]
 
 
+# Hydrated cards only ever read the last few comms (_safe_card tails to
+# 5, context text to _CONTEXT_MAX_COMMS=5) — comms_tail keeps the wire
+# payload small on chatty cards; board-api adds comms_total for free.
+_HYDRATE_COMMS_TAIL = 8
+
+
 def _fetch_card_full(card_id: Any) -> dict[str, Any] | None:
-    """Fetch one card's full safe fields including comms tail."""
+    """Fetch one card's safe fields with a bounded comms tail."""
     if card_id in (None, ""):
         return None
     path = (
         f"/cards?id={urllib.parse.quote(str(card_id), safe='')}"
-        f"&fields={_CARD_FULL_FIELDS}&limit=1"
+        f"&fields={_CARD_FULL_FIELDS}&comms_tail={_HYDRATE_COMMS_TAIL}&limit=1"
     )
     rows = _cards_payload(_get_json_cached(path, ttl=60.0))
     return rows[0] if rows else None
@@ -1295,6 +1306,10 @@ def _safe_card(card: dict[str, Any]) -> dict[str, Any]:
         "action": _card_action(card),
         "requests": card.get("requests") or [],
         "comms_tail": (card.get("comms") or [])[-5:],
+        "comms_total": (
+            card["comms_total"] if "comms_total" in card
+            else len(card.get("comms") or [])
+        ),
     }
 
 
@@ -1318,7 +1333,8 @@ def _context_card(reference: str, deadline: float) -> dict[str, Any]:
         if card_id in (None, ""):
             return None
         payload = _get_json(
-            f"/cards?id={urllib.parse.quote(str(card_id), safe='')}&limit=1&fields={fields}",
+            f"/cards?id={urllib.parse.quote(str(card_id), safe='')}&limit=1"
+            f"&fields={fields}&comms_tail={_HYDRATE_COMMS_TAIL}",
             timeout=remaining(),
         )
         rows = payload.get("cards") if isinstance(payload, dict) else []
