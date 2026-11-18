@@ -1,0 +1,21 @@
+# systemd USER unit — idc02 (~/.config/systemd/user/).
+# Live read-only smoke of the ada-control OpenCode bridge: imports
+# opencode/ada_mcp.py, runs the real tool functions against board-api +
+# MDDB, and appends a kind:benchmark doc to ada-ha-scenario-reports.
+# ocb-bench then rolls the calls.jsonl audit log into the same
+# collection so per-tool latency/ok trends track across deploys.
+# Install: cp to ~/.config/systemd/user/, systemctl --user daemon-reload,
+#          systemctl --user enable --now ada-ocb-smoke.timer
+[Unit]
+Description=Ada OpenCode bridge smoke -> ada-ha-scenario-reports benchmark
+
+[Service]
+Type=oneshot
+# Silently skip until the merged scripts reach the staging checkout.
+ExecCondition=/usr/bin/test -f %h/CascadeProjects/ada-voice/scripts/ocb-smoke.py
+WorkingDirectory=%h/CascadeProjects/ada-voice
+ExecStart=/usr/bin/env bash -lc 'PY=.venv/bin/python; [ -x "$PY" ] || PY=python3; exec "$PY" scripts/ocb-smoke.py'
+# Audit-log rollup rides the same schedule; '-' keeps its failure from
+# flipping an otherwise-green smoke run.
+ExecStartPost=-/usr/bin/env bash -lc 'PY=.venv/bin/python; [ -x "$PY" ] || PY=python3; exec "$PY" scripts/ocb-bench.py'
+TimeoutStartSec=240

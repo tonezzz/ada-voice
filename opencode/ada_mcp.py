@@ -194,7 +194,9 @@ _CARD_FULL_FIELDS = _CARD_PROJECTED_FIELDS + ",comms"
 
 
 def _cards_payload(payload: Any) -> list[dict[str, Any]]:
-    rows = payload.get("cards") if isinstance(payload, dict) else []
+    rows = payload.get("cards") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
     return [c for c in rows if isinstance(c, dict)]
 
 
