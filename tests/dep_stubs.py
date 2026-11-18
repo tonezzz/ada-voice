@@ -341,7 +341,64 @@ def _install_fastapi():
         setattr(starlette_mod, sub, sub_mod)
 
 
+# ---------------------------------------------------------------------------
+# mcp (Model Context Protocol SDK — opencode/ada_mcp.py)
+# ---------------------------------------------------------------------------
+
+def _install_mcp():
+    """Stand-in for `from mcp.server.fastmcp import FastMCP`.
+
+    ada_mcp.py only needs .tool() registration into _tool_manager._tools
+    (with .fn attributes for the call-audit wrapper) and .run() — tests
+    call tool functions directly, no stdio transport is served.
+    """
+    try:
+        from mcp.server.fastmcp import FastMCP  # noqa: F401
+        return
+    except ImportError:
+        pass
+    if "mcp.server.fastmcp" in sys.modules:
+        return
+
+    class _Tool:
+        def __init__(self, fn):
+            self.fn = fn
+
+    class _ToolManager:
+        def __init__(self):
+            self._tools = {}
+
+    class FastMCP:
+        def __init__(self, name, *args, **kwargs):
+            self.name = name
+            self._tool_manager = _ToolManager()
+
+        def tool(self, *args, **kwargs):
+            def deco(fn):
+                name = getattr(fn, "__name__",
+                               f"tool_{len(self._tool_manager._tools)}")
+                self._tool_manager._tools[name] = _Tool(fn)
+                return fn
+            return deco
+
+        def run(self, *args, **kwargs):
+            return None
+
+    mcp_mod = _t.ModuleType("mcp")
+    mcp_mod.__path__ = []
+    server_mod = _t.ModuleType("mcp.server")
+    server_mod.__path__ = []
+    fastmcp_mod = _t.ModuleType("mcp.server.fastmcp")
+    fastmcp_mod.FastMCP = FastMCP
+    server_mod.fastmcp = fastmcp_mod
+    mcp_mod.server = server_mod
+    sys.modules["mcp"] = mcp_mod
+    sys.modules["mcp.server"] = server_mod
+    sys.modules["mcp.server.fastmcp"] = fastmcp_mod
+
+
 def install():
     """Register stub modules for each absent runtime dep."""
     _install_genai()
     _install_fastapi()
+    _install_mcp()

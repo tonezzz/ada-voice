@@ -1,0 +1,9 @@
+[Unit]
+Description=Ada OpenCode bridge smoke hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
