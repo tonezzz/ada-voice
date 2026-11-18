@@ -211,13 +211,14 @@ class MetaMixin:
     async def _ops_report(
             self, node: str | None, depth: str | None) -> dict[str, Any]:
         """Report-graph freshness + live refresh (chaba report-api on
-        tony-dell:8792). Returns the current summary state and kicks the
+        idc02:8792 — migrated from tony-dell 2026-10-17). Returns the
+        current summary state and kicks the
         subtree walk — Ada answers with the cached numbers and the
         update lands behind her; a 'report-updated' ops event follows
         when it finishes (chaba docs/design/report-live-refresh.md)."""
         import httpx
         base = os.environ.get(
-            "REPORT_API_URL", "http://100.68.142.13:8792").rstrip("/")
+            "REPORT_API_URL", "http://100.123.163.11:8792").rstrip("/")
         token = os.environ.get("REPORT_API_TOKEN", "")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         node = str(node or "system-report")
