@@ -1,0 +1,102 @@
+# SSOT Job: ada-control MCP bridge version stamping.
+# Card: ada-ocb-bridge-version (chaba kanban). Dispatch
+# 20261117-221256-in-ada-voice-opencode-ada-mcp-, runner tony-dell.
+
+title: >-
+  ada-control MCP bridge stamps BRIDGE_VERSION into every tool response,
+  the calls.jsonl audit, and stderr at MCP startup
+subtitle: >-
+  Cheap insurance for the per-session/per-directory MCP child model: a
+  stale ada_mcp.py copy can no longer silently serve an OpenChamber
+  session — the response envelope and audit trail name the serving copy.
+
+planning:
+  goal: |
+    OpenCode spawns ada_mcp.py as an MCP child per session/directory, and
+    the bridge is deployed by hand-copying opencode/ada_mcp.py into the
+    ada-code workspace (.opencode/ada_mcp.py). Nothing previously proved
+    WHICH copy served a given session. Now every tool response carries a
+    top-level "bridge" object {version, tools_count}, every calls.jsonl
+    audit line records bridge_version, and MCP startup writes both a
+    stderr line and a calls.jsonl "startup" event. Two copies at
+    different revisions always report different versions.
+  scope: |
+    Delivered (all in opencode/ada_mcp.py):
+      - _resolve_bridge_version() + BRIDGE_VERSION, resolution order:
+        ADA_BRIDGE_VERSION env > .opencode/VERSION file next to
+        ada_mcp.py > `git describe --always --dirty --tags` in the file's
+        dir > `dev-<sha256(file)[:10]>` content hash. Deploy stamping:
+        `git -C <repo> rev-parse HEAD > workspace/.opencode/VERSION`.
+      - _bridge_meta() + _with_bridge_envelope() — the existing
+        _install_call_audit() wrapper now wraps each tool result string
+        with a top-level "bridge" object (non-dict/non-JSON results pass
+        through unchanged).
+      - calls.jsonl entries gain "bridge_version"; new "startup" event
+        line {event, bridge_version, tools_count, cwd, pid} per child
+        spawn; stderr startup line (stdout stays clean for stdio MCP).
+      - ada_bridge_info() tool — version, sorted tool list, features,
+        workspace, board_api; its richer "bridge" dict supersedes the
+        envelope's.
+      - ADA_CONTROL_AUDIT_DIR env override for the audit dir (tests,
+        per-session debug capture).
+      - tests/test_opencode_ada_mcp_bridge_version.py — 7 tests.
+      - opencode/README.md deploy note.
+    Explicitly NOT done:
+      - deploy to idc02 ada-code workspace / restart (deploy is the
+        opencode/README copy path; dispatch does not deploy)
+      - committed VERSION file (would mask git describe in checkouts;
+        VERSION is for deploy stamping only)
+  success_criteria:
+    - 'every tool JSON response parses with top-level bridge
+      {version, tools_count}'
+    - 'calls.jsonl audit lines carry bridge_version per call + startup
+      event per spawn'
+    - 'two copies (repo checkout vs tweaked copy outside a repo) report
+      different versions: git-<describe> vs dev-<content-hash>'
+    - 'ada_bridge_info returns version + full tool list'
+  risks:
+    - 'low: envelope injection lives in the existing audit wrapper —
+      non-dict results pass through, exceptions still audited+raised'
+  resources:
+    - 'injection point: _install_call_audit() (already wrapped all tools)'
+    - 'audit: _audit_log / calls.jsonl (~/.local/share/ada-control)'
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-17"
+  steps:
+    - id: 1
+      label: "version resolution"
+      status: done
+      notes: "env > VERSION file > git describe --always --dirty > file
+        content hash; verified all four paths manually"
+    - id: 2
+      label: "envelope + audit"
+      status: done
+      notes: "wrapper injects bridge object; audit lines carry
+        bridge_version; startup event + stderr log at __main__"
+    - id: 3
+      label: "tests"
+      status: done
+      notes: "7 new tests green; full suite 1760 passed / 7 skipped via
+        python3 -m pytest tests/ -x -q"
+
+invoke:
+  tool:
+    - "ada_bridge_info()  # returns bridge.version + tools list"
+
+env:
+  ADA_BRIDGE_VERSION: "optional explicit version stamp (wins over all)"
+  ADA_CONTROL_AUDIT_DIR: "optional calls.jsonl dir override (tests/debug)"
+
+verification:
+  - "python3 -m pytest tests/test_opencode_ada_mcp_bridge_version.py -q
+    # 7 passed"
+  - "python3 -m pytest tests/ -x -q  # 1760 passed, 7 skipped"
+  - "manual: canonical checkout -> git-0899e56-dirty; stale copy in /tmp
+    -> dev-378c7e76c1 (different versions confirmed)"
+  - "post-deploy on ada-code: OpenChamber session -> call ada_bridge_info
+    or check ~/.local/share/ada-control/calls.jsonl bridge_version +
+    startup event to see which copy served it"
