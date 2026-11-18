@@ -1,0 +1,130 @@
+# ada-ocb answer-quality eval cases (ADA-0188 / ADA-0175 r2).
+#
+# Each case replays the tool calls an agent SHOULD make for a prompt,
+# concatenates the tool outputs into "answer text", and asserts on the
+# ANSWER — required/forbidden substrings, tools used, mutation-free,
+# latency. This catches wrong-path failures (skill hijack, stale bridge,
+# looped context_pack) that ok=true smoke checks cannot see.
+#
+# Modes (scripts/ocb-eval.py):
+#   tools   — execute the case's tool list against the live bridge (default)
+#   replay  — score recorded calls.jsonl/session results instead of calling
+#   live    — best-effort `opencode run` headless; infra failures mark the
+#             case degraded, never failed (free-quota 429 lesson, ADA-0175)
+#
+# expect keys:
+#   answer_contains      all substrings must appear in the answer text
+#   answer_contains_any  list of groups; each group needs >=1 substring
+#   answer_not_contains  substrings that must NOT appear
+#   tools_used           tool names that must appear in the executed list
+#   tools_not_used       tool names that must NOT appear
+#   mutations_empty      default true — every tool result must be mutation-free
+#   ok_true              default true — JSON results must carry ok=true
+#   max_elapsed_s        per-case wall-clock budget (default 30)
+
+- id: ssot-host-spec-tony-macbook
+  prompt: "find the spec of tony-macbook from ssot"
+  tools:
+    - tool: ada_ssot_get
+      args: {collection: infrastructure-ssot, key: host-roles, selector: "host=tony-macbook"}
+  expect:
+    answer_contains: ["100.77.76", "Ubuntu"]
+    answer_contains_any: [["MacBookPro13", "tailnet", "tailscale"]]
+    answer_not_contains: ["matched 2 cards", "excerpt_chars\": 0"]
+    tools_used: [ada_ssot_get]
+    max_elapsed_s: 12
+
+- id: ssot-deploy-flow-discovery
+  prompt: "what does SSOT say about the deploy flow?"
+  tools:
+    - tool: ada_context_pack
+      args: {query: "chaba deploy flow h3 page deployment", limit: 3}
+  expect:
+    answer_contains_any: [["deploy", "h3", "chaba.h3"]]
+    answer_not_contains: ["__ERROR__", "Traceback"]
+    tools_used: [ada_context_pack]
+    max_elapsed_s: 15
+
+- id: card-status-real-ref
+  prompt: "status of ADA-0172"
+  tools:
+    - tool: ada_status
+      args: {card_reference: "ADA-0172"}
+  expect:
+    answer_contains: ["ada-ocb-board-read-latency", "ADA-0172"]
+    answer_contains_any: [["review", "column"]]
+    tools_used: [ada_status]
+    max_elapsed_s: 10
+
+- id: card-context-pack
+  prompt: "give me the work context for ADA-0174"
+  tools:
+    - tool: ada_card_context
+      args: {card_reference: "ADA-0174", max_files: 4}
+  expect:
+    answer_contains: ["regression", "pack_markdown"]
+    answer_contains_any: [["mutations_performed"]]
+    tools_used: [ada_card_context]
+    max_elapsed_s: 15
+
+- id: attention-sweep
+  prompt: "what needs my attention on the board?"
+  tools:
+    - tool: ada_attention
+      args: {}
+  expect:
+    answer_contains: ["pending_requests", "oldest_backlog"]
+    tools_used: [ada_attention]
+    max_elapsed_s: 15
+
+- id: next-card-tokens
+  prompt: "what card should I work on next?"
+  tools:
+    - tool: ada_next_card
+      args: {}
+  expect:
+    answer_contains: ["selection_token", "candidates"]
+    answer_contains_any: [["mutations_performed"]]
+    tools_used: [ada_next_card]
+    max_elapsed_s: 15
+
+- id: card-pick-sweep
+  prompt: "pick the stalest actionable cards"
+  tools:
+    - tool: ada_card_pick
+      args: {strategy: sweep, limit: 3, days: 7}
+  expect:
+    answer_contains: ["picks", "selection_token"]
+    tools_used: [ada_card_pick]
+    max_elapsed_s: 15
+
+- id: preflight-gates-readonly
+  prompt: "preflight ADA-0172 without dispatching"
+  tools:
+    - tool: ada_preflight
+      args: {card_reference: "ADA-0172", selection_confirmation: "ADA-0172"}
+  expect:
+    answer_contains: ["start_check", "dispatch_check", "required_fields"]
+    answer_contains_any: [["verifier", "missing_fields"]]
+    tools_used: [ada_preflight]
+    max_elapsed_s: 15
+
+- id: memory-search-lessons
+  prompt: "any lessons about opencode context packs?"
+  tools:
+    - tool: ada_memory_search
+      args: {query: "opencode ada context pack ssot lessons"}
+  expect:
+    answer_contains_any: [["lessons", "devin_sessions"]]
+    tools_used: [ada_memory_search]
+    max_elapsed_s: 15
+
+- id: bridge-version-handshake
+  prompt: "which bridge version is serving?"
+  tools:
+    - tool: ada_bridge_info
+      args: {}
+  expect:
+    answer_contains: ["version", "tools_count"]
+    tools_used: [ada_bridge_info]
+    max_elapsed_s: 5

@@ -1,0 +1,16 @@
+# systemd USER unit — idc02 (~/.config/systemd/user/).
+# Answer-quality eval for the ada-control OpenCode bridge: replays the
+# tool calls each prompt SHOULD make (tests/eval_ocb/cases.yml), asserts
+# on answer text — wrong-path detection that ok=true smoke misses.
+# Degraded cases (provider quota, missing opencode) never fail the run.
+# Install: cp to ~/.config/systemd/user/, systemctl --user daemon-reload,
+#          systemctl --user enable --now ada-ocb-eval.timer
+[Unit]
+Description=Ada OpenCode bridge answer-quality eval -> ada-ha-scenario-reports
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/test -f %h/CascadeProjects/ada-voice/scripts/ocb-eval.py
+WorkingDirectory=%h/CascadeProjects/ada-voice
+ExecStart=/usr/bin/env bash -lc 'PY=.venv/bin/python; [ -x "$PY" ] || PY=python3; exec "$PY" scripts/ocb-eval.py'
+TimeoutStartSec=600

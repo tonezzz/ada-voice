@@ -1,0 +1,9 @@
+[Unit]
+Description=Ada OpenCode bridge answer-quality eval (6-hourly)
+
+[Timer]
+OnCalendar=*-*-* 00/06/12/18:20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
