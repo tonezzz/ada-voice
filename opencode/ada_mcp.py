@@ -1644,7 +1644,7 @@ def _card_updated_ts(card: dict[str, Any]) -> datetime:
 
 
 def _card_actionable(card: dict[str, Any]) -> bool:
-    """Not finished, not waiting on a human, not already owned."""
+    """Not finished, not waiting on an open request, and not already owned."""
     if card.get("column") in ("done", "archive"):
         return False
     for r in card.get("requests") or []:
@@ -1665,8 +1665,14 @@ def _pick_cards(strategy: str, days: int, limit: int) -> list[dict[str, Any]]:
         age = (now - _card_updated_ts(card)).days
         col = card.get("column") or "backlog"
         if strategy == "queue":
-            if _card_action(card).get("status") == "queued":
-                scored.append((card, "queued for dispatch", (0,)))
+            action = _card_action(card)
+            if action.get("status") == "queued":
+                manual = str(action.get("type") or "").lower() == "manual"
+                reason = (
+                    "queued for manual handling; not runner-dispatchable"
+                    if manual else "queued for dispatch"
+                )
+                scored.append((card, reason, (0,)))
         elif strategy == "stale":
             if col == "doing" and age >= days:
                 scored.append((card, f"doing, idle {age}d", (age,)))
@@ -1697,7 +1703,7 @@ def ada_card_pick(strategy: str = "sweep", limit: int = 3, days: int = 7) -> str
     sweep      — stalest actionable card (doing first, then backlog)
     high-value — priority high>medium>low, ties by oldest updated
     stale      — doing cards idle >= `days` (default 7)
-    queue      — cards with action.status == queued, board order
+    queue      — queued cards in board order; manual actions are human-only
 
     Candidates carry a selection_token usable with ada_plan/ada_preflight.
     """
