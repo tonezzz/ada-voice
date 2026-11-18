@@ -21,6 +21,29 @@ class FakeResponse:
 
 
 class FakeClient:
+    """Emulates the two-phase path: dense /vector-search (no content),
+    then /get per candidate, then the reranker."""
+
+    DOCS = {
+        "collection-a": {
+            "a": {"key": "a", "lang": "en",
+                  "contentMd": "candidate a",
+                  "meta": {"status": ["active"]}},
+            "shared": {"key": "shared", "lang": "en",
+                       "contentMd": "candidate shared",
+                       "meta": {"status": ["active"]}},
+        },
+        "collection-b": {
+            "b": {"key": "b", "lang": "en",
+                  "contentMd": "candidate b",
+                  "meta": {"status": ["active"]}},
+        },
+    }
+    SCORES = {
+        "collection-a": {"a": 0.8, "shared": 0.7},
+        "collection-b": {"b": 0.9},
+    }
+
     def __init__(self, **_kwargs):
         self.calls = []
 
@@ -33,25 +56,18 @@ class FakeClient:
     async def post(self, url, json, **_kwargs):
         self.calls.append((url, json))
         if url.endswith("/vector-search"):
-            docs = {
-                "collection-a": [
-                    {"key": "a", "contentMd": "candidate a",
-                     "meta": {"status": ["active"]}, "score": 0.8},
-                    {"key": "shared", "contentMd": "candidate shared",
-                     "meta": {"status": ["active"]}, "score": 0.7},
-                ],
-                "collection-b": [
-                    {"key": "b", "contentMd": "candidate b",
-                     "meta": {"status": ["active"]}, "score": 0.9},
-                ],
-            }[json["collection"]]
+            collection = json["collection"]
             return FakeResponse({
                 "results": [
-                    {"document": {k: v for k, v in doc.items() if k != "score"},
-                     "score": doc["score"]}
-                    for doc in docs
+                    {"document": {k: v for k, v in doc.items()
+                                  if k != "contentMd"},
+                     "score": self.SCORES[collection][doc["key"]]}
+                    for doc in self.DOCS[collection].values()
                 ],
             })
+        if url.endswith("/get"):
+            doc = self.DOCS[json["collection"]][json["key"]]
+            return FakeResponse(dict(doc))
         return FakeResponse({"scores": [0.2, 0.9, 0.1]})
 
 
@@ -89,11 +105,26 @@ class BgeMemoryShadowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(metrics["status"], "ok")
         self.assertEqual(metrics["candidate_count"], 3)
+        self.assertEqual(metrics["fetched_count"], 3)
+        self.assertEqual(metrics["fetch_errors"], 0)
         self.assertEqual(metrics["reranked_count"], 3)
         self.assertEqual(metrics["overlap_at_5"], 2)
+        self.assertIn("dense_ms", metrics)
+        self.assertIn("fetch_ms", metrics)
+        self.assertIn("rerank_ms", metrics)
         self.assertNotIn("private test query", repr(metrics))
         self.assertNotIn("candidate a", repr(metrics))
-        self.assertEqual(len(client.calls), 3)
+        # 2 dense + 3 content fetches + 1 rerank
+        self.assertEqual(len(client.calls), 6)
+        vector_calls = [c for c in client.calls
+                        if c[0].endswith("/vector-search")]
+        self.assertEqual(len(vector_calls), 2)
+        for _url, payload in vector_calls:
+            self.assertFalse(payload["includeContent"])
+            self.assertEqual(payload["topK"], bge_memory_shadow.DENSE_TOP_K)
+        get_calls = [c for c in client.calls if c[0].endswith("/get")]
+        self.assertEqual(len(get_calls), 3)
+        self.assertLessEqual(len(get_calls), bge_memory_shadow.FETCH_TOP_K)
         ranked_docs = client.calls[-1][1]["docs"]
         self.assertEqual([doc["text"] for doc in ranked_docs],
                          ["candidate b", "candidate a", "candidate shared"])
