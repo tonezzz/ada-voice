@@ -18,6 +18,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP
 
@@ -1749,6 +1750,333 @@ def ada_card_pick(strategy: str = "sweep", limit: int = 3, days: int = 7) -> str
         return json.dumps({
             "ok": False, "operation": "card-pick", "error": str(exc),
             "board_api": BOARD_API,
+        }, ensure_ascii=False, indent=2)
+
+
+_SWEEP_CARD_FIELDS = (
+    "id,ref,title,column,updated,priority,action,action_status,requests"
+)
+
+
+def _sweep_now() -> datetime:
+    return datetime.now(ZoneInfo("Asia/Bangkok"))
+
+
+def _sweep_age_hours(card: dict[str, Any], now: datetime) -> float | None:
+    raw = str(card.get("updated") or card.get("created") or "")
+    for fmt, length in (
+        ("%Y-%m-%d %H:%M", 16),
+        ("%Y-%m-%dT%H:%M:%S", 19),
+        ("%Y-%m-%d", 10),
+    ):
+        try:
+            updated = datetime.strptime(raw[:length], fmt).replace(
+                tzinfo=ZoneInfo("Asia/Bangkok"))
+            return max(0.0, (now - updated).total_seconds() / 3600)
+        except ValueError:
+            continue
+    return None
+
+
+def _sweep_failure_class(result: str) -> tuple[str, str]:
+    lower = result.lower()
+    if "lane_envelope" in lower or "unstaged dispatch is held" in lower:
+        return (
+            "admission_blocked",
+            "stage the declared lane envelope before retrying",
+        )
+    if "failed_precondition" in lower:
+        return (
+            "executor_precondition",
+            "inspect the executor/account gate; do not blind-retry",
+        )
+    if "exit=" in lower or "failed with result" in lower:
+        return (
+            "runner_failed",
+            "inspect the worktree/artifact before deciding whether to resume",
+        )
+    return (
+        "failure_needs_review",
+        "inspect the card and its linked artifacts before taking action",
+    )
+
+
+def _sweep_active_ids(queue: dict[str, Any]) -> set[str]:
+    active_ids: set[str] = set()
+    for row in queue.get("claimed", []):
+        if isinstance(row, dict) and row.get("id"):
+            active_ids.add(str(row["id"]))
+    for host in (queue.get("hosts") or {}).values():
+        if not isinstance(host, dict):
+            continue
+        for row in host.get("active", []):
+            if isinstance(row, dict) and row.get("id"):
+                active_ids.add(str(row["id"]))
+    return active_ids
+
+
+def _sweep_item(
+    card: dict[str, Any],
+    active_ids: set[str],
+    window_hours: int,
+    now: datetime,
+) -> dict[str, Any] | None:
+    action = _card_action(card)
+    status = str(action.get("status") or card.get("action_status") or "").lower()
+    age = _sweep_age_hours(card, now)
+    is_active = str(card.get("id") or "") in active_ids
+    request_rows = card.get("requests")
+    if not isinstance(request_rows, list):
+        request_rows = [request_rows] if request_rows else []
+    open_requests = [
+        request for request in request_rows
+        if _request_open(request)
+    ]
+    category = ""
+    next_step = ""
+    failure_class = ""
+
+    if status in ("running", "claimed"):
+        if not is_active:
+            category = "active_missing_from_queue"
+            next_step = "reconcile the runner unit before changing the card"
+        elif age is not None and age >= window_hours:
+            category = "long_running_but_active"
+            next_step = "verify live progress; do not interrupt an active runner"
+        else:
+            return None
+    elif status == "failed":
+        failure_class, next_step = _sweep_failure_class(
+            str(action.get("result") or action.get("last_failure") or ""))
+        category = f"failed_{failure_class}"
+    elif status == "done" and card.get("column") == "doing":
+        category = "done_still_in_doing"
+        next_step = "verify the declared artifact, then move to review"
+    elif status == "queued":
+        if not is_active:
+            category = "queued_missing_from_queue"
+            next_step = "check queue eligibility and runner verdicts"
+        else:
+            return None
+    elif card.get("column") == "doing" and age is not None and age >= window_hours:
+        category = "stale_doing_without_active_action"
+        next_step = "inspect current work before re-queueing or moving"
+    elif open_requests:
+        category = "awaiting_human"
+        next_step = "resolve the existing card request before dispatch or closeout"
+    else:
+        return None
+
+    if open_requests and status not in ("running", "claimed"):
+        next_step += "; do not re-queue until answered"
+
+    return {
+        "id": str(card.get("id") or "")[:120],
+        "ref": str(card.get("ref") or "")[:32],
+        "title": str(card.get("title") or "")[:160],
+        "column": str(card.get("column") or "")[:24],
+        "action_status": status or "none",
+        "action_type": str(action.get("type") or "")[:32],
+        "updated": str(card.get("updated") or "")[:32],
+        "age_hours": round(age, 1) if age is not None else None,
+        "time_bucket": (
+            "stale" if age is not None and age >= window_hours else "recent"
+        ),
+        "runner": str(action.get("runner") or "")[:80],
+        "category": category,
+        "failure_class": failure_class or None,
+        "failure_noted_at": (
+            action.get("sweep", {}).get("failed_noted")
+            if isinstance(action.get("sweep"), dict) else None
+        ),
+        "open_request_count": len(open_requests),
+        "active_in_queue": is_active,
+        "next_safe_step": next_step,
+    }
+
+
+def _sweep_queue_items(queue: dict[str, Any]) -> list[dict[str, Any]]:
+    items = []
+    for card in queue.get("queued", []):
+        if not isinstance(card, dict):
+            continue
+        action = _card_action(card)
+        blocked = card.get("blocked")
+        blocked = blocked if isinstance(blocked, dict) else {}
+        manual = (
+            str(action.get("type") or "").lower() == "manual"
+            or any("unknown type 'manual'" in str(v).lower()
+                   for v in blocked.values())
+        )
+        if not manual and card.get("eligible"):
+            continue
+        items.append({
+            "id": str(card.get("id") or "")[:120],
+            "ref": str(card.get("ref") or "")[:32],
+            "title": str(card.get("title") or "")[:160],
+            "column": str(card.get("column") or "backlog")[:24],
+            "action_status": "queued",
+            "action_type": str(action.get("type") or "")[:32],
+            "category": "manual_only" if manual else "queued_blocked",
+            "blocked_hosts": list(blocked.keys())[:20],
+            "next_safe_step": (
+                "keep manual or define a supported executor; do not dispatch"
+                if manual else
+                "inspect runner verdicts; do not re-queue blindly"
+            ),
+        })
+    return items
+
+
+def _sweep_active_items(queue: dict[str, Any]) -> list[dict[str, Any]]:
+    items = []
+    host_active: dict[str, dict[str, Any]] = {}
+    for host_name, host in (queue.get("hosts") or {}).items():
+        if not isinstance(host, dict):
+            continue
+        for row in host.get("active", []):
+            if isinstance(row, dict) and row.get("id"):
+                active_row = dict(row)
+                active_row.setdefault("host", host_name)
+                host_active[str(row["id"])] = active_row
+
+    for row in queue.get("claimed", []):
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        card_id = str(row["id"])
+        host_row = host_active.pop(card_id, None)
+        status = str(row.get("status") or "").lower()
+        confirmed_active = bool(host_row) or (
+            bool(row.get("unit")) and status in ("running", "claimed")
+        )
+        evidence = {**row, **(host_row or {})}
+        items.append({
+            "id": card_id[:120],
+            "ref": str(evidence.get("ref") or "")[:32],
+            "title": str(evidence.get("title") or "")[:160],
+            "host": str(evidence.get("host") or "")[:80],
+            "unit": str(evidence.get("unit") or "")[:160],
+            "started_at": evidence.get("at"),
+            "status": str(evidence.get("status") or row.get("status") or "claimed")[:24],
+            "category": (
+                "active_in_queue" if confirmed_active else "claim_without_active_unit"
+            ),
+            "next_safe_step": (
+                "leave running; inspect only if progress stalls"
+                if confirmed_active else
+                "reconcile the claim/start state; no active unit is reported"
+            ),
+        })
+    for card_id, row in host_active.items():
+        items.append({
+            "id": card_id[:120],
+            "ref": str(row.get("ref") or "")[:32],
+            "title": str(row.get("title") or "")[:160],
+            "host": str(row.get("host") or "")[:80],
+            "unit": str(row.get("unit") or "")[:160],
+            "started_at": row.get("at"),
+            "status": str(row.get("status") or "running")[:24],
+            "category": "active_in_queue",
+            "next_safe_step": "leave running; inspect only if progress stalls",
+        })
+    return items
+
+
+@mcp.tool()
+def ada_kanban_sweep(window_hours: int = 24, limit: int = 50) -> str:
+    """Read-only, evidence-first snapshot of stuck Kanban work.
+
+    Reads one queue snapshot and one projected `doing` slice. Failed and
+    completed-but-stuck cards remain visible regardless of age; window_hours
+    marks old active/idle work as stale. The tool never changes cards,
+    retries jobs, contacts providers, or inspects host services.
+    """
+    try:
+        hours = max(1, min(int(window_hours), 168))
+        cap = max(1, min(int(limit), 100))
+        queue = _get_json_cached("/queue")
+        if (
+            not isinstance(queue, dict)
+            or not isinstance(queue.get("queued"), list)
+            or not isinstance(queue.get("claimed"), list)
+            or not isinstance(queue.get("hosts"), dict)
+        ):
+            raise ValueError("board-api /queue response has an invalid shape")
+
+        path = (
+            "/cards?column=doing&fields="
+            f"{urllib.parse.quote(_SWEEP_CARD_FIELDS, safe=',')}"
+            "&limit=1000"
+        )
+        payload = _get_json_cached(path)
+        if not isinstance(payload, dict) or not isinstance(payload.get("cards"), list):
+            raise ValueError("board-api /cards response has an invalid shape")
+
+        now = _sweep_now()
+        active_ids = _sweep_active_ids(queue)
+        items = _sweep_queue_items(queue)
+        for card in payload["cards"]:
+            if isinstance(card, dict):
+                item = _sweep_item(card, active_ids, hours, now)
+                if item:
+                    items.append(item)
+        items.sort(key=lambda item: (
+            0 if item["category"].startswith("failed_") else 1,
+            -(item.get("age_hours") or 0),
+        ))
+        total = len(items)
+        hosts = queue["hosts"]
+        active_items = _sweep_active_items(queue)
+        source_truncated = bool(payload.get("truncated"))
+        category_counts: dict[str, int] = {}
+        for item in items:
+            category = item["category"]
+            category_counts[category] = category_counts.get(category, 0) + 1
+        return json.dumps({
+            "ok": True,
+            "operation": "kanban-sweep",
+            "snapshot_at": now.isoformat(timespec="seconds"),
+            "window_hours": hours,
+            "queue": {
+                "queued": len(queue["queued"]),
+                "claimed": len(queue["claimed"]),
+                "fresh_hosts": sum(
+                    1 for h in hosts.values()
+                    if isinstance(h, dict) and not h.get("stale", True)
+                ),
+                "stale_hosts": sum(
+                    1 for h in hosts.values()
+                    if isinstance(h, dict) and h.get("stale", True)
+                ),
+            },
+            "counts": {
+                "attention_items": total,
+                "returned": min(total, cap),
+                "truncated": total > cap or source_truncated,
+                "by_category": category_counts,
+            },
+            "doing_cards_scanned": len(payload["cards"]),
+            "doing_cards_total": payload.get("total", len(payload["cards"])),
+            "source_truncated": source_truncated,
+            "items": items[:cap],
+            "active": active_items[:cap],
+            "active_count": sum(
+                1 for item in active_items if item["category"] == "active_in_queue"
+            ),
+            "active_truncated": len(active_items) > cap,
+            "mutations_performed": [],
+            "next_safe_action": (
+                "inspect each item against its artifact; use board-api only "
+                "after a human-approved decision"
+            ),
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "operation": "kanban-sweep",
+            "error": str(exc)[:300],
+            "board_api": BOARD_API,
+            "mutations_performed": [],
         }, ensure_ascii=False, indent=2)
 
 

@@ -6,6 +6,7 @@ snapshot TTL, and string comms/requests/action rows from board-api
 are tolerated instead of crashing resolution.
 """
 import importlib.util
+import json
 import os
 import tempfile
 import time
@@ -166,6 +167,150 @@ def test_ambiguous_compact_match_raises_without_more_reads(ada_mcp, monkeypatch)
     with pytest.raises(LookupError, match="matched 2 cards"):
         ada_mcp.find_card("ADA-0555")
     assert calls == [COMPACT_PATH]
+
+
+def test_kanban_sweep_classifies_attention_read_only(ada_mcp, monkeypatch):
+    queue = {
+        "queued": [
+            {
+                "id": "manual-card", "ref": "ADA-0501", "title": "Manual item",
+                "action": {"type": "manual"},
+                "blocked": {"idc03": "unknown type 'manual'"},
+            },
+            {
+                "id": "blocked-card", "ref": "ADA-0502", "title": "Blocked item",
+                "action": {"type": "dispatch"}, "eligible": [],
+                "blocked": {"idc02": "host overloaded"},
+            },
+            {
+                "id": "runnable-card", "ref": "ADA-0503", "title": "Runnable item",
+                "action": {"type": "dispatch"}, "eligible": ["idc02"],
+                "blocked": {},
+            },
+        ],
+        "claimed": [{
+            "id": "live-card", "ref": "ADA-0504", "title": "Live item",
+            "status": "running", "host": "idc02",
+            "unit": "devin-task-live.service", "at": 100,
+        }, {
+            "id": "starting-card", "ref": "ADA-0506", "title": "Starting item",
+            "status": "starting", "host": "idc02", "unit": "", "at": "",
+        }],
+        "hosts": {
+            "idc02": {"stale": False, "active": [
+                {"id": "live-card"},
+                {"id": "host-only", "ref": "ADA-0505", "title": "Host-only item",
+                 "unit": "devin-task-host-only.service", "at": 101},
+            ]},
+            "idc03": {"stale": True, "active": []},
+        },
+    }
+    cards = [
+        _full_row(
+            "failed-admission", "ADA-0510", "Admission failure",
+            column="doing", updated="2026-11-19 07:30",
+            action={
+                "type": "dispatch", "status": "failed",
+                "result": "start failed: OpenCode admission requires a complete action.lane_envelope",
+            },
+        ),
+        _full_row(
+            "failed-runner", "ADA-0511", "Runner failure",
+            column="doing", updated="2026-11-18 07:00",
+            action={
+                "type": "dispatch", "status": "failed", "result": "exit=1",
+                "sweep": {"failed_noted": "2026-11-18 08:00"},
+            },
+        ),
+        _full_row(
+            "orphan-running", "ADA-0512", "Missing active unit",
+            column="doing", updated="2026-11-18 07:00",
+            action={"type": "dispatch", "status": "running"},
+        ),
+        _full_row(
+            "done-in-doing", "ADA-0513", "Done but still doing",
+            column="doing", updated="2026-11-19 05:00",
+            action={"type": "dispatch", "status": "done"},
+        ),
+        _full_row(
+            "idle-stale", "ADA-0514", "Stale idle work",
+            column="doing", updated="2026-11-17 07:00",
+            requests=[{"id": "old-question", "status": "open"}],
+        ),
+        _full_row(
+            "awaiting-human", "ADA-0515", "Open decision",
+            column="doing", updated="2026-11-19 07:00",
+            requests=[{"id": "decision", "status": "pending"}],
+        ),
+        _full_row(
+            "live-card", "ADA-0504", "Live item", column="doing",
+            updated="2026-11-19 08:00",
+            action={"type": "dispatch", "status": "running", "runner": "idc02"},
+        ),
+        "legacy string row",
+    ]
+    calls = []
+
+    def fake_get(path, ttl=20.0):
+        calls.append(path)
+        return queue if path == "/queue" else {"ok": True, "cards": cards}
+
+    monkeypatch.setattr(ada_mcp, "_get_json_cached", fake_get)
+    monkeypatch.setattr(
+        ada_mcp, "_post_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("sweep must not mutate the board")),
+    )
+    now = ada_mcp.datetime.strptime(
+        "2026-11-19 08:00", "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=ada_mcp.ZoneInfo("Asia/Bangkok"))
+    monkeypatch.setattr(ada_mcp, "_sweep_now", lambda: now)
+
+    doc = json.loads(ada_mcp.ada_kanban_sweep(window_hours=24, limit=20))
+
+    assert doc["ok"] is True
+    assert doc["mutations_performed"] == []
+    assert doc["queue"] == {
+        "queued": 3, "claimed": 2, "fresh_hosts": 1, "stale_hosts": 1,
+    }
+    active_items = {item["id"]: item for item in doc["active"]}
+    assert active_items["live-card"]["category"] == "active_in_queue"
+    assert active_items["starting-card"]["category"] == "claim_without_active_unit"
+    assert "no active unit" in active_items["starting-card"]["next_safe_step"]
+    assert active_items["host-only"]["category"] == "active_in_queue"
+    assert doc["active_count"] == 2
+    assert doc["source_truncated"] is False
+    items = {item["id"]: item for item in doc["items"]}
+    assert items["manual-card"]["category"] == "manual_only"
+    assert items["blocked-card"]["category"] == "queued_blocked"
+    assert items["failed-admission"]["category"] == "failed_admission_blocked"
+    assert items["failed-runner"]["failure_class"] == "runner_failed"
+    assert items["failed-runner"]["time_bucket"] == "stale"
+    assert items["orphan-running"]["category"] == "active_missing_from_queue"
+    assert items["done-in-doing"]["category"] == "done_still_in_doing"
+    assert items["idle-stale"]["category"] == "stale_doing_without_active_action"
+    assert items["idle-stale"]["open_request_count"] == 1
+    assert "do not re-queue until answered" in items["idle-stale"]["next_safe_step"]
+    assert items["awaiting-human"]["category"] == "awaiting_human"
+    assert doc["active"][0]["category"] == "active_in_queue"
+    assert "runnable-card" not in items
+    assert calls[0] == "/queue"
+    assert "column=doing" in calls[1]
+    assert "fields=" in calls[1]
+
+
+def test_kanban_sweep_fails_closed_on_invalid_queue(ada_mcp, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        ada_mcp, "_get_json_cached",
+        lambda path, ttl=20.0: calls.append(path) or {"queued": [], "claimed": []},
+    )
+    doc = json.loads(ada_mcp.ada_kanban_sweep())
+
+    assert doc["ok"] is False
+    assert "invalid shape" in doc["error"]
+    assert doc["mutations_performed"] == []
+    assert calls == ["/queue"]
 
 
 def test_unmatched_reference_raises_lookup(ada_mcp, monkeypatch):

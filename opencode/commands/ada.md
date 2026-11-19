@@ -9,7 +9,8 @@ MCP tool primer: use only the `ada-control_*` tools for Ada operations.
 `ada_next_card` ranks, `ada_status` reads state, `ada_plan` is the fast
 plan with memory deferred, `ada_plan_with_context` opts into memory,
 `ada_handoff_preview` previews a handoff, `ada_start_check` validates the
-approval boundary, and `ada_self_test` runs the fixed local test. Never
+approval boundary, `ada_kanban_sweep` gives a read-only stuck-work snapshot,
+and `ada_self_test` runs the fixed local test. Never
 replace an MCP call with Bash, Python imports, or direct board HTTP.
 `ada_wiki_extensions` is the read-only MediaWiki extension listing tool.
 `ada_wiki_extension` is the allowlisted, confirmation-gated install/enable/
@@ -70,6 +71,13 @@ Interpret the command as one of these safe operations:
   report the missing fields as the verdict`, `unclear -> hold`.
   Verdicts are proposals — queue/hold mutations go through the gated
   ada_card_action tool; close/merge/deploy stay with Devin or Tony. Finish with a compact sweep receipt.
+- `/ada stuck [hours]`: call `ada_kanban_sweep` first, passing the requested
+  value as `window_hours` (default 24).
+  Report the queue snapshot, active work, failed/stale/mismatched cards, and
+  manual-only or blocked queue items with their evidence and next safe step.
+  This is read-only: do not queue, hold, retry, move, close, or dispatch from
+  this command. Inspect card context only for a specific candidate and keep
+  the existing confirmation gates for any later action.
 
 Active-card context:
 
