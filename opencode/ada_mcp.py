@@ -1930,11 +1930,46 @@ def _sweep_queue_items(queue: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _sweep_active_items(queue: dict[str, Any]) -> list[dict[str, Any]]:
     items = []
-    for row in queue.get("claimed", []):
-        if not isinstance(row, dict):
+    host_active: dict[str, dict[str, Any]] = {}
+    for host_name, host in (queue.get("hosts") or {}).items():
+        if not isinstance(host, dict):
             continue
+        for row in host.get("active", []):
+            if isinstance(row, dict) and row.get("id"):
+                active_row = dict(row)
+                active_row.setdefault("host", host_name)
+                host_active[str(row["id"])] = active_row
+
+    for row in queue.get("claimed", []):
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        card_id = str(row["id"])
+        host_row = host_active.pop(card_id, None)
+        status = str(row.get("status") or "").lower()
+        confirmed_active = bool(host_row) or (
+            bool(row.get("unit")) and status in ("running", "claimed")
+        )
+        evidence = {**row, **(host_row or {})}
         items.append({
-            "id": str(row.get("id") or "")[:120],
+            "id": card_id[:120],
+            "ref": str(evidence.get("ref") or "")[:32],
+            "title": str(evidence.get("title") or "")[:160],
+            "host": str(evidence.get("host") or "")[:80],
+            "unit": str(evidence.get("unit") or "")[:160],
+            "started_at": evidence.get("at"),
+            "status": str(evidence.get("status") or row.get("status") or "claimed")[:24],
+            "category": (
+                "active_in_queue" if confirmed_active else "claim_without_active_unit"
+            ),
+            "next_safe_step": (
+                "leave running; inspect only if progress stalls"
+                if confirmed_active else
+                "reconcile the claim/start state; no active unit is reported"
+            ),
+        })
+    for card_id, row in host_active.items():
+        items.append({
+            "id": card_id[:120],
             "ref": str(row.get("ref") or "")[:32],
             "title": str(row.get("title") or "")[:160],
             "host": str(row.get("host") or "")[:80],
@@ -1991,6 +2026,7 @@ def ada_kanban_sweep(window_hours: int = 24, limit: int = 50) -> str:
         ))
         total = len(items)
         hosts = queue["hosts"]
+        active_items = _sweep_active_items(queue)
         source_truncated = bool(payload.get("truncated"))
         category_counts: dict[str, int] = {}
         for item in items:
@@ -2023,9 +2059,11 @@ def ada_kanban_sweep(window_hours: int = 24, limit: int = 50) -> str:
             "doing_cards_total": payload.get("total", len(payload["cards"])),
             "source_truncated": source_truncated,
             "items": items[:cap],
-            "active": _sweep_active_items(queue)[:cap],
-            "active_count": len(queue["claimed"]),
-            "active_truncated": len(queue["claimed"]) > cap,
+            "active": active_items[:cap],
+            "active_count": sum(
+                1 for item in active_items if item["category"] == "active_in_queue"
+            ),
+            "active_truncated": len(active_items) > cap,
             "mutations_performed": [],
             "next_safe_action": (
                 "inspect each item against its artifact; use board-api only "

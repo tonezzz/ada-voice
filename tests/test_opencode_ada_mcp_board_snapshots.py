@@ -192,9 +192,16 @@ def test_kanban_sweep_classifies_attention_read_only(ada_mcp, monkeypatch):
             "id": "live-card", "ref": "ADA-0504", "title": "Live item",
             "status": "running", "host": "idc02",
             "unit": "devin-task-live.service", "at": 100,
+        }, {
+            "id": "starting-card", "ref": "ADA-0506", "title": "Starting item",
+            "status": "starting", "host": "idc02", "unit": "", "at": "",
         }],
         "hosts": {
-            "idc02": {"stale": False, "active": [{"id": "live-card"}]},
+            "idc02": {"stale": False, "active": [
+                {"id": "live-card"},
+                {"id": "host-only", "ref": "ADA-0505", "title": "Host-only item",
+                 "unit": "devin-task-host-only.service", "at": 101},
+            ]},
             "idc03": {"stale": True, "active": []},
         },
     }
@@ -264,10 +271,14 @@ def test_kanban_sweep_classifies_attention_read_only(ada_mcp, monkeypatch):
     assert doc["ok"] is True
     assert doc["mutations_performed"] == []
     assert doc["queue"] == {
-        "queued": 3, "claimed": 1, "fresh_hosts": 1, "stale_hosts": 1,
+        "queued": 3, "claimed": 2, "fresh_hosts": 1, "stale_hosts": 1,
     }
-    assert [item["id"] for item in doc["active"]] == ["live-card"]
-    assert doc["active_count"] == 1
+    active_items = {item["id"]: item for item in doc["active"]}
+    assert active_items["live-card"]["category"] == "active_in_queue"
+    assert active_items["starting-card"]["category"] == "claim_without_active_unit"
+    assert "no active unit" in active_items["starting-card"]["next_safe_step"]
+    assert active_items["host-only"]["category"] == "active_in_queue"
+    assert doc["active_count"] == 2
     assert doc["source_truncated"] is False
     items = {item["id"]: item for item in doc["items"]}
     assert items["manual-card"]["category"] == "manual_only"
