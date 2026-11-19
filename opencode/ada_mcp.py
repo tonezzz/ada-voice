@@ -2703,38 +2703,428 @@ def ada_start_check(card_reference: str, handoff_confirmation: str = "") -> str:
         return json.dumps({"ok": False, "operation": "start-check", "error": str(exc), "board_api": BOARD_API})
 
 
+_DISPATCH_REQUIRED = ("type", "repo", "executor", "model", "profile",
+                      "target_host", "artifact")
+_DISPATCH_ALIASES = {"profile": ("profile", "agent_profile"),
+                     "artifact": ("artifact", "output_artifact")}
+
+
+def _dispatch_missing(action: dict[str, Any]) -> list[str]:
+    """Fields ada_dispatch_check requires — shared by draft/stage."""
+    missing = [f for f in _DISPATCH_REQUIRED
+               if not any(action.get(n)
+                          for n in _DISPATCH_ALIASES.get(f, (f,)))]
+    if not _resolved_verifier(action):
+        missing.append("verifier")
+    return sorted(set(missing))
+
+
+def _card_action_state(card: dict[str, Any]) -> tuple[str, str]:
+    """(action.status, runner) — runner '' when the card is unclaimed."""
+    a = _card_action(card)
+    claim = card.get("claim") if isinstance(card.get("claim"), dict) else {}
+    runner = str(a.get("runner") or claim.get("runner")
+                 or claim.get("host") or "")
+    return str(a.get("status") or "idle"), runner
+
+
 @mcp.tool()
 def ada_dispatch_check(card_reference: str) -> str:
     """Validate the typed dispatch envelope without creating a job."""
     try:
         card = find_card(card_reference)
         action = _card_action(card)
-        required = ("type", "repo", "executor", "model", "profile", "target_host", "artifact")
-        aliases = {"profile": ("profile", "agent_profile"), "artifact": ("artifact", "output_artifact")}
-        missing = []
-        for field in required:
-            names = aliases.get(field, (field,))
-            if not any(action.get(name) for name in names):
-                missing.append(field)
-        verifier = _resolved_verifier(action)
-        if not verifier:
-            missing.append("verifier")
+        missing = _dispatch_missing(action)
+        state, runner = _card_action_state(card)
+        live = state in ("queued", "running")
         return json.dumps({
             "ok": not missing,
             "operation": "dispatch-check",
             "card": {"id": card.get("id"), "ref": card.get("ref"), "title": card.get("title")},
-            "required_fields": list(required) + ["verifier"],
-            "missing_fields": sorted(set(missing)),
+            "required_fields": list(_DISPATCH_REQUIRED) + ["verifier"],
+            "missing_fields": missing,
+            "action_status": state,
+            "runner": runner or None,
+            "blocked": live,
+            "blocked_reason": ("card is claimed/running — do not queue "
+                               "or re-stage until the attempt ends"
+                               if live else None),
             "typed_dispatch_available": False,
             "approval_required": True,
             "mutations_performed": [],
+            "envelope_tool": ("ada_envelope_draft" if missing else None),
             "next_safe_action": (
-                "complete the card envelope and obtain explicit approval; "
-                "this check never creates or queues a job"
+                "call ada_envelope_draft for the missing fields, review "
+                "the payload, then ada_envelope_stage with confirmed=true "
+                "after explicit approval; this check never mutates"
             ),
         }, ensure_ascii=False, indent=2)
     except Exception as exc:
         return json.dumps({"ok": False, "operation": "dispatch-check", "error": str(exc), "board_api": BOARD_API})
+
+
+# --- staged OpenCode dispatch envelopes --------------------------------
+# Mirror of the runner's S3 staged-dispatch admission
+# (runner-agent.S3_STAGED_PROFILES + prepare_profile_dispatch): only
+# these profiles on stage S3 / target idc02 can be admitted today, so
+# the draft builder offers exactly them. Values mirror
+# evals/opencode-lane/profiles/<id>/profile.yml on chaba master and the
+# live envelopes on ada-ocb-free-lane-workflow-pilot /
+# ada-docs-search-drift. The runner re-validates the envelope at claim
+# (lint_envelope + check_envelope), so drift fails closed — held, never
+# misrouted.
+_STAGED_TARGET_HOST = "idc02"
+_LANE_PROFILE_DEFAULT = {"free_lane": "ops-readonly"}
+# action keys board-api's /card write door accepts (mirror of
+# board-api.ACTION_KEYS) — status/runner/task_id/attempts stay
+# board-owned and are never caller-settable.
+_ENVELOPE_ACTION_KEYS = (
+    "type", "repo", "host", "labels", "button", "model", "executor",
+    "agent_profile", "profile", "target_host", "artifact", "task_class",
+    "prompt", "expect", "lane", "subject_host", "llm_key_alias",
+    "lane_envelope", "nlm_notebook", "nlm_source_file",
+    "nlm_source_text", "nlm_source_url")
+
+_STAGED_PROFILES: dict[str, dict[str, Any]] = {
+    "ops-readonly": {
+        "task_classes": ("read_only", "report"),
+        "providers": ("litellm", "opencode"),
+        "models": (
+            "litellm/gemini-3.5-flash-lite", "litellm/gemini-3.5-flash",
+            "litellm/or-free-nemotron-nano", "litellm/or-free-nemotron-ultra",
+            "litellm/or-free-nemotron-35", "litellm/or-free-north-code",
+            "litellm/or-gemini-3.5-flash-lite", "litellm/or-gemini-3.5-flash",
+            "opencode/big-pickle", "opencode/deepseek-v4.1-flash-free",
+            "opencode/glm-5.3-flash-free", "opencode/mimo-v2.6-flash-free"),
+        "artifact_dirs": ("evals/opencode-lane/out/", "reports/"),
+        "artifact_schema": ("evals/opencode-lane/profiles/ops-readonly/"
+                            "fixture/task.yaml #contract.required_fields"),
+        "verifier": {"type": "held_out_py",
+                     "ref": "evals/opencode-lane/profiles/ops-readonly/"
+                            "fixture/verify.py"},
+        "max_retries": 1,
+        "default_model": "litellm/gemini-3.5-flash-lite",
+    },
+    "ssot-research": {
+        "task_classes": ("read_only", "report"),
+        "providers": ("litellm", "opencode"),
+        "models": (
+            "litellm/gemini-3.5-flash-lite", "litellm/gemini-3.5-flash",
+            "litellm/ollama-qwen38b-kkmac", "litellm/ollama-qwen32b-kkmac",
+            "litellm/or-free-nemotron-ultra", "litellm/or-free-nemotron-35",
+            "litellm/or-free-north-code",
+            "opencode/big-pickle", "opencode/deepseek-v4.1-flash-free",
+            "opencode/glm-5.3-flash-free", "opencode/mimo-v2.6-flash-free"),
+        "artifact_dirs": ("evals/opencode-lane/out/", "reports/"),
+        "artifact_schema": ("evals/opencode-lane/profiles/ssot-research/"
+                            "fixture/task.yaml #contract.required_fields"),
+        "verifier": {"type": "held_out_py",
+                     "ref": "evals/opencode-lane/profiles/ssot-research/"
+                            "fixture/verify.py"},
+        "max_retries": 1,
+        "default_model": "litellm/gemini-3.5-flash-lite",
+    },
+    "storage-dryrun": {
+        "task_classes": ("read_only", "report"),
+        "providers": ("litellm",),
+        "models": ("litellm/gemini-3.5-flash-lite",
+                   "litellm/gemini-3.5-flash"),
+        "artifact_dirs": ("evals/opencode-lane/out/", "reports/"),
+        "artifact_schema": ("evals/opencode-lane/profiles/storage-dryrun/"
+                            "fixture/task.yaml #contract.required_fields"),
+        "verifier": {"type": "held_out_py",
+                     "ref": "evals/opencode-lane/profiles/storage-dryrun/"
+                            "fixture/verify.py"},
+        "max_retries": 0,
+        "default_model": "litellm/gemini-3.5-flash-lite",
+    },
+}
+
+
+def _artifact_dir_for(art: str, dirs: tuple) -> str | None:
+    for d in dirs:
+        if art.startswith(d):
+            return d
+    return None
+
+
+def _build_staged_action(card: dict[str, Any],
+                         provided: dict[str, Any],
+                         ) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Merge caller fields over the card's existing action and grow a
+    complete lane_envelope for the admitted staged profiles.
+    Returns (payload, problems, notes). payload carries board-api
+    ACTION_KEYS only — lifecycle fields stay board-owned."""
+    cid = str(card.get("id") or "")
+    merged = {k: v for k, v in _card_action(card).items()
+              if k in _ENVELOPE_ACTION_KEYS}
+    problems: list[str] = []
+    notes: list[str] = []
+    unknown = sorted(set(provided) - set(_ENVELOPE_ACTION_KEYS))
+    for k in unknown:
+        notes.append(f"ignored non-action field {k!r}")
+    for k, v in provided.items():
+        if k in _ENVELOPE_ACTION_KEYS:
+            merged[k] = v
+    if "lane_envelope" in provided:
+        notes.append("caller-supplied lane_envelope replaced by the "
+                     "generated staged envelope")
+
+    executor = str(merged.get("executor") or "").strip()
+    lane = str(merged.get("lane") or "").strip()
+    profile = str(merged.get("agent_profile")
+                  or merged.get("profile") or "").strip()
+    if not executor:
+        if profile in _STAGED_PROFILES or lane in _LANE_PROFILE_DEFAULT:
+            executor = "opencode"
+            merged["executor"] = executor
+            notes.append("executor defaulted to opencode for the staged "
+                         "profile lane")
+        else:
+            problems.append(
+                "action.executor required — staged OpenCode dispatch "
+                "needs executor=opencode plus a resolvable profile")
+    if executor == "opencode":
+        if not profile:
+            profile = _LANE_PROFILE_DEFAULT.get(lane, "")
+            if profile:
+                merged["agent_profile"] = profile
+                notes.append(f"profile resolved from lane {lane!r}: "
+                             f"{profile}")
+        merged["agent_profile"] = profile or merged.get("agent_profile")
+        spec = _STAGED_PROFILES.get(profile)
+        if spec is None:
+            problems.append(
+                f"profile {profile or '(none)'} is not admitted for "
+                f"staged dispatch — admitted: "
+                f"{sorted(_STAGED_PROFILES)}")
+        else:
+            merged.setdefault("type", "dispatch")
+            model = str(merged.get("model")
+                        or spec["default_model"]).strip()
+            provider = (model.split("/", 1)[0] if "/" in model
+                        else "devin")
+            if model not in spec["models"]:
+                problems.append(
+                    f"model {model!r} is not allowed for profile "
+                    f"{profile}")
+            if provider not in spec["providers"]:
+                problems.append(
+                    f"provider {provider!r} is not allowed for profile "
+                    f"{profile}")
+            merged["model"] = model
+            th = str(merged.get("target_host") or "").strip()
+            if not th:
+                th = _STAGED_TARGET_HOST
+                merged["target_host"] = th
+                notes.append(f"target_host defaulted to {_STAGED_TARGET_HOST} "
+                             "(the only host admitted for staged S3 "
+                             "dispatch today)")
+            elif th != _STAGED_TARGET_HOST:
+                problems.append(
+                    f"target_host {th!r} is not admitted — staged S3 "
+                    f"dispatch currently requires {_STAGED_TARGET_HOST}")
+            art = str(merged.get("artifact")
+                      or merged.get("output_artifact") or "").strip()
+            if not art:
+                problems.append(
+                    "action.artifact required — a repo-relative path "
+                    "under " + "/".join(spec["artifact_dirs"]))
+            elif (art.startswith("/") or ".." in art.split("/")
+                  or _artifact_dir_for(art, spec["artifact_dirs"])
+                  is None):
+                problems.append(
+                    f"artifact {art!r} must be a safe repo-relative "
+                    "path under " + "/".join(spec["artifact_dirs"]))
+            tc = str(merged.get("task_class") or "read_only").strip()
+            if tc not in ("read_only", "report"):
+                problems.append(
+                    "opencode task_class must be read_only or report")
+            elif tc not in spec["task_classes"]:
+                problems.append(
+                    f"task_class {tc!r} not admitted for profile "
+                    f"{profile}")
+            merged["task_class"] = tc
+            if not merged.get("repo"):
+                problems.append("action.repo required (dispatch "
+                                "whitelist: chaba, ada-voice, ...)")
+            art_dir = (_artifact_dir_for(art, spec["artifact_dirs"])
+                       or spec["artifact_dirs"][0])
+            merged["lane_envelope"] = {
+                "id": f"s3-{cid}-{profile}"[:80],
+                "card": cid,
+                "task_class": tc,
+                "stage": "S3",
+                "target_host": _STAGED_TARGET_HOST,
+                "executor": "opencode",
+                "profile": profile,
+                "model": model,
+                "provider": provider,
+                "unattended": True,
+                "mcp_allowlist": [],
+                "allowed_paths": [art_dir],
+                "artifact": {"path": art,
+                             "schema": spec["artifact_schema"]},
+                "verifier": dict(spec["verifier"]),
+                "escalation": {
+                    "on_fail": "manual",
+                    "allowed_on_fail": ["manual", "devin",
+                                        "retry_then_manual", "hold"],
+                    "max_retries": spec["max_retries"],
+                },
+                "rollback": {"kind": "none"},
+                "heartbeat": {"required": True, "stale_s": 300},
+                "timeout_s": 420,
+            }
+    elif executor:
+        notes.append(f"executor {executor!r} does not use "
+                     "lane_envelope — staged envelope not generated")
+    return ({k: v for k, v in merged.items()
+             if k in _ENVELOPE_ACTION_KEYS}, problems, notes)
+
+
+@mcp.tool()
+def ada_envelope_draft(card_reference: str,
+                       action: dict[str, Any] | None = None) -> str:
+    """Build a complete dispatch action (including action.lane_envelope)
+    for a card — read-only, writes nothing. `action` carries the
+    caller-owned fields to set (repo, executor, agent_profile/profile,
+    target_host, artifact, model, task_class, lane, prompt, expect,
+    llm_key_alias); missing pieces are defaulted from the admitted
+    staged profiles. Review the returned payload, then pass it to
+    ada_envelope_stage."""
+    try:
+        card = find_card(card_reference)
+    except Exception as exc:
+        return json.dumps({"ok": False, "operation": "envelope-draft",
+                           "error": str(exc),
+                           "mutations_performed": []})
+    payload, problems, notes = _build_staged_action(card, action or {})
+    missing = _dispatch_missing(payload)
+    state, runner = _card_action_state(card)
+    ok = not problems and not missing
+    return json.dumps({
+        "ok": ok,
+        "operation": "envelope-draft",
+        "card": {"id": card.get("id"), "ref": card.get("ref"),
+                 "title": card.get("title")},
+        "action_status": state,
+        "runner": runner or None,
+        "action": payload,
+        "missing_fields": missing,
+        "problems": problems,
+        "notes": notes,
+        "admitted_profiles": sorted(_STAGED_PROFILES),
+        "staged_target_host": _STAGED_TARGET_HOST,
+        "next_safe_action": (
+            "review the action payload; on approval call "
+            "ada_envelope_stage with the same action and "
+            "confirmed=true — it writes the envelope AND queues the "
+            "card in one board-api call" if ok else
+            "fix missing_fields/problems and re-draft; nothing was "
+            "written"),
+        "mutations_performed": [],
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def ada_envelope_stage(card_reference: str,
+                       action: dict[str, Any] | None = None,
+                       confirmed: bool = False) -> str:
+    """Stage a complete dispatch envelope on a card AND queue it —
+    the only Ada path that writes action.lane_envelope (via board-api
+    /card on_exists=queue). Two-call confirmation gate; refuses while
+    the card is queued or running."""
+    try:
+        card = find_card(card_reference)
+    except Exception as exc:
+        return json.dumps({"ok": False, "operation": "envelope-stage",
+                           "error": str(exc),
+                           "mutations_performed": []})
+    state, runner = _card_action_state(card)
+    if state in ("queued", "running"):
+        return json.dumps({
+            "ok": False,
+            "operation": "envelope-stage",
+            "card": {"id": card.get("id"), "ref": card.get("ref"),
+                     "title": card.get("title")},
+            "action_status": state,
+            "runner": runner or None,
+            "error": f"card is {state}"
+                     + (f" on {runner}" if runner else "")
+                     + " — staging would fight a live attempt",
+            "blocked_reason": "active_attempt",
+            "next_safe_action": ("wait for the active attempt to "
+                                 "finish (ada_status); re-arm with "
+                                 "ada_card_action do=retry only after "
+                                 "it ends"),
+            "mutations_performed": [],
+        }, ensure_ascii=False, indent=2)
+    payload, problems, notes = _build_staged_action(card, action or {})
+    missing = _dispatch_missing(payload)
+    cid = str(card.get("id") or "")
+    if not confirmed:
+        return json.dumps({
+            "ok": not problems and not missing,
+            "operation": "envelope-stage",
+            "preview": True,
+            "card": {"id": card.get("id"), "ref": card.get("ref"),
+                     "title": card.get("title")},
+            "action_status": state,
+            "action": payload,
+            "missing_fields": missing,
+            "problems": problems,
+            "notes": notes,
+            "warning": ("This writes the action envelope and queues "
+                        "the card for dispatch. Show the user the "
+                        "payload, then retry the identical call with "
+                        "confirmed=true."),
+            "mutations_performed": [],
+        }, ensure_ascii=False, indent=2)
+    if problems or missing:
+        return json.dumps({
+            "ok": False,
+            "operation": "envelope-stage",
+            "error": "envelope incomplete — fix and re-draft",
+            "missing_fields": missing,
+            "problems": problems,
+            "mutations_performed": [],
+        }, ensure_ascii=False, indent=2)
+    body = {"id": cid,
+            "title": str(card.get("title") or cid)[:160],
+            "on_exists": "queue",
+            "action": payload,
+            "text": "dispatch envelope staged via ada-ocb"}
+    try:
+        res = _post_json("/card", body, timeout=90)
+    except Exception as exc:
+        return json.dumps({"ok": False, "operation": "envelope-stage",
+                           "error": str(exc),
+                           "mutations_performed": []})
+    try:
+        fresh = find_card(card_reference)
+        verify_missing = _dispatch_missing(_card_action(fresh))
+        v_state, _v_runner = _card_action_state(fresh)
+    except Exception:
+        verify_missing, v_state = None, None
+    staged_ok = verify_missing == []
+    return json.dumps({
+        "ok": staged_ok,
+        "operation": "envelope-stage",
+        "card": {"id": card.get("id"), "ref": card.get("ref"),
+                 "title": card.get("title")},
+        "board_result": res,
+        "action_status": v_state,
+        "dispatch_check": {"ok": staged_ok,
+                           "missing_fields": verify_missing},
+        "notes": notes,
+        "mutations_performed": ["card.action", "action.status=queued"],
+        "next_safe_action": (
+            "envelope staged and card queued — a runner claim is the "
+            "next event; track with ada_status" if staged_ok else
+            "board accepted the write but verification read-back was "
+            "incomplete — check ada_status before retrying"),
+    }, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
@@ -3013,7 +3403,11 @@ _CARD_ACTIONS = {"queue", "hold"}
 
 @mcp.tool()
 def ada_card_action(card_reference: str, do: str, confirmed: bool = False) -> str:
-    """Queue or hold a board card -- mutation, two-call confirmation gate."""
+    """Queue or hold a board card -- mutation, two-call confirmation gate.
+    This does NOT stage a dispatch envelope: action.lane_envelope and the
+    executor fields are written only by ada_envelope_draft +
+    ada_envelope_stage. Queue is refused while the card is queued or
+    running — a live attempt must finish first."""
     if do not in _CARD_ACTIONS:
         return json.dumps({"ok": False, "operation": "card_action",
                            "error": f"action {do!r} not allowed -- permitted: {sorted(_CARD_ACTIONS)}",
@@ -3022,11 +3416,29 @@ def ada_card_action(card_reference: str, do: str, confirmed: bool = False) -> st
         card = find_card(card_reference)
     except Exception as exc:
         return json.dumps({"ok": False, "operation": "card_action", "error": str(exc), "mutations": []})
+    state, runner = _card_action_state(card)
+    if do == "queue" and state in ("queued", "running"):
+        return json.dumps({"ok": False, "operation": "card_action",
+                           "card": {"id": card.get("id"), "ref": card.get("ref"),
+                                    "title": card.get("title")},
+                           "action_status": state,
+                           "runner": runner or None,
+                           "error": f"card already {state}"
+                                    + (f" on {runner}" if runner else "")
+                                    + " — queue refused; a live attempt "
+                                    "must finish first",
+                           "blocked_reason": "active_attempt",
+                           "next_safe_action": ("track with ada_status; "
+                                                "re-arm with do=retry "
+                                                "only after the attempt "
+                                                "ends"),
+                           "mutations": []})
     if not confirmed:
         return json.dumps({"ok": False, "operation": "card_action", "preview": {
-            "card": card.get("id"), "do": do, "current_action": card.get("action")},
+            "card": card.get("id"), "do": do, "current_action": card.get("action"),
+            "action_status": state, "runner": runner or None,
             "warning": "This mutates board action state. Retry the identical call with confirmed=true.",
-            "mutations": []})
+            "mutations": []}})
     try:
         result = _post_json("/action", {"id": card.get("id"), "do": do}, timeout=30)
         return json.dumps({"ok": True, "operation": "card_action", "result": result,
