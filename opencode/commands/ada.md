@@ -11,6 +11,9 @@ plan with memory deferred, `ada_plan_with_context` opts into memory,
 `ada_handoff_preview` previews a handoff, `ada_start_check` validates the
 approval boundary, `ada_kanban_sweep` gives a read-only stuck-work snapshot,
 `ada_ssot_search` is the bounded lexical SSOT lookup,
+`ada_envelope_draft` builds a complete dispatch action including
+`action.lane_envelope` (read-only), and `ada_envelope_stage` is the only
+tool that writes the envelope and queues the card (two-call confirmed),
 and `ada_self_test` runs the fixed local test. Never
 replace an MCP call with Bash, Python imports, or direct board HTTP.
 `ada_wiki_extensions` is the read-only MediaWiki extension listing tool.
@@ -44,6 +47,16 @@ Interpret the command as one of these safe operations:
 - `/ada preflight <card-or-request>`: call the `ada_preflight` MCP tool once
   after exact card confirmation. It combines status, plan, handoff,
   start-check, and dispatch-check without mutating anything.
+- `/ada dispatch <card-or-request>`: stage and queue a dispatch. Call
+  `ada_dispatch_check` first; if fields are missing call `ada_envelope_draft`
+  with the card ref and the action fields the user approved (repo, executor,
+  agent_profile/profile, target_host, artifact, model, task_class, lane).
+  Show the returned `action` payload in a native confirmation. Only after
+  approval, call `ada_envelope_stage` with the same `action` — first without
+  `confirmed` to preview, then identical with `confirmed=true`. The stage
+  call writes `action.lane_envelope` AND queues the card atomically; it
+  refuses while the card is queued/running. `ada_card_action` queue/hold
+  never stages an envelope — do not use it for dispatch setup.
 - `/ada debug`: call the `ada_debug_opencode` MCP tool first, then diagnose command discovery, MCP availability, board reachability, workspace, and model/runtime information.
 - `/ada next`: call the `ada_next_card` MCP tool first. Then use the native
   OpenCode `question` tool to show the ranked candidates as clickable choices
@@ -67,9 +80,10 @@ Interpret the command as one of these safe operations:
   pending requests first (handled like `/ada attention`), then walk the
   `oldest_backlog` list and give each card a one-line triage verdict:
   `verified-done -> propose close`, `needs-Tony -> raise request`,
-  `dispatchable -> call ada_preflight for the card first; propose
-  ada_card_action queue only when preflight reports ready — otherwise
-  report the missing fields as the verdict`, `unclear -> hold`.
+  `dispatchable -> call ada_preflight for the card first; if
+  ada_dispatch_check reports missing fields, call ada_envelope_draft and
+  propose ada_envelope_stage (confirmed) — otherwise report the missing
+  fields as the verdict`, `unclear -> hold`.
   Verdicts are proposals — queue/hold mutations go through the gated
   ada_card_action tool; close/merge/deploy stay with Devin or Tony. Finish with a compact sweep receipt.
 - `/ada stuck [hours]`: call `ada_kanban_sweep` first, passing the requested
@@ -141,7 +155,8 @@ After a non-stop candidate selection from `/ada next`:
 6. `Review preflight` only displays the combined status/plan/handoff/start/
    dispatch checks. It never queues, dispatches, mutates, merges, or deploys.
    If dispatch is not ready, report the missing fields and stop. Never
-   invent executor, host, profile, artifact, or verifier values.
+   invent executor, host, profile, artifact, or verifier values — use
+   `ada_envelope_draft` to generate the complete action payload instead.
 
 Decision-menu rule:
 
