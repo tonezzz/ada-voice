@@ -557,12 +557,17 @@ class ToolRunner(
             ) from exc
         # confirmed/confirm_token were popped for the gates above — hand them
         # back to methods that declare them (e.g. devin_job_report re-checks
-        # confirmation internally on its publish path).
+        # confirmation internally on its publish path). Dynamic tools run
+        # through _bound(**kwargs), which can never declare the envelope —
+        # inspect the tools.d run() itself so modules like kanban (whose
+        # gated move/queue re-check confirmed/confirm_token internally)
+        # actually receive the grant.
         # gate_args = the args exactly as the confirm gates saw them
         # (envelope keys popped, pre-normalize) — a retry arrives spelled
         # the same way, so a re-armed token must bind THIS fingerprint.
         gate_args = dict(call_args)
-        _params = inspect.signature(method).parameters
+        _params = inspect.signature(
+            dyn_spec.run if dyn_spec is not None else method).parameters
         if "confirmed" in _params and confirm[0] is not None:
             call_args["confirmed"] = confirm[0]
         if "confirm_token" in _params and confirm[1] is not None:

@@ -1,0 +1,171 @@
+name: ada-opencode-flow
+instance: tony
+# The OpenCode card-spec surface offline: preflight validates the
+# card's explicit executor envelope (repo/model/key/profile/limits/
+# artifact/verifier), mints the approval receipt the dispatch tool
+# replays, and the confirmed dispatch queues the card on the board.
+# Covers the card-spec spend refusal (max_usd <= 0), the missing-limits
+# report, forged/expired receipt refusal, and the verify-after-write.
+# Refusals are interleaved with successes because the storm breaker
+# trips after two consecutive ok:false outcomes on the same tool.
+board:
+  cards:
+    - id: oc-cap
+      title: Zero budget card
+      column: backlog
+      updated: "2026-11-19 09:10"
+      action:
+        type: dispatch
+        executor: opencode
+        repo: ada-voice
+        model: litellm/gemini-2.5-flash
+        llm_key_alias: gemini
+        profile: ops-readonly
+        target_host: idc02
+        artifact: reports/x.md
+        max_usd: 0
+        max_turns: 10
+        max_tokens: 1000
+        max_wall_time_s: 600
+        max_retries: 0
+    - id: oc-ready
+      ref: ADA-9010
+      title: OpenCode bench card
+      column: backlog
+      updated: "2026-11-19 09:00"
+      action:
+        type: dispatch
+        executor: opencode
+        repo: ada-voice
+        model: litellm/gemini-2.5-flash
+        llm_key_alias: gemini
+        profile: ops-readonly
+        target_host: idc02
+        artifact: reports/oc-bench.md
+        max_usd: 0.5
+        max_turns: 20
+        max_tokens: 200000
+        max_wall_time_s: 1800
+        max_retries: 1
+    - id: oc-broke
+      title: Missing limits card
+      column: backlog
+      updated: "2026-11-19 09:05"
+      action:
+        type: dispatch
+        executor: opencode
+        repo: ada-voice
+steps:
+  # Spend-cap refusal at the card-spec layer: a non-positive budget
+  # fails validation before anything queues.
+  - tool: ada_opencode
+    args: {action: preflight, card_reference: oc-cap,
+           task: "run the bench check"}
+    expect:
+      output_contains:
+        - '"ready_for_dispatch": false'
+        - 'max_usd must be positive'
+
+  # Healthy card — preflight mints the receipt triple the confirmed
+  # dispatch replays verbatim.
+  - tool: ada_opencode
+    args: {action: preflight, card_reference: oc-ready,
+           task: "run the bench check"}
+    expect:
+      output_contains:
+        - '"ready_for_dispatch": true'
+        - '"approval_receipt": "ADA-APPROVE-'
+        - '"verifier": "evals/opencode-lane/profiles/ops-readonly/fixture/verify.py"'
+    capture:
+      rcpt: '"approval_receipt": "(ADA-APPROVE-[0-9A-F]+)"'
+      iss: '"approval_issued_at": (\d+)'
+      exp: '"approval_expires_at": (\d+)'
+
+  # An executor card missing the declared limits reports every gap —
+  # Ada fills them in the card spec, never guesses.
+  - tool: ada_opencode
+    args: {action: preflight, card_reference: oc-broke,
+           task: "run the bench check"}
+    expect:
+      output_contains:
+        - '"ready_for_dispatch": false'
+        - '"missing"'
+        - '"llm_key_alias"'
+
+  # The dispatch is confirm-gated at the manifest layer.
+  - tool: ada_opencode_dispatch
+    args:
+      card_reference: oc-ready
+      task: "run the bench check"
+      approval_receipt: "{rcpt}"
+      approval_issued_at: "{iss}"
+      approval_expires_at: "{exp}"
+    expect: {error_contains: "requires confirmation"}
+
+  # An expired approval is refused outright.
+  - tool: ada_opencode_dispatch
+    args:
+      card_reference: oc-ready
+      task: "run the bench check"
+      approval_receipt: "{rcpt}"
+      approval_issued_at: "{iss}"
+      approval_expires_at: 1
+      confirmed: true
+    expect: {output_contains: ['"error": "approval_receipt_expired"']}
+
+  # The real receipt queues the card — the board is the record.
+  - tool: ada_opencode_dispatch
+    args:
+      card_reference: oc-ready
+      task: "run the bench check"
+      approval_receipt: "{rcpt}"
+      approval_issued_at: "{iss}"
+      approval_expires_at: "{exp}"
+      confirmed: true
+    expect:
+      output_contains:
+        - '"ok": true'
+        - '"queued": true'
+        - '"card_id": "oc-ready"'
+        - '"executor": "opencode"'
+
+  # A forged receipt is refused — only the exact preflight triple binds.
+  - tool: ada_opencode_dispatch
+    args:
+      card_reference: oc-ready
+      task: "run the bench check"
+      approval_receipt: "ADA-APPROVE-FORGED0000"
+      approval_issued_at: "{iss}"
+      approval_expires_at: "{exp}"
+      confirmed: true
+    expect: {output_contains: ['"error": "approval_receipt_mismatch"']}
+
+  # Replaying a valid receipt after the queue write is refused — the
+  # receipt binds card.updated, so any board mutation invalidates it.
+  - tool: ada_opencode_dispatch
+    args:
+      card_reference: oc-ready
+      task: "run the bench check"
+      approval_receipt: "{rcpt}"
+      approval_issued_at: "{iss}"
+      approval_expires_at: "{exp}"
+      confirmed: true
+    expect: {output_contains: ['"error": "approval_receipt_mismatch"']}
+
+  # status reads the now-armed envelope back off the board.
+  - tool: ada_opencode
+    args: {action: status, card_reference: oc-ready}
+    expect:
+      output_contains:
+        - '"executor": "opencode"'
+        - '"status": "queued"'
+
+  # Board truth: exactly one /card write, carrying the limits envelope.
+  - audit: board
+    expect:
+      output_contains:
+        - '"/card"'
+        - '"on_exists": "queue"'
+        - 'budget_usd<=0.5'
+        - '"status": "queued"'
+      output_not_contains: ['fakeboard: unhandled']

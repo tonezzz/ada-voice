@@ -1,0 +1,39 @@
+name: devin-dispatch-board-down
+instance: tony
+# Dispatch rail honesty: with the board unreachable, a confirmed
+# `devin` dispatch must report the failure plainly — the card was not
+# filed and there is deliberately no ssh fallback (the board IS the
+# entry point). The runner re-arms a bound confirm_token on the
+# transport-class failure so a retry doesn't need a second spoken yes.
+board:
+  unreachable: true
+dispatch_ssh:
+  status: ""
+steps:
+  - tool: devin
+    args: {action: dispatch, repo: ada-voice,
+           task: "Summarize the open kanban cards",
+           confirmed: true}
+    expect:
+      output_contains:
+        - '"ok": false'
+        - 'board-api is unreachable'
+        # The transport failure re-arms the confirmation for one retry.
+        - '"confirm_token"'
+      output_not_contains: ['"task_id"']
+    capture: {tok2: '"confirm_token": "(cfm-[0-9a-f]+)"'}
+
+  # The re-armed token replays the same call — still unreachable,
+  # still honest, token re-armed again.
+  - tool: devin
+    args: {action: dispatch, repo: ada-voice,
+           task: "Summarize the open kanban cards",
+           confirm_token: "{tok2}"}
+    expect:
+      output_contains: ['"ok": false', 'board-api is unreachable']
+
+  # No ssh session was ever started — the audit log only saw the
+  # remote-dedup status probe.
+  - audit: dispatch
+    expect:
+      output_not_contains: ['"start"']

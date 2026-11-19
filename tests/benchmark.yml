@@ -42,7 +42,11 @@ policy:
                 # ada-kanban-access seat: kanban holds the board writes —
                 # comment/file/ask/move all mutate card state; list/read
                 # share the name (name-level policy can't split actions).
-                kanban]
+                kanban,
+                # board-adjacent writes through board-api: opencode card
+                # queue (armed envelope), batch queue sweep, wiki
+                # extension control — gate scenarios count as writes.
+                ada_opencode_dispatch, ada_sweep, wiki_extension]
   # scenarios permitted to exercise write tools (incl. denied attempts).
   write_allowed_in:
     # cms/report writers
@@ -68,6 +72,17 @@ policy:
     - ada-board-write
     - report_opinion_loop
     - kanban_review
+    # ada-benchmark-coverage offline board/dispatch surfaces —
+    # fake-board fixtures, gate denials included
+    - kanban-board-ops
+    - kanban-move-gates
+    - devin-dispatch-board
+    - devin-dispatch-board-down
+    - devin-dispatch-playbook
+    - ada-opencode-flow
+    - ada-sweep
+    - wiki-extension-gate
+    - cms-write-flow
     # memory/speaker writes (incl. gate scenarios with denied attempts)
     - doc_upload
     - doc_recall              # reads the archive via docs action=search|get
