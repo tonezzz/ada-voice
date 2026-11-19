@@ -133,6 +133,29 @@ def test_card_pick_validates_strategy_and_mints_tokens(ada_mcp, monkeypatch):
     assert "comms_tail" in doc["picks"][0]["card"]
 
 
+def test_card_pick_marks_manual_queue_items_human_only(ada_mcp, monkeypatch):
+    monkeypatch.setattr(ada_mcp, "_board_cards", lambda: [
+        _card("manual", "ADA-0104", "human follow-up",
+              action={"type": "manual", "status": "queued"}),
+        _card("dispatch", "ADA-0105", "runnable task",
+              action={"type": "dispatch", "status": "queued"}),
+    ])
+
+    doc = json.loads(_tool(ada_mcp, "ada_card_pick")(
+        strategy="queue", limit=5))
+
+    assert doc["ok"] is True
+    assert doc["mutations_performed"] == []
+    picks = {pick["card"]["id"]: pick for pick in doc["picks"]}
+    assert picks["manual"]["why"] == \
+        "queued for manual handling; not runner-dispatchable"
+    assert picks["dispatch"]["why"] == "queued for dispatch"
+    # Manual work remains selectable for Ada's read-only planning gates.
+    token = picks["manual"]["selection_token"]
+    assert token
+    assert ada_mcp.PENDING_NEXT_SELECTIONS["ada-0104"][0] == token
+
+
 # --------------------------------------------------------------------------
 # gated tools: confirmation + token envelopes
 # --------------------------------------------------------------------------
