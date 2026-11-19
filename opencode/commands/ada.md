@@ -10,6 +10,7 @@ MCP tool primer: use only the `ada-control_*` tools for Ada operations.
 plan with memory deferred, `ada_plan_with_context` opts into memory,
 `ada_handoff_preview` previews a handoff, `ada_start_check` validates the
 approval boundary, `ada_kanban_sweep` gives a read-only stuck-work snapshot,
+`ada_ssot_search` is the bounded lexical SSOT lookup,
 and `ada_self_test` runs the fixed local test. Never
 replace an MCP call with Bash, Python imports, or direct board HTTP.
 `ada_wiki_extensions` is the read-only MediaWiki extension listing tool.
@@ -78,6 +79,12 @@ Interpret the command as one of these safe operations:
   This is read-only: do not queue, hold, retry, move, close, or dispatch from
   this command. Inspect card context only for a specific candidate and keep
   the existing confirmation gates for any later action.
+- `/ada ssot <query>`: call `ada_ssot_search` first with the query text
+  (optional `collection` to narrow to `infrastructure-ssot` or
+  `chaba-glossary`). Report the matched SSOT paths, excerpts, matched terms,
+  and provenance/freshness. This is lexical exact-term search — no provider
+  calls. For semantic discovery use `ada_context_pack`; to read one document
+  in full use `ada_ssot_get` with the hit's key. Read-only: never mutate.
 
 Active-card context:
 
