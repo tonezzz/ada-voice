@@ -1,0 +1,118 @@
+name: kanban-board-ops
+instance: tony
+# Offline coverage for the kanban tool's free board ops against the
+# FakeBoard fixture — the same board-api contract board_client speaks.
+# list/read are free reads; comment/ask/file/respond are free writes
+# (respond is owner-gated inside the tool). Verify-after-write: every
+# mutation is asserted against `audit: board` state, not just the
+# tool's ok:true.
+banks:
+  banks:
+    note:
+      title: Scratch notes
+      scope: instance
+      instances: [tony]
+      mddb_collection: ada-ha-bank-note-{instance}
+      kinds: [note]
+      writable: true
+      write_policy: direct
+      allowed_tools: [ada_remember, ada_forget, ada_outcome]
+      status: active
+  person_policies:
+    person.tony: {full: true}
+board:
+  cards:
+    - id: ops-one
+      ref: ADA-9001
+      title: In-flight card
+      column: doing
+      updated: "2026-11-19 08:00"
+      priority: medium
+    - id: ops-two
+      ref: ADA-9002
+      title: Review candidate
+      column: review
+      updated: "2026-11-19 08:30"
+      priority: low
+steps:
+  # Owner session pinned — respond's owner gate authorizes.
+  - set: {session_owner_identity: person.tony}
+
+  # Reads: the board lists the seeded cards and counts columns.
+  - tool: kanban
+    args: {action: list}
+    expect:
+      no_error: true
+      output_contains:
+        - '"doing": 1'
+        - '"review": 1'
+        - '"ops-one"'
+        - '"ops-two"'
+
+  - tool: kanban
+    args: {action: read, id: ops-two}
+    expect:
+      no_error: true
+      output_contains: ['"Review candidate"', '"review"']
+
+  # Free write — comment lands as an 'ada' comms line.
+  - tool: kanban
+    args: {action: comment, id: ops-two, text: "evidence looks thin"}
+    expect: {no_error: true, output_contains: ['"comment added"']}
+
+  # Stale-write guard: an expected_updated that predates the write
+  # the comment just made is refused instead of clobbering.
+  - tool: kanban
+    args: {action: comment, id: ops-two, text: "stale comment",
+           expected_updated: "2026-11-19 08:30"}
+    expect: {output_contains: ['"stale": true']}
+
+  # Free write — ask raises an open board request on the card.
+  - tool: kanban
+    args: {action: ask, id: ops-two, ask: "merge or wait?",
+           options: [{id: merge, label: Merge}, {id: wait, label: Wait}],
+           suggested: wait}
+    expect: {no_error: true, output_contains: ['"request added"']}
+
+  # The request shows up on the card read as an open blocker.
+  - tool: kanban
+    args: {action: read, id: ops-two}
+    expect:
+      no_error: true
+      output_contains: ['"merge or wait?"', '"status": "open"']
+
+  # Owner respond closes the request; the board logs it under 'tony'.
+  - tool: kanban
+    args: {action: respond, id: ops-two, request_id: r1,
+           answer: "wait for the re-run"}
+    expect: {no_error: true, output_contains: ['"answer saved"']}
+
+  # Free write — file drops a fresh card; the tool verifies it landed.
+  - tool: kanban
+    args: {action: file, title: "Fresh bench card",
+           note: "filed from the offline scenario",
+           priority: low}
+    expect:
+      no_error: true
+      output_contains: ['"id": "fresh-bench-card"']
+
+  # The retired ada_board_write name still routes into kanban.
+  - tool: ada_board_write
+    args: {action: comment, id: ops-one, text: "alias still works"}
+    expect: {no_error: true}
+
+  # Verify-after-write on the fixture itself: comms, the answered
+  # request, and the new card are all really on the board.
+  - audit: board
+    expect:
+      output_contains:
+        - '"/comment"'
+        - '"/request"'
+        - '"/respond"'
+        - '"/card"'
+        - '"evidence looks thin"'
+        - '"status": "answered"'
+        - '"wait for the re-run"'
+        - '"id": "fresh-bench-card"'
+        - '"alias still works"'
+      output_not_contains: ['fakeboard: unhandled']

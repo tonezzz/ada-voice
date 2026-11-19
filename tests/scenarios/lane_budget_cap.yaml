@@ -1,0 +1,34 @@
+name: lane-budget-cap
+instance: tony
+# Spend-cap refusal coverage for the paid lane: lane_budget.check()
+# fails fast and free before a provider connect when the lane's
+# estimated monthly spend crosses the configured ceiling, and a
+# latched provider billing-cap holds sessions locally for the rest of
+# the billing period. Exercised through the call: step — this gate
+# sits in front of the voice connect path, not a tool.
+env:
+  ADA_LANE_MONTHLY_BUDGET_USD: "0.50"
+usage_log:
+  # ~$3.00 of unknown-modality tokens inside the current billing
+  # period — the engine stamps the ts onto this month's boundary.
+  - {ts: null, source: live, lane: null,
+     "in": 1000000, out: 0, in_mod: {}, out_mod: {},
+     cached: 0, tool_use: 0}
+steps:
+  # Over the configured ceiling — refusal carries the spend figure and
+  # the hold-until date.
+  - call: backend.lane_budget.check
+    args: {kind: live}
+    expect:
+      output_contains:
+        - 'LaneBudgetExceeded'
+        - 'monthly live budget reached'
+        - 'Voice sessions held'
+
+  # The snapshot reports the configured cap and the spent estimate.
+  - call: backend.lane_budget.status
+    args: {}
+    expect:
+      output_contains:
+        - '"budget_usd": 0.5'
+        - '"spent_usd": 3.0'

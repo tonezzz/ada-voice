@@ -1,0 +1,44 @@
+name: wiki-extension-gate
+instance: tony
+# The wiki surface that exists today — wiki_extension, the
+# confirm-gated allowlisted MediaWiki extension control proxied through
+# board-api. Asserts the manifest confirmed gate, the extension
+# allowlist refusal (no arbitrary repos/commands reach the board), and
+# the verified write. wiki_read/wiki_search coverage lands when those
+# tools do.
+board:
+  cards: []
+steps:
+  # Every call — even list — needs explicit confirmation at the
+  # manifest layer.
+  - tool: wiki_extension
+    args: {action: list}
+    expect: {error_contains: "requires confirmation"}
+    capture: {tok: "confirm_token='(cfm-[0-9a-f]+)'"}
+
+  # Bound-token replay executes the exact proposed call.
+  - tool: wiki_extension
+    args: {action: list, confirm_token: "{tok}"}
+    expect:
+      no_error: true
+      output_contains: ['"extensions"', 'Mermaid']
+
+  # The allowlist refusal happens before the board is touched.
+  - tool: wiki_extension
+    args: {action: install, name: "https://evil.example/ext.git",
+           confirmed: true}
+    expect: {output_contains: ['name is not approved']}
+
+  # An approved name passes through to board-api.
+  - tool: wiki_extension
+    args: {action: enable, name: Mermaid, confirmed: true}
+    expect: {no_error: true, output_contains: ['"enable']}
+
+  # Board truth: the allowlisted call landed, the rejected one never
+  # left the tool.
+  - audit: board
+    expect:
+      output_contains:
+        - '"/wiki/extension"'
+        - '"name": "Mermaid"'
+      output_not_contains: ['evil.example', 'fakeboard: unhandled']

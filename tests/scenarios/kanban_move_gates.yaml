@@ -1,0 +1,144 @@
+name: kanban-move-gates
+instance: tony
+# Kanban authority matrix offline: free moves execute bare; doing-cap,
+# out-of-authority, and gated-card transitions return needs_confirm and
+# only execute after Tony's yes (bound confirm_token or confirmed=true
+# replay). Also pins the regression where confirmed/confirm_token never
+# reached tools.d run() through execute() — gated moves were permanently
+# un-confirmable before the hand-back fix.
+banks:
+  banks:
+    note:
+      title: Scratch notes
+      scope: instance
+      instances: [tony]
+      mddb_collection: ada-ha-bank-note-{instance}
+      kinds: [note]
+      writable: true
+      write_policy: direct
+      allowed_tools: [ada_remember, ada_forget, ada_outcome]
+      status: active
+  person_policies:
+    person.tony: {full: true}
+board:
+  doing_limit: 3
+  cards:
+    - id: free-move
+      title: Ordinary backlog card
+      column: backlog
+      updated: "2026-11-19 08:00"
+    - id: cap-claim
+      title: Over-cap doing claim
+      column: backlog
+      updated: "2026-11-19 08:10"
+    - id: gated-card
+      title: Production deploy card
+      column: review
+      updated: "2026-11-19 08:20"
+      priority: high
+      tags: [deploy]
+    - id: doing-a
+      title: Active work A
+      column: doing
+      updated: "2026-11-19 08:30"
+    - id: doing-b
+      title: Active work B
+      column: doing
+      updated: "2026-11-19 08:40"
+    - id: doing-c
+      title: Active work C
+      column: doing
+      updated: "2026-11-19 08:50"
+steps:
+  - set: {session_owner_identity: person.tony}
+
+  # Free release: doing->backlog executes bare — drops the lane to 2/3.
+  - tool: kanban
+    args: {action: move, id: doing-a, column: backlog}
+    expect: {no_error: true}
+
+  # Free pickup: backlog->doing under the doing cap executes bare.
+  - tool: kanban
+    args: {action: move, id: free-move, column: doing}
+    expect:
+      no_error: true
+      output_contains: ['"to": "doing"']
+
+  # Over-cap pickup is Tony's call — needs_confirm with a bound token.
+  - tool: kanban
+    args: {action: move, id: cap-claim, column: doing}
+    expect:
+      output_contains: ['"needs_confirm": true', 'doing already holds']
+    capture: {tok: "confirm_token='(cfm-[0-9a-f]+)'"}
+
+  # Tony's yes — the bound token executes the exact proposed move.
+  - tool: kanban
+    args: {action: move, id: cap-claim, column: doing,
+           confirm_token: "{tok}"}
+    expect:
+      no_error: true
+      output_contains: ['"to": "doing"']
+
+  # Closing a review card without evidence is a hard rule — not
+  # confirmable, no token minted.
+  - tool: kanban
+    args: {action: move, id: gated-card, column: done}
+    expect:
+      output_contains: ['closing a review card needs evidence']
+      output_not_contains: ['"needs_confirm": true']
+
+  # review->done WITH evidence on a gated card is still Tony's call
+  # (priority:high + deploy tag) — needs_confirm.
+  - tool: kanban
+    args: {action: move, id: gated-card, column: done,
+           evidence: "deploy-ada verified active on idc03"}
+    expect:
+      output_contains: ['"needs_confirm": true', "Tony's call"]
+
+  # The model's actual resend form — identical call + confirmed=true.
+  # Regression pin: before the hand-back fix this was refused forever.
+  - tool: kanban
+    args: {action: move, id: gated-card, column: done,
+           evidence: "deploy-ada verified active on idc03",
+           confirmed: true}
+    expect:
+      no_error: true
+      output_contains: ['"to": "done"', '"evidence"']
+
+  # Queue on an ordinary card is free.
+  - tool: kanban
+    args: {action: queue, id: doing-b}
+    expect: {no_error: true, output_contains: ['"queue']}
+
+  # Queue on a gated card needs Tony's yes — needs_confirm under the
+  # action=queue denial key.
+  - tool: kanban
+    args: {action: queue, id: gated-card}
+    expect: {output_contains: ['"needs_confirm": true', "Tony's call"]}
+
+  - tool: kanban
+    args: {action: queue, id: gated-card, confirmed: true}
+    expect: {no_error: true, output_contains: ['"queue']}
+
+  # An identified non-owner voice can read but never write the board.
+  - set: {current_speaker_ha_person: person.kk}
+  - tool: kanban
+    args: {action: comment, id: doing-b, text: "guest write"}
+    expect: {output_contains: ["session owner's"]}
+  - tool: kanban
+    args: {action: list}
+    expect: {no_error: true}
+  - set: {current_speaker_ha_person: person.tony}
+
+  # Board truth: the moves, queues, and audit comments all landed.
+  - audit: board
+    expect:
+      output_contains:
+        - '"do": "move"'
+        - '"do": "queue"'
+        - '"moved backlog -> doing"'
+        - '"moved doing -> backlog"'
+        - 'Tony confirmed'
+        - 'verified: deploy-ada verified active on idc03'
+        - '"status": "queued"'
+      output_not_contains: ['fakeboard: unhandled']

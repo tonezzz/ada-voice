@@ -1,0 +1,95 @@
+name: devin-dispatch-board
+instance: tony
+# The tuned no-playbook dispatch path: confirmed `devin` dispatch files
+# an armed kanban card through board-api instead of touching ssh —
+# kanban-dispatch claims it from there. Asserts the confirm gate, the
+# card contract (action dispatch + queued + voice-dispatch tag), the
+# in-process task dedup, and the retired devin_dispatch alias.
+banks:
+  banks:
+    note:
+      title: Scratch notes
+      scope: instance
+      instances: [tony]
+      mddb_collection: ada-ha-bank-note-{instance}
+      kinds: [note]
+      writable: true
+      write_policy: direct
+      allowed_tools: [ada_remember, ada_forget, ada_outcome]
+      status: active
+  person_policies:
+    person.tony: {full: true}
+board:
+  cards: []
+dispatch_ssh:
+  # The remote-dedup status probe sees an empty task list; followup
+  # returns the dispatcher's ack line.
+  status: ""
+  followup: "delivered to session"
+steps:
+  - set: {session_owner_identity: person.tony}
+
+  # Every devin session write is confirm-gated — bare call refused,
+  # no board write made.
+  - tool: devin
+    args: {action: dispatch, repo: ada-voice,
+           task: "Summarize the open kanban cards"}
+    expect: {error_contains: "requires confirmation"}
+    capture: {tok: "confirm_token='(cfm-[0-9a-f]+)'"}
+
+  - audit: board
+    expect: {output_not_contains: ['"POST"']}
+
+  # Tony's yes (bound token) files the armed card — sane card id back.
+  - tool: devin
+    args: {action: dispatch, repo: ada-voice,
+           task: "Summarize the open kanban cards",
+           confirm_token: "{tok}"}
+    expect:
+      no_error: true
+      output_contains: ['"card_id": "voice-dispatch-']
+
+  # The card is really armed on the board — dispatch action + queued.
+  - audit: board
+    expect:
+      output_contains:
+        - '"voice-dispatch"'
+        - '"type": "dispatch"'
+        - '"repo": "ada-voice"'
+        - '"status": "queued"'
+        - '"column": "backlog"'
+        - '"/card"'
+
+  # A near-identical rephrase inside the dedup window reuses the card
+  # instead of filing a second dispatch — via the retired alias name.
+  - tool: devin_dispatch
+    args: {repo: ada-voice,
+           task: "Summarize open kanban cards please",
+           confirmed: true}
+    expect:
+      no_error: true
+      output_contains: ['"deduplicated": true', '"card_id"']
+
+  # ssh 'followup' reaches the stubbed devin-dispatch binary.
+  - tool: devin
+    args: {action: followup,
+           task_id: "20261119-101112-existing-task",
+           message: "also check the wiki page",
+           confirmed: true}
+    expect: {output_contains: ['delivered to session']}
+
+  # 'answer' on a devin-dispatch task id delivers via followup AND
+  # lands the answer doc in the handoff ledger (FakeMddb).
+  - tool: devin
+    args: {action: answer,
+           task_id: "20261119-101112-existing-task",
+           message: "yes, use the chaba repo",
+           confirmed: true}
+    expect:
+      output_contains: ['"delivered": true', '"via": "followup"']
+
+  # The ssh stub saw followup — never 'start'.
+  - audit: dispatch
+    expect:
+      output_contains: ['"followup"']
+      output_not_contains: ['"start"']
