@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync ada-control bridge checkout to origin/main (15 min)
+
+[Timer]
+OnCalendar=*-*-* *:0/15:00
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target
