@@ -1,0 +1,104 @@
+name: devin-dispatch-playbook
+instance: tony
+# The playbook dispatch path — exercised through runner.devin_dispatch
+# (the internal surface; the model-facing `devin` tool doesn't expose
+# playbook=). Asserts the spec_status gate refuses unverified work
+# before any ssh, that a passing spec-review doc dispatches through the
+# stubbed devin-dispatch binary returning a sane task_id, and that the
+# job contract lands in the handoff ledger.
+banks:
+  banks:
+    note:
+      title: Scratch notes
+      scope: instance
+      instances: [tony]
+      mddb_collection: ada-ha-bank-note-{instance}
+      kinds: [note]
+      writable: true
+      write_policy: direct
+      allowed_tools: [ada_remember, ada_forget, ada_outcome]
+      status: active
+  person_policies:
+    person.tony: {full: true}
+dispatch_ssh:
+  # A live unrelated chaba task — close enough to check the remote-dedup
+  # scan skips it cleanly (different repo + dissimilar slug).
+  status: >-
+    20261119-110000-other-task running - repo=chaba
+    transcript=2026-11-19 11:05:00
+  start: "20261119-120000-bench-playbook"
+seed:
+  # The devin-handoff spec doc the build-tool gate verifies.
+  - collection: ada-ha-bank-devin-handoff
+    key: spec/20261119-120000-bench-tool
+    text: "# Dev-team review\n\nverdict: pass — build the bench tool"
+    meta: {kind: [spec-review], status: [pass]}
+steps:
+  - set: {session_owner_identity: person.tony}
+
+  # build-tool refuses unverified work: the named spec doc doesn't
+  # exist — the refusal steers to ada_devteam_review, no ssh runs.
+  - call: devin_dispatch
+    args:
+      repo: ada-voice
+      task: "build the bench tool"
+      playbook: build-tool
+      params: {spec_key: "spec/no-such-spec"}
+    expect:
+      output_contains:
+        - '"gate": "spec_status"'
+        - 'no spec-review doc'
+        - 'ada_devteam_review'
+
+  - audit: dispatch
+    expect: {output_not_contains: ['"start"']}
+
+  # The passing spec doc gates through; the stubbed dispatcher returns
+  # a sane task id and the contract stamp lands in the handoff bank.
+  - call: devin_dispatch
+    args:
+      repo: ada-voice
+      task: "build the bench tool"
+      playbook: build-tool
+      params: {spec_key: "spec/20261119-120000-bench-tool"}
+    expect:
+      output_contains:
+        - '"task_id": "20261119-120000-bench-playbook"'
+        - '"job_contract": "job/20261119-120000-bench-playbook/contract"'
+        - '"playbook": "build-tool"'
+
+  # ssh saw the start command for the right repo — and the rendered
+  # task carries the playbook trailer.
+  - audit: dispatch
+    expect:
+      output_contains:
+        - '"start"'
+        - 'ada-voice'
+        - 'Playbook: build-tool'
+
+  # investigate is report-only: the identified-caller gate passes and
+  # the stub returns a task id without needing a spec.
+  - call: devin_dispatch
+    args:
+      repo: chaba
+      playbook: investigate
+      params: {subject: "why the lab sensor flaps at night"}
+    expect:
+      output_contains: ['"task_id": "20261119-120000-bench-playbook"']
+
+  # A guest identity hits the owner gate before anything dispatches.
+  - set: {session_owner_identity: person.kk}
+  - call: devin_dispatch
+    args:
+      repo: ada-voice
+      task: "build the bench tool"
+      playbook: build-tool
+      params: {spec_key: "spec/20261119-120000-bench-tool"}
+    expect:
+      output_contains: ['"gate": "identity"', 'owner-gated']
+  - set: {session_owner_identity: person.tony}
+
+  # devin_read status reads back through the stub.
+  - tool: devin_read
+    args: {action: status, task_id: "20261119-120000-bench-playbook"}
+    expect: {output_contains: ['repo=chaba']}

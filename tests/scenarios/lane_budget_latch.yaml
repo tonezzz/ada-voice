@@ -1,0 +1,31 @@
+name: lane-budget-latch
+instance: tony
+# Provider-cap latch: a billing-class provider error already seen for
+# this key this billing month holds voice connects locally — no paid
+# retry storm. budget_state seeds the latch file; the refusal carries
+# the rollover date and the hold semantics.
+env:
+  GEMINI_API_KEY: scenario-key
+budget_state:
+  caps:
+    __KEYFP__:
+      lane: tony
+      period: "__PERIOD__"
+      at: "2026-11-19T09:00:00+07:00"
+      reason: "1011 None. Your project has exceeded its monthly spending cap"
+steps:
+  - call: backend.lane_budget.check
+    args: {}
+    expect:
+      output_contains:
+        - 'ProviderCapLatched'
+        - 'monthly billing cap'
+        - 'Voice sessions held'
+
+  # The status snapshot exposes the latched fingerprint — never the
+  # key material.
+  - call: backend.lane_budget.status
+    args: {}
+    expect:
+      output_contains: ['"latched_caps"']
+      output_not_contains: ['scenario-key']

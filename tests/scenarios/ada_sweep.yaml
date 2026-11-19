@@ -1,0 +1,86 @@
+name: ada-sweep
+instance: tony
+# ada_sweep batch-preflights executor-tagged backlog cards under one
+# confirmation: dry_run reports without queueing, the confirmed sweep
+# posts /action do=queue for each ready card, and skipped/blocked
+# buckets explain every card it left alone.
+board:
+  cards:
+    - id: oc-ready
+      title: Ready opencode card
+      column: backlog
+      action:
+        type: dispatch
+        executor: opencode
+        repo: ada-voice
+        model: litellm/gemini-2.5-flash
+        llm_key_alias: gemini
+        profile: ops-readonly
+        target_host: idc02
+        artifact: reports/oc-bench.md
+        max_usd: 0.5
+        max_turns: 20
+        max_tokens: 200000
+        max_wall_time_s: 1800
+        max_retries: 1
+    - id: oc-blocked
+      title: Partial envelope card
+      column: backlog
+      action:
+        type: dispatch
+        executor: opencode
+        repo: ada-voice
+    - id: oc-live
+      title: Already running card
+      column: backlog
+      action:
+        type: dispatch
+        executor: opencode
+        status: running
+        repo: ada-voice
+    - id: oc-misc
+      title: Executor tag without dispatch type
+      column: backlog
+      action: {executor: opencode}
+    - id: other
+      title: Unrelated backlog card
+      column: backlog
+      action: {type: dispatch}
+steps:
+  # Batch writes are confirm-gated — bare call refused.
+  - tool: ada_sweep
+    args: {dry_run: true}
+    expect: {error_contains: "requires confirmation"}
+
+  # Dry run: preflights every executor card, reports buckets, queues
+  # nothing.
+  - tool: ada_sweep
+    args: {dry_run: true, confirmed: true}
+    expect:
+      output_contains:
+        - '"ready"'
+        - '"blocked"'
+        - '"skipped"'
+        - '"oc-ready"'
+        - '"oc-blocked"'
+        - 'dry run'
+        - '"dry_run": true'
+
+  - audit: board
+    expect:
+      output_not_contains: ['"do": "queue"']
+
+  # The real sweep queues each ready card — and only those.
+  - tool: ada_sweep
+    args: {confirmed: true}
+    expect:
+      output_contains:
+        - '"queued": ["oc-ready"]'
+        - '"candidates": 2'
+        - '"skipped": ['
+
+  - audit: board
+    expect:
+      output_contains:
+        - '"do": "queue"'
+        - '"status": "queued"'
