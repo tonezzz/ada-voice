@@ -1,0 +1,114 @@
+# SSOT Job: stable distribution path for the ada-control MCP bridge.
+# Card: ada-ocb-bridge-stable-path (chaba kanban). Dispatch
+# 20261119-084016-deliver-a-stable-bridge-distri, runner idc02.
+
+title: >-
+  Dedicated ff-only worktree ~/CascadeProjects/ada-bridge serves
+  opencode/ada_mcp.py to OpenCode/OpenChamber clients, auto-synced to
+  origin/main
+subtitle: >-
+  MCP clients no longer run the bridge out of the edit/staging checkout:
+  a managed worktree tracks origin/main, refuses dirt, and reports the
+  serving commit via the existing bridge-version envelope.
+
+planning:
+  goal: |
+    mcp.ada-control.command previously resolved ada_mcp.py in
+    ~/CascadeProjects/ada-voice — the checkout agents edit and rebase.
+    A dirty or stale checkout meant MCP children served an arbitrary
+    revision. The card asks for a dedicated checkout that only ever
+    tracks origin/main, a sync script that refuses a dirty tree, a
+    systemd user timer so the bridge never lags main, and docs for the
+    client cutover.
+  scope: |
+    Delivered (repo-side only):
+      - scripts/sync-ocb-bridge.sh — manages the bridge checkout.
+        Creates `git worktree add --detach` at origin/main when absent;
+        fetches origin via the owning repo; REFUSES (exit 2, touches
+        nothing) a dirty tree, local commits, a non-git occupier at the
+        path, or a missing/untracked opencode/ada_mcp.py; ff-only
+        merges a stale checkout; --dry-run reports without touching.
+        Env overrides ADA_BRIDGE_CHECKOUT / ADA_VOICE_REPO /
+        ADA_REMOTE / ADA_BRANCH.
+      - scripts/ada-ocb-bridge-sync.service + .timer — systemd USER
+        units (15-min OnCalendar, Persistent); refused syncs fail the
+        unit so drift is visible in journalctl.
+      - tests/test_sync_ocb_bridge.py — 9 tests on a tmp fixture repo:
+        create, fast-forward, no-op, dry-run (report-only + dirty still
+        refused), refuse dirty ada_mcp.py, refuse dirty unrelated file,
+        refuse local commits, refuse non-git occupier.
+      - docs/kb/ada-ocb-bridge.md — canonical path, mechanics, timer
+        install, refusal repair, per-client cutover JSON snippet.
+      - AGENTS.md — "ada-control bridge stable path (ocb)" section.
+    Explicitly NOT done (manual follow-ups after merge):
+      - git worktree creation on a live host (first script/timer run
+        does it)
+      - editing ~/.config/opencode/opencode.json or DevNest
+        .opencode/opencode.json — the repoint is operator-chosen
+      - installing the timer units on a host / pushing this branch
+  success_criteria:
+    - 'dry-run on a stale checkout reports "would fast-forward N
+      commit(s)" and moves nothing'
+    - 'dirty bridge checkout exits 2 with REFUSE, HEAD and edits
+      untouched (covered by pytest)'
+    - 'timer units + docs committed on the dispatch branch'
+  risks:
+    - 'low: script only ever fetches + ff-merges inside a dedicated
+      worktree; all refusal paths exit before mutating'
+  resources:
+    - 'bridge version envelope: opencode/ada_mcp.py
+      _resolve_bridge_version() (git describe works inside a worktree,
+      so no VERSION stamping needed)'
+    - 'unit pattern: scripts/ada-ocb-eval.{service,timer}'
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-19"
+  steps:
+    - id: 1
+      label: "sync script"
+      status: done
+      notes: "detached worktree at origin/main; refuse dirty/diverged/
+        non-git-occupier/missing bridge file; --dry-run still fetches
+        but never mutates; post-sync report prints the git describe the
+        bridge will announce"
+    - id: 2
+      label: "timer units"
+      status: done
+      notes: "ada-ocb-bridge-sync.{service,timer} — 15-min cadence,
+        RandomizedDelaySec 120, Persistent; install documented in unit
+        header + kb"
+    - id: 3
+      label: "tests"
+      status: done
+      notes: "9 tests green via python3 -m pytest
+        tests/test_sync_ocb_bridge.py -q (2.45s); refuse-dirty covered
+        for the bridge file AND an unrelated path, incl. under --dry-run"
+    - id: 4
+      label: "docs"
+      status: done
+      notes: "docs/kb/ada-ocb-bridge.md + AGENTS.md section; cutover
+        JSON snippet kept repo-side only"
+
+invoke:
+  tool:
+    - "scripts/sync-ocb-bridge.sh            # sync/create the bridge checkout"
+    - "scripts/sync-ocb-bridge.sh --dry-run  # report without touching"
+    - "systemctl --user enable --now ada-ocb-bridge-sync.timer  # after install"
+
+env:
+  ADA_BRIDGE_CHECKOUT: "bridge worktree path (default ~/CascadeProjects/ada-bridge)"
+  ADA_VOICE_REPO: "owning ada-voice checkout (default ~/CascadeProjects/ada-voice)"
+  ADA_REMOTE: "remote name (default origin)"
+  ADA_BRANCH: "tracked branch (default main)"
+
+verification:
+  - "python3 -m pytest tests/test_sync_ocb_bridge.py -q  # 9 passed"
+  - "manual demo on tmp repo: stale checkout --dry-run prints
+    'dry-run: would fast-forward … a -> b' and HEAD stays put; dirty
+    checkout exits 2 '[ocb-bridge] REFUSE: bridge checkout is dirty'"
+  - "post-merge on host: run the script once (creates ~/CascadeProjects/
+    ada-bridge), install timer units, repoint mcp.ada-control.command,
+    verify ada_bridge_info reports git-<sha> == origin/main"

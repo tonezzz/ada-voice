@@ -1,0 +1,19 @@
+# systemd USER unit — host serving OpenCode/OpenChamber clients
+# (~/.config/systemd/user/).
+# Keeps the stable ada-control bridge checkout (~/CascadeProjects/ada-bridge)
+# fast-forwarded to origin/main so MCP clients never serve a stale
+# ada_mcp.py. The script REFUSES a dirty or diverged bridge checkout — that
+# fails this unit on purpose; inspect
+#   journalctl --user -u ada-ocb-bridge-sync
+# and repair the checkout by hand (it must only ever track origin/main).
+# Install: cp to ~/.config/systemd/user/, systemctl --user daemon-reload,
+#          systemctl --user enable --now ada-ocb-bridge-sync.timer
+[Unit]
+Description=Fast-forward the stable ada-control bridge checkout to origin/main
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/test -f %h/CascadeProjects/ada-voice/scripts/sync-ocb-bridge.sh
+WorkingDirectory=%h/CascadeProjects/ada-voice
+ExecStart=/usr/bin/env bash %h/CascadeProjects/ada-voice/scripts/sync-ocb-bridge.sh
+TimeoutStartSec=120
