@@ -2421,6 +2421,148 @@ def ada_ssot_get(collection: str, key: str, selector: str = "", max_chars: int =
         }, ensure_ascii=False, indent=2)
 
 
+SSOT_SEARCH_MAX_LIMIT = 20
+
+
+def _ssot_hit_path(doc: dict[str, Any]) -> str:
+    meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}
+    path = str(_ssot_meta_first(meta, "original_path") or "").strip()
+    if path and not path.startswith("docs/"):
+        path = f"docs/ssot/{path}"
+    return path
+
+
+@mcp.tool()
+def ada_ssot_search(query: str, collection: str = "", limit: int = 10) -> str:
+    """Bounded lexical search over allowlisted SSOT documents (read-only).
+
+    Comparable to the ssot-search skill / mcp_search_ssot: exact term and
+    path matching over SSOT YAML mirrored in MDDB, via the lexical /v1/fts
+    endpoint — no embedding or provider calls, so it costs nothing. Use it
+    for precise lookups; ada_context_pack remains the semantic-discovery
+    surface and ada_ssot_get hydrates one hit by key. Returns matched SSOT
+    paths, excerpts, matched terms, provenance/freshness, and
+    cross-reference pointers with mutations_performed=[].
+    """
+    operation = "ssot-search"
+    try:
+        q = (query or "").strip()
+        if not q:
+            return json.dumps({
+                "ok": False,
+                "operation": operation,
+                "error": "query is required",
+                "mutations_performed": [],
+            }, ensure_ascii=False, indent=2)
+        try:
+            cap = int(limit)
+        except (TypeError, ValueError):
+            cap = 10
+        cap = max(1, min(cap, SSOT_SEARCH_MAX_LIMIT))
+        requested = (collection or "").strip()
+        if requested:
+            if requested not in SSOT_GET_COLLECTIONS:
+                return json.dumps({
+                    "ok": False,
+                    "operation": operation,
+                    "error": f"collection not allowlisted: {requested}",
+                    "allowed_collections": list(SSOT_GET_COLLECTIONS),
+                    "mutations_performed": [],
+                }, ensure_ascii=False, indent=2)
+            collections = (requested,)
+        else:
+            collections = SSOT_GET_COLLECTIONS
+
+        hits: list[dict[str, Any]] = []
+        errors: list[str] = []
+        totals: dict[str, int] = {}
+        deadline = time.monotonic() + 8.0
+        for coll in collections:
+            remaining = max(0.5, min(4.0, deadline - time.monotonic()))
+            if remaining <= 0.5:
+                errors.append(f"{coll}:deadline")
+                continue
+            try:
+                payload = _mddb_post(
+                    "fts",
+                    {"collection": coll, "query": q, "limit": cap},
+                    timeout=remaining,
+                )
+            except Exception as exc:
+                errors.append(f"{coll}-fts:{exc}")
+                continue
+            if not isinstance(payload, dict):
+                errors.append(f"{coll}-fts:invalid response")
+                continue
+            if isinstance(payload.get("total"), int):
+                totals[coll] = payload["total"]
+            for row in payload.get("results") or []:
+                if not isinstance(row, dict):
+                    continue
+                doc = row.get("document")
+                if not isinstance(doc, dict):
+                    continue
+                content = str(doc.get("contentMd") or doc.get("content") or "")
+                provenance = _ssot_doc_provenance(doc)
+                path = _ssot_hit_path(doc)
+                hits.append({
+                    "collection": coll,
+                    "key": doc.get("key"),
+                    "path": path,
+                    "title": provenance.get("title"),
+                    "score": row.get("score"),
+                    "matched_terms": [
+                        str(t)[:40] for t in (row.get("matchedTerms") or [])[:12]
+                    ],
+                    "excerpt": _excerpt_window(content, q, 1200),
+                    "excerpt_chars": min(len(content), 1200),
+                    "doc": provenance,
+                    "related": _related_pointers(
+                        content,
+                        exclude=(path, doc.get("key") or ""),
+                        limit=5,
+                    ),
+                })
+        hits.sort(key=lambda h: -(h.get("score") or 0))
+        return json.dumps({
+            "ok": True,
+            "operation": operation,
+            "query": q,
+            "collections": list(collections),
+            "source": "mddb-fts",
+            "match_mode": "lexical",
+            "counts": {
+                "returned": min(len(hits), cap),
+                "total_hits": len(hits),
+                "per_collection_total": totals,
+                "truncated": len(hits) > cap,
+            },
+            "results": hits[:cap],
+            "errors": errors,
+            "allowed_sources": [f"mddb:{c}" for c in collections],
+            "write_policy": "read-only; mutations require board-api approval flow",
+            "budgets": {"max_results": cap, "excerpt_chars": 1200, "deadline_s": 8.0},
+            "provenance": {
+                "board_api": BOARD_API,
+                "mddb_cms": MDDB_CMS,
+                "mddb_memory": MDDB_MEMORY,
+            },
+            "secrets_read": False,
+            "mutations_performed": [],
+            "next_safe_action": (
+                "hydrate a hit with ada_ssot_get(collection, key); "
+                "use ada_context_pack for semantic discovery"
+            ),
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "operation": operation,
+            "error": str(exc)[:300],
+            "mutations_performed": [],
+        }, ensure_ascii=False, indent=2)
+
+
 READ_ONLY_PROFILES = {"ops-readonly", "ssot-research", "mddb-sequence", "storage-dryrun"}
 
 
