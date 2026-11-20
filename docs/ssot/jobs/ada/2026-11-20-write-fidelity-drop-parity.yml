@@ -66,10 +66,12 @@ findings:
       write-fidelity: post-write read-back + ops event on
       narration/stored contradiction (ADA-0732)
     files:
-      - backend/realtime_provider.py (+147: _FIDELITY_*_RE regexes,
+      - >-
+        backend/realtime_provider.py (+147: _FIDELITY_*_RE regexes,
         _fidelity_tokens, _write_fidelity_problems, call site +
         "write_fidelity" ops event in GeminiLiveProvider)
-      - backend/tool_runner/cms.py (+32: cms_publish_page post-write
+      - >-
+        backend/tool_runner/cms.py (+32: cms_publish_page post-write
         read-back → stored_verified/stored_excerpt/stored_sha256)
       - tests/test_write_fidelity.py (+170, new file, 17 tests)
       - tests/scenarios-live/kk_cms_only_seeded_recall.yaml (+18/-3)
@@ -166,3 +168,33 @@ constraints_respected:
   - no runtime guard code changed (guard left exactly as upstream
     04154f6)
   - no push, no commit to main, no deploy
+
+reverified_20261120_172730:
+  dispatch: 20261120-172730-observed-on-tony-dell-chaba-te (attempt 2)
+  head: 7048cba
+  note: >-
+    Card re-queued after attempt-1 merge; ada-side re-verified, no new
+    work needed on this repo. Artifact and record already on main via
+    0d31fe2.
+  checks:
+    - cmd: git apply -R --check reports/2026-11-20-write-fidelity-canonical-edb7c83.patch
+      result: PASS vs extracted canonical edb7c83 files AND vs worktree HEAD
+    - cmd: reverse-apply then forward-apply on scratch canonical tree
+      result: all 4 files byte-identical to git show edb7c83:<file>
+    - cmd: python3 -m pytest tests/test_write_fidelity.py -v
+      result: 17 passed in 0.85s (system python3 3.14.4, pytest 9.0.2)
+    - post-edb7c83 drift (80777c4, f38ea04; 13 lines in realtime_provider.py)
+      sits outside the patch hunk context — artifact remains applicable
+  guard_markers_at_head:
+    - >-
+      backend/realtime_provider.py: _fidelity_tokens,
+      _write_fidelity_problems, _fidelity_flags call site, ops event
+      "write_fidelity"
+    - >-
+      backend/tool_runner/cms.py: stored_verified / stored_excerpt /
+      stored_sha256
+  still_blocked_on: >-
+    Board request refreshed-context-only-artifact-is-ready-ae54ec —
+    owner must pick proceed (chaba-side dispatch performs the
+    chaba-knb1257 artifact swap) or hold (Tony swaps by hand). Until
+    then the seven SSOT fixes for PR #138 stay blocked.
