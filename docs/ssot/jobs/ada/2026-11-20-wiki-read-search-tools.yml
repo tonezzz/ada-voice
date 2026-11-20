@@ -1,0 +1,119 @@
+# SSOT Job: wiki_read + wiki_search tools.d modules.
+# Card: ada-tools-wiki-read-wiki-search-recall-t-8f32dd (chaba kanban,
+# ref ADA-1199). Dispatch 20261120-133005-ada-tools-wiki-read-wiki-searc,
+# runner tony-omen. Follow-up card: board-api-wiki-read-search-doors
+# (KNB-0017) — the generic doors this job's tools already call first.
+
+title: >-
+  Ada recalls the member wiki — wiki_read/wiki_search tools via board-api
+subtitle: >-
+  Education:/Reports: are Lockdown-protected (anon api.php gets
+  accessdenied) so recall rides board-api doors + the chaba-lessons
+  MDDB mirror. The spec'd /wiki/page mode=read and /wiki/search doors do
+  NOT exist yet — tools try them first (win automatically when chaba
+  lands them) and fall back to what is live today.
+
+planning:
+  goal: |
+    Ada could not read the wiki she co-owns post-2026-11-08 migration
+    (lessons+reports live only there). Card spec assumed a /wiki/page
+    mode=read door; live probe showed the endpoint is write-only and
+    there is no /wiki/search. Tools implement the spec'd contract as
+    the primary path AND compose the read doors that exist:
+      read  — /wiki/page mode=read -> /lesson op=get source=wiki
+              (Education:) or /wiki/news-review (PrivateNews:)
+      search— /wiki/search -> chaba-lessons vector_search +
+              /lesson op=list title match + /report mode=search
+  scope: |
+    Delivered:
+      - backend/tools.d/wiki_read.py — title -> wikitext (+meta/url/
+        modified); parse mode passes through to the door; uncovered
+        namespaces (Reports:, News/, main space) fail honestly naming
+        the board-api gap
+      - backend/tools.d/wiki_search.py — query -> deduped hits
+        {title,url,source,score,snippet}; exact title-token matches
+        outrank vector scores; snippets survive dedupe
+      - manifest entries (policy read, secondary_allowed false — member
+        knowledge), count_cap 112->114, tool_guide entries, two
+        scenarios-live yamls, 13 unit tests
+    Explicitly NOT done:
+      - chaba board-api mode=read / /wiki/search implementation —
+        different repo; filed as card board-api-wiki-read-search-doors
+      - deploy/restart (deploy-ada.sh on idc03 is the only path)
+  success_criteria:
+    - 'Education:<title> reads return real wikitext via /lesson (live:
+      Education:Ada-Deploy-Flow verified end-to-end)'
+    - 'search returns deduped education+report hits (live: "deploy flow"
+      returned real Education: titles)'
+    - 'board unreachable -> ok:false on the FIRST call, never silently
+      widened to other doors'
+    - 'tool-lint clean, full pytest suite green'
+  risks:
+    - 'When chaba lands the generic doors, response-shape drift could
+      silently no-op back to fallbacks — tools check for a results/
+      content field, so a shape miss degrades rather than breaks'
+    - 'News:/PrivateNews: coverage is asymmetric (drafts readable,
+      published News/ not) until the generic door lands'
+  resources:
+    - board reach: backend/board_client.py (single path, no Ada key)
+    - Education read: board-api /lesson op=get source=wiki (bot login)
+    - PrivateNews read: board-api /wiki/news-review
+    - search mirror: MDDB chaba-lessons (meta.wiki_title + url per doc)
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-20"
+  steps:
+    - id: 1
+      label: "door census"
+      status: done
+      notes: "probed live board-api: /wiki/page write-only (every mode
+        variant -> 'wikitext required'), /wiki/search + /wiki/read +
+        /wiki/get 404; read doors = /lesson source=wiki, /wiki/
+        news-review, /report search, chaba-lessons vector"
+    - id: 2
+      label: "tools + registration"
+      status: done
+      notes: "wiki_read.py, wiki_search.py, manifest x2, count_cap 114,
+        tool_guide x2"
+    - id: 3
+      label: "tests + lint"
+      status: done
+      notes: "13 unit tests green; tool-lint clean (only stale-debt
+        warnings); full suite 1854 passed / 7 skipped"
+    - id: 4
+      label: "live smoke"
+      status: done
+      notes: "wiki_read Education:Ada-Deploy-Flow -> real wikitext+meta
+        via lesson door; wiki_search 'deploy flow' -> real Education
+        hits via fallback (mddb=None in ad-hoc runner — production gets
+        vector hits too)"
+
+invoke:
+  tool:
+    - "wiki_read title='Education:<page>' [mode=read|parse]"
+    - "wiki_search query='<text>' [limit=N]"
+
+env:
+  ADA_BOARD_API_URL: >-
+    board-api base — backend/board_client.py default
+    https://tony-dell.taila0626a.ts.net/apps/board-api
+  MDDB_CMS_URL: >-
+    routed content-plane endpoint for chaba-lessons (unset -> leader)
+
+verification:
+  unit: "pytest tests/test_wiki_read.py tests/test_wiki_search.py -x -q"
+  lint: "python3 scripts/tool-lint.py"
+  live_read: >-
+    wiki_read title='Education:Ada-Deploy-Flow' -> ok, wikitext starts
+    '== How the ada deploy flow works', via=lesson
+  live_search: >-
+    wiki_search query='deploy flow' -> ok, hits include
+    Education:Ada-Deploy-Flow (score 1.0), via=fallback
+
+followups:
+  - card board-api-wiki-read-search-doors (KNB-0017): implement the
+    mode=read|parse + /wiki/search doors the tools already call first;
+    decide the read allowlist deliberately (spec named News: too)

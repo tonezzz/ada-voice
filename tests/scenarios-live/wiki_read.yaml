@@ -1,0 +1,9 @@
+# wiki_read — recall an Education: page through the board-api read doors.
+name: wiki_read
+tier: full
+turns:
+  - user: Read the wiki page Education:Ada-Deploy-Flow for me.
+    expect:
+      calls_any: [wiki_read]
+      timeout_s: 90
+      settle_s: 10
