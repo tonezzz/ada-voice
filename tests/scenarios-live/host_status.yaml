@@ -1,0 +1,24 @@
+# host_status — live acceptance (card ada-status-live-state-preference,
+# OPS-1045): a "is <host> up / how much disk" question must route to
+# host_status (live telemetry first, board records age-tagged) — never be
+# answered from card comms or memory as if current.
+name: host-status-kk-mac
+tier: smoke
+transport: text
+turns:
+  - user: "Ada, is kk-mac online right now and how much disk does it have free?"
+    expect:
+      calls_any: ["host_status"]
+      response_nonempty: true
+      response_contains_any:
+        - "kk-mac"
+        - "kk mac"
+        - "online"
+        - "offline"
+        - "GiB"
+        - "GB"
+        - "heartbeat"
+        - "ออนไลน์"
+        - "ดิสก์"
+      timeout_s: 60
+      settle_s: 8

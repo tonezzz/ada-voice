@@ -32,8 +32,10 @@ SNAP_STALE_S = 15 * 60
 DECLARATION = {
     "name": "nest_status",
     "description": (
-        "Live DevNest queue + KK-Mac worker status: per-lane verdicts, "
-        "heartbeat, pack counts. Read-only; ~2 min old."
+        "DevNest queue overview (~2 min old snapshot): per-lane "
+        "verdicts, KK-Mac worker heartbeat, pack counts. For ONE named "
+        "host's live health/disk/workload use host_status instead. "
+        "Read-only."
     ),
     "parameters": {"type": "object", "properties": {}},
 }
