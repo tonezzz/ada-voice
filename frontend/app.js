@@ -75,6 +75,8 @@ const homeToggle = document.querySelector("#home-toggle");
 const homeDevices = document.querySelector("#home-devices");
 const homeStatus = document.querySelector("#home-status");
 const habitSignal = document.querySelector("#habit-signal");
+const gestureStatus = document.querySelector("#gesture-status");
+const gestureToggle = document.querySelector("#gesture-toggle");
 const adaSystemPrompt = document.querySelector("#ada-system-prompt");
 const adaLiveStatus = document.querySelector("#ada-live-status");
 let hardwareTimer = null;
@@ -88,6 +90,9 @@ let detectionResult = null;
 let detectionFrameCount = 0;
 let detectionFpsStarted = 0;
 let habitSocket = null;
+let gestureSocket = null;
+let gestureEnabled = false;
+let gestureFeedbackTimer = null;
 let lastPostureEventId = null;
 let reminderTimer = null;
 let habitSignalTimer = null;
@@ -1257,9 +1262,110 @@ faceStage.addEventListener("pointerdown", (event) => {
   }
 });
 
+const GESTURE_PANELS = [
+  ["Habit tracker", openHabits, () => habitsPanel.classList.contains("open")],
+  ["Home Assistant", openHome, () => homePanel.classList.contains("open")],
+  ["Pose", openPose, () => posePanel.classList.contains("open")],
+  ["Detect", openDetect, () => detectPanel.classList.contains("open")],
+  ["Hardware", () => setHardwareOpen(true), () => hardwarePanel.classList.contains("open")],
+];
+
+function gestureFeedback(text, hold = false) {
+  gestureStatus.textContent = text;
+  gestureStatus.classList.add("show");
+  gestureStatus.setAttribute("aria-hidden", "false");
+  clearTimeout(gestureFeedbackTimer);
+  if (!hold) {
+    gestureFeedbackTimer = setTimeout(() => {
+      gestureStatus.classList.remove("show");
+      gestureStatus.setAttribute("aria-hidden", "true");
+    }, 4000);
+  }
+}
+
+function gestureNavigate(direction) {
+  const current = GESTURE_PANELS.findIndex(([, , isOpen]) => isOpen());
+  const next = current === -1
+    ? (direction > 0 ? 0 : GESTURE_PANELS.length - 1)
+    : (current + direction + GESTURE_PANELS.length) % GESTURE_PANELS.length;
+  const [name, open] = GESTURE_PANELS[next];
+  open();
+  gestureFeedback(`Gesture · ${name}`);
+}
+
+function gestureToggleSettings() {
+  const opening = !settingsPanel.classList.contains("open");
+  if (opening) {
+    closePose();
+    closeDetect();
+    setHardwareOpen(false);
+    closeHome();
+  }
+  setSettingsOpen(opening);
+  if (opening) { refreshPosture(); refreshAdaSettings(); }
+  gestureFeedback(opening ? "Gesture · settings" : "Gesture · settings closed");
+}
+
+function gestureDismiss() {
+  hideHabitSignal();
+  closePose();
+  closeDetect();
+  closeHabits();
+  closeHabitSettings();
+  closeHome();
+  setHardwareOpen(false);
+  setSettingsOpen(false);
+  gestureFeedback("Gesture · dismissed");
+}
+
+function handleGestureEvent(event) {
+  switch (event.name) {
+    case "wave":
+      gestureFeedback("Gestures armed — swipe to navigate · hold palm for settings · drop to dismiss", true);
+      break;
+    case "swipe_left": gestureNavigate(-1); break;
+    case "swipe_right": gestureNavigate(1); break;
+    case "palm_hold": gestureToggleSettings(); break;
+    case "drop": gestureDismiss(); break;
+    case "disarm": gestureFeedback("Gestures idle"); break;
+  }
+}
+
+function renderGestureStatus(status) {
+  gestureEnabled = Boolean(status.enabled);
+  gestureToggle.setAttribute("aria-pressed", String(gestureEnabled));
+  gestureToggle.textContent = gestureEnabled ? "Gesture controls · on" : "Gesture controls · off";
+  if (!gestureEnabled) {
+    gestureFeedback("Gesture controls off");
+  } else if (status.state === "armed") {
+    gestureFeedback("Gestures armed — swipe to navigate · hold palm for settings", true);
+  }
+}
+
+function connectGestureSocket() {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  gestureSocket = new WebSocket(`${scheme}://${location.host}/ws/gesture`);
+  gestureSocket.onmessage = event => {
+    const message = JSON.parse(event.data);
+    if (message.type === "gesture_status") renderGestureStatus(message);
+    else if (message.type === "gesture_event") handleGestureEvent(message);
+  };
+  gestureSocket.onclose = () => { gestureSocket = null; setTimeout(connectGestureSocket, 2000); };
+}
+
+gestureToggle.addEventListener("click", async () => {
+  const response = await fetch("/api/gestures", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: !gestureEnabled }),
+  });
+  if (response.ok) renderGestureStatus(await response.json());
+});
+
 refreshPosture();
 refreshAdaSettings();
 connectHabitSocket();
+connectGestureSocket();
 // Chromium kiosk is launched with autoplay and microphone permission enabled,
 // so Ada can animate, connect, and greet without requiring a screen tap.
 window.idleFace?.setConnecting(true);

@@ -25,6 +25,7 @@ from .pironman import EXPRESSION_COLORS, PironmanClient, PironmanError
 from .camera import CameraHub
 from .hailo_vision import HAILO_ROTATE_180, VisionBackendManager, letterbox
 from .posture import PoseService, PostureMonitor, PostureStore
+from .gesture_controls import GestureService
 from .posture_verifier import GeminiClutterVerifier, GeminiPostureVerifier
 from .visual_habits import VisualHabitService
 from .live_manager import LiveSessionManager
@@ -114,6 +115,7 @@ live_manager = LiveSessionManager(
     habit_state_getter=habit_tool_snapshot,
 )
 pose_service = PoseService(camera, pose_estimator, posture_monitor, posture_verifier, live_manager)
+gesture_service = GestureService(pose_service, posture_store)
 home_assistant = HomeAssistantClient()
 office_light_monitor = OfficeLightMonitor(
     home_assistant, posture_store, pose_service.office_occupied,
@@ -155,6 +157,7 @@ async def start_oled_guard() -> None:
     oled_guard_task = asyncio.create_task(keep_oled_awake())
     await live_manager.start()
     await pose_service.start()
+    await gesture_service.start()
     await visual_habits.start()
     await office_light_monitor.start()
 
@@ -169,6 +172,7 @@ async def stop_oled_guard() -> None:
         oled_guard_task = None
     await office_light_monitor.stop()
     await visual_habits.stop()
+    await gesture_service.stop()
     await pose_service.stop()
     vision_backend.close()
     await live_manager.stop()
@@ -217,6 +221,26 @@ async def vision_input() -> Response:
     with io.BytesIO() as encoded:
         Image.fromarray(rgb).save(encoded, format="JPEG", quality=90)
         return Response(encoded.getvalue(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/gestures")
+async def gesture_status() -> dict[str, object]:
+    """Report gesture-control state for the kiosk UI and the ada-ha tool."""
+    return gesture_service.status()
+
+
+@app.patch("/api/gestures")
+async def update_gesture_settings(request: Request) -> dict[str, object]:
+    """Toggle gesture controls; persists across restarts via monitor_state."""
+    try:
+        payload = await request.json()
+        enabled = payload.get("enabled") if isinstance(payload, dict) else None
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        gesture_service.set_enabled(enabled)
+        return gesture_service.status()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/pironman")
@@ -538,6 +562,26 @@ async def detection_socket(browser: WebSocket) -> None:
         with suppress(Exception):
             await send_json(browser, "detection_error", message=str(exc))
             await browser.close(code=1011)
+
+
+@app.websocket("/ws/gesture")
+async def gesture_socket(browser: WebSocket) -> None:
+    """Stream gesture-control state changes and recognized gesture events."""
+    await browser.accept()
+    queue = gesture_service.subscribe()
+    try:
+        await browser.send_text(json.dumps(gesture_service.status()))
+        while True:
+            await browser.send_text(json.dumps(await queue.get()))
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.exception("gesture stream failed")
+        with suppress(Exception):
+            await send_json(browser, "gesture_error", message=str(exc))
+            await browser.close(code=1011)
+    finally:
+        gesture_service.unsubscribe(queue)
 
 
 @app.websocket("/ws")

@@ -261,6 +261,24 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('@app.post("/api/pironman/expression")', backend)
         self.assertNotIn('updateHardware("shutdown"', app)
 
+    def test_gesture_controls_stream_and_ui_contract(self) -> None:
+        html = (ROOT / "frontend/index.html").read_text()
+        app = (ROOT / "frontend/app.js").read_text()
+        backend = (ROOT / "backend/main.py").read_text()
+        gestures = (ROOT / "backend/gesture_controls.py").read_text()
+        self.assertIn('id="gesture-status"', html)
+        self.assertIn('id="gesture-toggle"', html)
+        self.assertIn('@app.websocket("/ws/gesture")', backend)
+        self.assertIn('@app.get("/api/gestures")', backend)
+        self.assertIn('@app.patch("/api/gestures")', backend)
+        self.assertIn('GestureService(pose_service, posture_store)', backend)
+        self.assertIn('pose_service.results()', gestures)
+        self.assertIn('await gesture_service.start()', backend)
+        self.assertIn('/ws/gesture', app)
+        self.assertIn('connectGestureSocket', app)
+        self.assertIn('GESTURE_PANELS', app)
+        self.assertIn('"/api/gestures"', app)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -176,6 +176,14 @@ vcast_gesture: >-
   capable displays, 'off' stops. The display reports real capability in
   its state — a denied camera or unbuilt mode answers honestly.
 
+gesture_controls: >-
+  Desk-companion (ada-pi) gesture controls driven by the YOLO pose
+  stream — wave arms, swipe navigates kiosk panels, palm-hold opens
+  settings, drop dismisses. op='status' reports enabled/state/last
+  gesture; 'enable'/'disable' toggle (confirmation-gated). A
+  connection error means ada-pi is down or ADA_PI_URL is unset — say
+  so; do not claim the toggle happened.
+
 cctv_wall: >-
   Periodic-thumbnail grid for a camera zone on a vcast display — stills
   refreshed in the background, not live video. Zones: 'zone-a' (estate

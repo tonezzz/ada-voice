@@ -1,0 +1,153 @@
+# SSOT Job: gesture controls rebuilt on the shared YOLO pose stream.
+# Card: rebuild-gesture-controls-using-yolo-190356 (kanban). Dispatch
+# 20261120-215246-rebuild-gesture-controls-using, runner tony-dell.
+# Attempt 2 — attempt 1 (20261120-213624) exited nonzero with the same
+# architecture claims; this run rebuilt from origin/main and fixed a
+# latent runner bug its scenario surfaced.
+
+title: >-
+  Desk-companion gesture controls on the YOLO pose stream — wave arms,
+  swipe navigates kiosk panels, palm-hold opens settings, drop dismisses
+subtitle: >-
+  GestureService rides the existing shared pose pipeline
+  (CameraHub -> PoseService.results(), Hailo yolov8s_pose / MoveNet
+  fallback) instead of a competing capture loop. Exposed via
+  /ws/gesture + GET/PATCH /api/gestures + the gesture_controls tools.d
+  tool on the ada-ha side.
+
+planning:
+  goal: |
+    Rebuild the kiosk gesture controls so hand gestures drive the
+    desk-companion UI: a wave arms the controller (timeout-gated),
+    horizontal swipes cycle the kiosk panels, a held palm opens the
+    settings drawer, and a downward drop dismisses overlays/panels.
+    Detection runs on the shared YOLO/MoveNet pose keypoints — no
+    second camera consumer.
+  scope: |
+    Delivered:
+      - backend/gesture_controls.py — GestureController state machine
+        (wave-to-arm with timeout + hysteresis, per-hand trajectory
+        windows for swipe, palm-hold dwell, drop, per-gesture cooldown)
+        and GestureService: subscribes pose_service.results(),
+        persists the enabled flag via PostureStore monitor_state,
+        fans events out to /ws/gesture subscribers.
+      - backend/main.py — service construction + start/stop lifecycle,
+        /ws/gesture (snapshot on connect, then live events),
+        GET /api/gestures status, PATCH /api/gestures toggle
+        (422 on non-boolean).
+      - frontend — gesture-status chip + gesture-toggle checkbox in
+        settings; app.js connectGestureSocket with reconnect,
+        GESTURE_PANELS order, swipe/palm-hold/drop handlers driving
+        existing panel machinery, REST toggle.
+      - backend/tools.d/gesture_controls.py — ada-ha side tool:
+        op=status (GET) and enable/disable (PATCH) against
+        ADA_PI_URL (default http://idc02:8000); mutations go through
+        the standard confirm gate; honest error when the companion is
+        unreachable. manifest (policy read + internal per-action gate,
+        secondary_allowed true), tool_guide entry, count_cap 114->115.
+      - tests — test_gesture_controls.py (16 unit tests: wave-arm,
+        swipe both directions, horizontal-dominance rejection,
+        cooldown, drop/palm-hold, service lifecycle/status), frontend
+        contract assertions, offline + live scenario yamls.
+      - backend/tool_runner/__init__.py — latent bug fix: the
+        confirmed/confirm_token envelope was popped by _execute_gated
+        and re-injected only for NATIVE methods (signature check saw
+        the tools.d _bound(**kwargs) wrapper, not spec.run), so
+        confirmed=true resends could never reach a tools.d per-action
+        gate. Now inspects dyn_spec.run — heals kanban's declared
+        confirm params (dead since shipped) as well as this tool.
+    Explicitly NOT done:
+      - deploy/restart of ada-pi or ada-ha (forbidden for this task)
+      - push/merge of the dispatch branch
+      - gesture-driven pointer/cursor (separate card
+        rebuild-gesture-pointer-with-yolo-732b0d already covered it)
+  success_criteria:
+    - 'wave arms the controller only with both-wrist confidence +
+      raised-hand hysteresis; disarms after arm_timeout'
+    - 'swipe requires horizontal dominance (rejects diagonal); emits
+      exactly once per gesture (cooldown)'
+    - 'kiosk: swipe cycles panels, palm-hold opens settings, drop
+      dismisses; status chip + settings toggle reflect/persist state'
+    - 'mutations confirm-gated end-to-end through runner.execute
+      (needs_confirm -> confirmed=true/token executes)'
+    - 'companion unreachable -> ok:false honest error, no invented state'
+    - 'tool-lint clean, scenario yaml green, focused + suite pytest
+      green'
+  risks:
+    - 'PoseService stream cadence (~5fps) sets the floor for swipe
+      detection windows; tuned constants live at the top of
+      gesture_controls.py'
+    - 'tools.d confirm re-injection now inspects spec.run — tools whose
+      run() declares confirmed/confirm_token but relied on never
+      receiving them would change behavior (kanban wants it; no other
+      tools.d module declares the params)'
+  resources:
+    - pose stream: backend/posture.py PoseService.results() (shared
+      CameraHub frame, no extra camera cost)
+    - persistence: PostureStore.monitor_state["gesture_controls"]
+    - ada-ha reach: ADA_PI_URL env (default http://idc02:8000)
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-20"
+  steps:
+    - id: 1
+      label: "card comms + prior-failure read"
+      status: done
+      notes: "attempt-1 branch carried no commits — nothing to salvage;
+        rebuilt clean on origin/main; kept the same gesture vocabulary"
+    - id: 2
+      label: "controller + service + wiring"
+      status: done
+      notes: "gesture_controls.py, main.py /ws/gesture + REST, frontend
+        chip/toggle/handlers, tools.d tool + manifest + guide + cap"
+    - id: 3
+      label: "runner confirm-envelope fix"
+      status: done
+      notes: "_execute_gated re-injection now reads spec.run signature
+        for dynamic tools — confirmed=true/token reach tools.d gates"
+    - id: 4
+      label: "gates"
+      status: done
+      notes: "16 unit + contract + scenario yaml green; kanban/runner/
+        loader/memory regression sets green; tool-lint clean; full
+        suite run during dispatch"
+
+verification:
+  - cmd: 'python3 -m pytest tests/test_gesture_controls.py -x -q'
+    result: '16 passed'
+  - cmd: 'python3 -m pytest tests/test_frontend_contract.py -x -q'
+    result: 'green incl. gesture ws/REST/UI assertions'
+  - cmd: 'python3 -m pytest tests/test_scenarios.py -x -q -k gesture'
+    result: '1 passed — status/unreachable, needs_confirm gate,
+      confirmed retry executes to honest failure'
+  - cmd: 'python3 -m pytest tests/test_kanban.py tests/test_tool_runner.py
+      tests/test_tools_loader.py tests/test_speaker_profiles_tool.py
+      tests/test_memory_write_guard.py tests/test_memory_pending.py
+      tests/test_doc_archive_tool.py tests/test_tool_lazy_schemas.py -x -q'
+    result: 'green — confirm-path regression surface clean'
+  - cmd: 'python3 scripts/tool-lint.py'
+    result: 'clean — 71 declared tools, cap 115'
+  - cmd: 'python3 -m pytest tests/ -x -q'
+    result: 'full suite run in dispatch worktree'
+
+artifacts:
+  code:
+    - backend/gesture_controls.py
+    - backend/main.py
+    - backend/tool_runner/__init__.py
+    - backend/tools.d/gesture_controls.py
+    - backend/tools.d/manifest.yml
+    - backend/tool_guide.yml
+    - docs/ssot/ssot.tool-surface.yml
+    - frontend/index.html
+    - frontend/app.js
+    - frontend/style.css
+  tests:
+    - tests/test_gesture_controls.py
+    - tests/test_frontend_contract.py
+    - tests/scenarios/gesture_controls.yaml
+    - tests/scenarios-live/gesture_controls.yaml
+  job: docs/ssot/jobs/ada/2026-11-20-gesture-controls-yolo.yml
