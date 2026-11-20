@@ -813,3 +813,20 @@ ada_opencode_dispatch: >-
   an ask you raised for this dispatch (re-read the card first). After
   dispatch: kanban status/read reports the runner verdict — report the
   outcome, never describe an unverified run as done.
+
+wiki_read: >-
+  Reads ONE wiki page by exact title — get titles from wiki_search or a
+  lesson/report mention, never guess. Education:* and PrivateNews:* are
+  covered by live doors today; an ok:false naming uncovered namespaces
+  (Reports:, News:, main space) is a board-api gap, not a retry cue —
+  say the page isn't reachable yet. mode=parse renders HTML where the
+  door supports it; wikitext is the default and always what fallbacks
+  return.
+
+wiki_search: >-
+  Recall over the member wiki + report dossiers — Education: lessons
+  come back with wiki titles that feed straight into wiki_read. Query
+  by meaning or topic words ('deploy flow', 'kanban runner'), not full
+  questions; limit= caps hits (default 8). 'via': 'fallback' means the
+  dedicated /wiki/search door isn't deployed — coverage is Education +
+  report dossiers only, say so if Tony expected News: or Reports: hits.

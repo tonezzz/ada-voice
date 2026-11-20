@@ -154,3 +154,13 @@ tools:
     policy: read
     secondary_allowed: true
     timeout_s: 20
+  wiki_read:
+    module: wiki_read
+    policy: read
+    secondary_allowed: false
+    timeout_s: 60
+  wiki_search:
+    module: wiki_search
+    policy: read
+    secondary_allowed: false
+    timeout_s: 90

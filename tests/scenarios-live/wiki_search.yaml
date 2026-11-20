@@ -1,0 +1,9 @@
+# wiki_search — recall across Education/Reports without an exact title.
+name: wiki_search
+tier: full
+turns:
+  - user: Search the wiki for anything about deploying Ada.
+    expect:
+      calls_any: [wiki_search, wiki_read]
+      timeout_s: 90
+      settle_s: 10
