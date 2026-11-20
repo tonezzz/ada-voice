@@ -1,0 +1,168 @@
+# SSOT Job: write-fidelity drop-parity divergence — ada-side verification
+# and canonical-context reference patch.
+# Card: ada-write-fidelity-drop-parity / ADA-1300 (chaba kanban). Dispatch
+# 20261120-130531-observed-on-tony-dell-chaba-te, runner tony-omen,
+# worktree dispatch-wt-20261120-130531 (ada-voice).
+
+title: >-
+  Chaba test_patch_state_vs_checkout reports the staged
+  write-fidelity.patch drop diverged; ada-side verification shows the
+  guard itself is byte-stable upstream and only the patch context
+  rotted
+subtitle: >-
+  Guard landed upstream in 04154f6 (2026-10-17) and is unchanged
+  through canonical edb7c83 and current main 6a39e3a; neighbouring
+  context drift from bcd6530's claim-gate change is what rotted the
+  staged artifact. Context-only refresh satisfies the owner-approved
+  scope; refreshed reference patch delivered in reports/.
+
+planning:
+  goal: |
+    PR #138 in chaba is blocked by tests/ada/
+    test_write_fidelity_drop.py::test_patch_state_vs_checkout failing
+    "diverged" after 269 passes and one skip. The card requires: do not
+    disable hooks, relax _drops/drop_guard_ok, skip safety tests, or
+    change runtime guards; preserve guard implementation and all
+    tests; verify artifact applicability and canonical functional
+    fidelity tests. Owner direction (guard-parity-scope, answered
+    2026-11-09): approved scope is a context-only artifact refresh —
+    runtime guards/hooks/tests unchanged, review before integration.
+  scope: |
+    Ada-side only (dispatch worktree is ada-voice; the staged artifact
+    and the failing test live in chaba worktree chaba-knb1257, outside
+    this session's reach).
+      - Verified canonical functional fidelity tests: 17/17 pass at
+        this branch (files identical to edb7c83).
+      - Established guard provenance and drift windows.
+      - Produced reports/2026-11-20-write-fidelity-canonical-
+        edb7c83.patch — the upstream guard diff recontextualized to
+        canonical edb7c83 (context-only refresh of the drop).
+      - Verified round-trip: applying the patch to the synthetic
+        pre-guard tree reproduces edb7c83 byte-for-byte on all four
+        files; git apply -R --check passes against canonical content.
+    Explicitly NOT done:
+      - editing chaba-knb1257 or its staged artifact (different repo,
+        outside dispatch worktree)
+      - committing the seven SSOT fixes for PR #138 (blocked pending
+        the artifact swap, which needs the chaba side)
+      - any change to runtime guards, hooks, tests, or _drops/
+        drop_guard_ok semantics
+  success_criteria:
+    - tests/test_write_fidelity.py passes 17/17 — MET
+    - guard markers present in canonical — MET (_fidelity_tokens,
+      _write_fidelity_problems, stored_verified/stored_excerpt/
+      stored_sha256, ops event "write_fidelity")
+    - refreshed artifact context == canonical — MET (git apply -R
+      --check clean vs edb7c83 content; forward apply fails as
+      expected since the guard is already integrated)
+    - zero runtime-guard/test changes — MET (only reports/ + docs/
+      additions)
+
+findings:
+  guard_provenance:
+    commit: 04154f66adf2282440034f578ba9e69dadaae0b4
+    date: '2026-10-17 15:44 +0700'
+    subject: >-
+      write-fidelity: post-write read-back + ops event on
+      narration/stored contradiction (ADA-0732)
+    files:
+      - backend/realtime_provider.py (+147: _FIDELITY_*_RE regexes,
+        _fidelity_tokens, _write_fidelity_problems, call site +
+        "write_fidelity" ops event in GeminiLiveProvider)
+      - backend/tool_runner/cms.py (+32: cms_publish_page post-write
+        read-back → stored_verified/stored_excerpt/stored_sha256)
+      - tests/test_write_fidelity.py (+170, new file, 17 tests)
+      - tests/scenarios-live/kk_cms_only_seeded_recall.yaml (+18/-3)
+  drift_analysis:
+    summary: >-
+      All guard code is byte-identical between 04154f6 and canonical
+      edb7c83, and between edb7c83 and current main 6a39e3a (36
+      commits). cms.py has zero commits in the window; the two
+      realtime_provider.py function bodies diff clean; the call-site
+      code is identical — only neighbouring context shifted.
+    root_cause_of_divergence:
+      commit: bcd653001ac088cfc6922ba40726d10c77403d71
+      date: '2026-10-23 08:58 +0700'
+      detail: >-
+        The phantom-claim/dead-turn checkpoint wrapped the
+        `tool_calls_this_turn = 0 / failed_results_this_turn = 0`
+        counter resets in `if not tools_pending:` (claim-gate
+        counters now reset only at the FINAL boundary). That block
+        sits immediately after the `_fidelity_flags` loop — inside
+        the staged patch's context window. Any artifact cut against
+        the 04154f6..bcd6530~ tree therefore matches neither the
+        pre-image nor post-image context at edb7c83 → the chaba
+        parity check reports "diverged", not "integrated".
+    implication: >-
+      The divergence is context rot, not guard drift. The correct
+      artifact still encodes exactly upstream 04154f6 — only its
+      hunk context lines must be re-taken from canonical.
+  canonical_test_state:
+    tests/test_write_fidelity.py: identical at 04154f6-era content,
+      edb7c83, and 6a39e3a; 17 tests pass under
+      `python3 -m pytest tests/test_write_fidelity.py -v` (1.10s)
+    backend/tool_runner/cms.py: zero commits 04154f6..edb7c83
+    backend/realtime_provider.py: 8 commits / 22 hunks in window;
+      none inside _fidelity_tokens/_write_fidelity_problems bodies
+      or the call-site block
+
+deliverables:
+  - reports/2026-11-20-write-fidelity-canonical-edb7c83.patch — 448
+    lines, 10 hunks, 4 files (same file set as upstream 04154f6).
+    Context lines taken from canonical edb7c83. Pure additions except
+    the same 3 scenario-yaml line swaps the upstream commit made.
+  - docs/ssot/jobs/ada/2026-11-20-write-fidelity-drop-parity.yml —
+    this record.
+
+verification:
+  - cmd: python3 -m pytest tests/test_write_fidelity.py -v
+    result: 17 passed in 1.10s (HEAD 6a39e3a; file identical to edb7c83)
+  - cmd: >-
+      git apply --check reports/2026-11-20-write-fidelity-canonical-
+      edb7c83.patch   # against synthetic pre-guard tree
+    result: applies clean; post-apply all four files byte-identical
+      to `git show edb7c83:<file>`
+  - cmd: >-
+      git apply -R --check reports/2026-11-20-write-fidelity-
+      canonical-edb7c83.patch   # against canonical edb7c83 content
+    result: PASSES — context lines are exactly canonical; the check
+      can classify the drop as integrated
+  - cmd: >-
+      diff <(git show edb7c83:backend/tool_runner/cms.py)
+      backend/tool_runner/cms.py
+    result: identical (also identical vs HEAD)
+
+handoff:
+  to_chaba_side: >-
+    In chaba worktree chaba-knb1257, replace the staged
+    write-fidelity.patch drop with
+    reports/2026-11-20-write-fidelity-canonical-edb7c83.patch (copy is
+    on this dispatch branch; also reproducible via the recipe below),
+    then re-run
+    `python3 -m pytest tests/ada/test_write_fidelity_drop.py
+    ::test_patch_state_vs_checkout`. Expected: the write-fidelity drop
+    reports integrated/consistent rather than diverged, unblocking the
+    seven staged SSOT fixes for PR #138. Review the diff before
+    swapping (owner-approved scope was review-then-integrate).
+  regeneration_recipe: |
+    1. Extract the four files at edb7c83 into a scratch tree.
+    2. Reverse-apply `git show 04154f6` to that tree with
+       `patch -p1 -R --fuzz=3` (only the guard is removed; the
+       claim-gate context from bcd6530 survives — verified).
+    3. `git diff --no-index` pre-tree vs edb7c83 tree per file;
+       rewrite labels to a/<path>, b/<path>; emit /dev/null new-file
+       diff for tests/test_write_fidelity.py.
+    4. Verify: apply to pre-tree → byte-identical to edb7c83;
+       `git apply -R --check` vs edb7c83 content passes.
+  remaining_question: >-
+    Board request `drop-artifact-swap` asks whether a chaba-side
+    dispatch should perform the swap + PR #138 unblock, or Tony
+    applies it by hand in chaba-knb1257.
+
+constraints_respected:
+  - no hooks disabled
+  - _drops/drop_guard_ok semantics untouched (chaba-side, unmodified)
+  - no safety tests skipped or edited
+  - no runtime guard code changed (guard left exactly as upstream
+    04154f6)
+  - no push, no commit to main, no deploy

@@ -1,0 +1,448 @@
+diff --git a/backend/realtime_provider.py b/backend/realtime_provider.py
+index 6fd7fff..a281e25 100644
+--- a/backend/realtime_provider.py
++++ b/backend/realtime_provider.py
+@@ -495,6 +495,116 @@ def _media_grounding_problems(
+     return problems
+ 
+ 
++# Write-fidelity guard (card ada-cms-write-fidelity, MEM-0498 finding 2):
++# the text Ada narrates and the content she persists are separate
++# generations that can diverge — the kk-cms-only bench caught her storing
++# 'Tuesdays' while saying 'Mondays' (2026-10-12), and the write landed.
++# Fact tokens (weekdays/clock times/dates) are extracted from BOTH the
++# narration and the persisted content arg of each publish call that
++# returned status=published this turn; only a CONTRADICTION flags —
++# both sets non-empty and disjoint — so a vague narration ("saved the
++# page") or a matching one stays silent.
++_FIDELITY_WRITE_TOOLS = frozenset({"cms_publish_page"})
++
++_FIDELITY_DAY_RES = (
++    (re.compile(r"(?i)\bmondays?\b"), "mon"),
++    (re.compile(r"(?i)\btuesdays?\b"), "tue"),
++    (re.compile(r"(?i)\bwednesdays?\b"), "wed"),
++    (re.compile(r"(?i)\bthursdays?\b"), "thu"),
++    (re.compile(r"(?i)\bfridays?\b"), "fri"),
++    (re.compile(r"(?i)\bsaturdays?\b"), "sat"),
++    (re.compile(r"(?i)\bsundays?\b"), "sun"),
++)
++# Thai weekday names — พฤหัส matches inside พฤหัสบดี; both map to thu.
++_FIDELITY_DAY_TH = (
++    ("จันทร์", "mon"), ("อังคาร", "tue"), ("พุธ", "wed"),
++    ("พฤหัส", "thu"), ("ศุกร์", "fri"), ("เสาร์", "sat"),
++    ("อาทิตย์", "sun"),
++)
++# Clock times — '6am', '6:30pm', '18:00' normalize to 'HH:MM' 24h; Thai
++# '<n> โมงเช้า/บ่าย/เย็น' and '<n> น.' land in the same space so an en
++# narration and th content still compare.
++_FIDELITY_TIME_EN_RE = re.compile(
++    r"(?i)\b([01]?\d|2[0-3])(?::([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)\b"
++    r"|\b([01]?\d|2[0-3]):([0-5]\d)\b")
++_FIDELITY_TIME_TH_RE = re.compile(
++    r"([01]?\d|2[0-3])\s*(?:โมง)\s*(เช้า|บ่าย|เย็น|ค่ำ|ดึก)?"
++    r"|([01]?\d|2[0-3])\s*น\.")
++_FIDELITY_DATE_RE = re.compile(
++    r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/\d{4}\b")
++
++
++def _fidelity_tokens(text: str) -> dict[str, set]:
++    """Fact-token sets a persisted text or a narration carries:
++    {day: {mon..sun}, time: {HH:MM}, date: {literal}}."""
++    t = str(text or "")
++    days: set[str] = set()
++    for rx, canon in _FIDELITY_DAY_RES:
++        if rx.search(t):
++            days.add(canon)
++    for th, canon in _FIDELITY_DAY_TH:
++        if th in t:
++            days.add(canon)
++    times: set[str] = set()
++    for m in _FIDELITY_TIME_EN_RE.finditer(t):
++        if m.group(3):  # am/pm form
++            hour = int(m.group(1)) % 12
++            if m.group(3).lower().startswith("p"):
++                hour += 12
++            times.add(f"{hour:02d}:{int(m.group(2) or 0):02d}")
++        else:
++            times.add(f"{int(m.group(4)):02d}:{m.group(5)}")
++    for m in _FIDELITY_TIME_TH_RE.finditer(t):
++        if m.group(1):  # '<n> โมง<period>'
++            hour = int(m.group(1))
++            period = m.group(2)
++            if period in ("บ่าย", "เย็น", "ค่ำ", "ดึก") and hour < 12:
++                hour += 12
++            times.add(f"{hour:02d}:00")
++        else:
++            times.add(f"{int(m.group(3)):02d}:00")
++    dates = set(_FIDELITY_DATE_RE.findall(t))
++    return {"day": days, "time": times, "date": dates}
++
++
++def _write_fidelity_problems(
++        narration: str,
++        user_text: str,
++        calls: list[tuple[str, dict, dict]]) -> list[str]:
++    """Narrated/seeded facts contradicted by persisted publish content.
++
++    calls = [(name, args, result)] for the turn's fidelity-watched writes.
++    Returns advisory strings; empty = consistent or nothing to compare.
++    A contradiction needs BOTH sides to carry the same fact class with no
++    common value — absence on either side is not a flag."""
++    narr = _fidelity_tokens(narration)
++    seed = _fidelity_tokens(user_text)
++    if not any(narr.values()) and not any(seed.values()):
++        return []
++    problems: list[str] = []
++    for name, args, result in calls:
++        if name not in _FIDELITY_WRITE_TOOLS:
++            continue
++        if not isinstance(result, dict) or result.get("ok") is False:
++            continue
++        if str(result.get("status") or "") != "published":
++            continue
++        content = str((args or {}).get("content") or "")
++        if not content.strip():
++            continue
++        stored = _fidelity_tokens(content)
++        slug = str((args or {}).get("slug") or "?")
++        for label, side in (("narration", narr), ("user", seed)):
++            for cat in ("day", "time", "date"):
++                if (side[cat] and stored[cat]
++                        and side[cat].isdisjoint(stored[cat])):
++                    problems.append(
++                        f"{name} slug={slug}: stored {cat} "
++                        f"{sorted(stored[cat])} contradicts {label} "
++                        f"{sorted(side[cat])}")
++    return problems
++
++
+ # Dead-turn detector (card ada-dead-turn-guard — session 56d2e4d167,
+ # 2026-10-07): the model twice ended a turn having emitted only the
+ # literal scaffold "response:" while the memory tool already held the
+@@ -5329,6 +5439,10 @@ class GeminiLiveProvider(RealtimeProvider):
+         # guard's retry nudge and synthesized fallback read the answer
+         # back out of these when the model emits nothing speakable.
+         turn_tool_results: list[tuple[str, dict]] = []
++        # (name, args, result) for this turn's fidelity-watched writes —
++        # the write_fidelity check compares the persisted content arg
++        # against the narration/user seed (card ada-cms-write-fidelity).
++        turn_fidelity_calls: list[tuple[str, dict, dict]] = []
+         tool_budget = int(os.environ.get("ADA_TOOL_CALL_BUDGET", "20"))
+         actuations_this_turn = 0
+         actuation_budget = int(os.environ.get("ADA_ACTUATION_BUDGET", "6"))
+@@ -5965,6 +6079,14 @@ class GeminiLiveProvider(RealtimeProvider):
+                                 str(call.name), dict(call.args or {})):
+                             backing_calls_this_turn += 1
+                         turn_tool_results.append((str(call.name), result))
++                        if str(call.name) in _FIDELITY_WRITE_TOOLS:
++                            # Args as the model sent them — the narration
++                            # is compared against THIS text at turn end;
++                            # the persisted bytes match it verbatim
++                            # (cms_publish_page read-back verifies that).
++                            turn_fidelity_calls.append((
++                                str(call.name), dict(call.args or {}),
++                                result))
+                         # Ground-truth pin (card ada-trace-full-result):
+                         # the ws tool_result stays a stump, but id +
+                         # result_hash join it to the call-log result_full
+@@ -6126,6 +6248,7 @@ class GeminiLiveProvider(RealtimeProvider):
+                     budget_hit = False
+                     budget_nudged = False
+                     turn_tool_results = []
++                    turn_fidelity_calls = []
+                     segment_tool_pending = False
+                     self._dead_retried = False
+                     self._revoice_in_flight = False
+@@ -6308,6 +6431,29 @@ class GeminiLiveProvider(RealtimeProvider):
+                             f"this turn ({'; '.join(_media_flags)}): "
+                             f"{assistant_turn_text.strip()[:160]!r}",
+                         )
++                    # Write-fidelity guard (card ada-cms-write-fidelity):
++                    # a publish call's persisted content can contradict
++                    # BOTH the narration and the user seed — 'Tuesdays'
++                    # stored while 'Mondays' was said/asked (2026-10-12
++                    # kk-cms-only bench). Fact-token contradiction →
++                    # advisory ops event; the session-audit/QC loop sees
++                    # it, the model sees nothing (no retry channel).
++                    if turn_fidelity_calls and not tools_pending:
++                        # Last 3 user turns — the seed ask + the confirm
++                        # are what the stored page should agree with;
++                        # older turns' facts would only add false hits.
++                        # Mid-task boundaries are skipped — calls persist
++                        # until the final segment so the check sees the
++                        # whole narration and fires at most once.
++                        _seed = " ".join(
++                            str(t.get("text") or "") for t in
++                            [t for t in self.conversation.turns()[-12:]
++                             if t.get("role") == "user"][-3:])
++                        _fidelity_flags = _write_fidelity_problems(
++                            assistant_turn_text, _seed,
++                            turn_fidelity_calls)
++                        for _ff in _fidelity_flags:
++                            self._emit_ops_event("write_fidelity", _ff)
+                     if not tools_pending:
+                         # Claim-gate counters reset at the FINAL boundary
+                         # only — a mid-task reset orphaned the call from
+@@ -6408,6 +6554,7 @@ class GeminiLiveProvider(RealtimeProvider):
+                         # Keep results across a mid-task boundary so a dead
+                         # FINAL segment can still speak them as the fallback.
+                         turn_tool_results = []
++                        turn_fidelity_calls = []
+                     _lang_drift = ""
+                     if assistant_turn_text.strip():
+                         self.conversation.add_assistant(assistant_turn_text)
+diff --git a/backend/tool_runner/cms.py b/backend/tool_runner/cms.py
+index 0f20a8f..c8cb2c1 100644
+--- a/backend/tool_runner/cms.py
++++ b/backend/tool_runner/cms.py
+@@ -544,6 +544,38 @@ class CmsMixin:
+                     "action='nav', url=<cast_url>) — only after this result "
+                     "shows status=published.",
+         }
++        # Post-write read-back (card ada-cms-write-fidelity, MEM-0498):
++        # the model's narrated text and the content arg are separate
++        # generations that can diverge — she once stored 'Tuesdays' while
++        # saying 'Mondays' (kk-cms-only bench 2026-10-12). Re-read the doc
++        # and echo a digest + excerpt so (a) a transport/store-side mangle
++        # flips stored_verified, and (b) the stored text lands in the
++        # transcript where the model — and the write_fidelity ops check —
++        # can catch facts that differ from what was said aloud.
++        try:
++            stored = await self.mddb.get_document(CMS_COLLECTION, slug, lang)
++        except Exception:
++            stored = None
++        stored_md = ((stored or {}).get("contentMd")
++                     or (stored or {}).get("content") or "")
++        if isinstance(stored_md, str) and stored_md == content:
++            out["stored_verified"] = True
++            out["stored_sha256"] = hashlib.sha256(
++                stored_md.encode()).hexdigest()[:16]
++            out["stored_excerpt"] = stored_md.strip()[:240]
++            out["note"] += (" Stored excerpt echoed — if any fact there "
++                            "differs from what you told the user, republish "
++                            "the corrected content now and say so plainly.")
++        elif stored_md:
++            out["stored_verified"] = False
++            out["stored_excerpt"] = str(stored_md).strip()[:240]
++            out["note"] += (" WARNING: the stored text does not match what "
++                            "was submitted — republish to repair it.")
++        else:
++            out["stored_verified"] = "unknown"
++            out["note"] += (" Read-back returned nothing — verify with "
++                            "cms_read(action='verify') before claiming the "
++                            "page is correct.")
+         # Public lane — the static publisher (cms-publish-site.py, runs on
+         # idc02) renders opted-in pages to surf-thailand.com/<tenant>/.
+         # The URL is returned whenever the page is flagged public, even
+diff --git a/tests/scenarios-live/kk_cms_only_seeded_recall.yaml b/tests/scenarios-live/kk_cms_only_seeded_recall.yaml
+index c78f282..240c4ef 100644
+--- a/tests/scenarios-live/kk_cms_only_seeded_recall.yaml
++++ b/tests/scenarios-live/kk_cms_only_seeded_recall.yaml
+@@ -40,7 +40,19 @@ turns:
+   - user: >-
+       Yes, please create it.
+     expect:
+-      calls_any: [cms_publish_page, cms_edit]
++      # Publish only — cms_edit can't create a page (note needs an
++      # existing doc), so a cms_edit answer here means the seed never
++      # landed and the recall turns below have nothing to read.
++      calls_any: [cms_publish_page]
++      # Write-fidelity bar (card ada-cms-write-fidelity): first run
++      # stored 'Tuesdays' while narrating 'Mondays'. The content arg IS
++      # the stored text (the write path is verbatim), so requiring the
++      # seeded facts inside it is the stored-vs-narrated check.
++      call_args_contain:
++        cms_publish_page:
++          - ["monday", "Monday", "จันทร์"]
++          - ["thursday", "Thursday", "พฤหัส"]
++          - ["prime", "primed", "ปั๊ม", "ล่อน้ำ"]
+       response_nonempty: true
+       timeout_s: 120
+       settle_s: 5
+@@ -60,8 +72,8 @@ turns:
+         - cms_list_pages
+         - cms_verify_page
+       # Assert the pump detail — proves the answer came from the stored
+-      # report. Day-name fidelity is a separate write-fidelity bar (first
+-      # run caught her storing Tuesdays for Mondays 2026-10-12 — see card).
++      # report. Day-name fidelity is asserted at the write (turn 2's
++      # call_args_contain — card ada-cms-write-fidelity).
+       response_contains_any: [prime, primed, ล่อน้ำ, ปั๊ม]
+       timeout_s: 120
+       settle_s: 5
+diff --git a/tests/test_write_fidelity.py b/tests/test_write_fidelity.py
+new file mode 100644
+index 0000000..13f04e1
+--- /dev/null
++++ b/tests/test_write_fidelity.py
+@@ -0,0 +1,170 @@
++"""Write-fidelity guard tests (card ada-cms-write-fidelity, MEM-0498).
++
++Two layers landed together:
++
++- provider-side `_write_fidelity_problems` — advisory ops event when a
++  publish call's persisted content arg CONTRADICTS fact tokens (weekday /
++  clock time / date) in the narration or the user seed. The kk-cms-only
++  bench caught 'Tuesdays' stored while 'Mondays' was narrated (2026-10-12).
++- tool-side cms_publish_page read-back — after add_document succeeds the
++  stored doc is re-read; stored_verified/stored_excerpt echo into the
++  tool result so the model can self-correct and the transcript carries
++  what actually persisted.
++"""
++
++from __future__ import annotations
++
++import unittest
++from unittest.mock import AsyncMock
++
++from backend.realtime_provider import (
++    _fidelity_tokens,
++    _write_fidelity_problems,
++)
++
++
++def _pub(content: str, slug: str = "garden", status: str = "published",
++         ok: bool = True):
++    result = {"ok": ok, "status": status, "slug": slug}
++    return [("cms_publish_page",
++             {"slug": slug, "title": "Garden", "content": content},
++             result)]
++
++
++class FidelityTokensTest(unittest.TestCase):
++
++    def test_en_weekdays_plural(self):
++        self.assertEqual(
++            _fidelity_tokens("watering on Mondays and Thursdays")["day"],
++            {"mon", "thu"})
++
++    def test_thai_weekday(self):
++        self.assertEqual(
++            _fidelity_tokens("รดน้ำทุกวันจันทร์กับวันพฤหัสบดี")["day"],
++            {"mon", "thu"})
++
++    def test_ampm_times_normalize_24h(self):
++        self.assertEqual(
++            _fidelity_tokens("at 6am and 6:30pm")["time"],
++            {"06:00", "18:30"})
++        self.assertEqual(_fidelity_tokens("at 18:00")["time"], {"18:00"})
++
++    def test_thai_times(self):
++        self.assertEqual(_fidelity_tokens("6 โมงเช้า")["time"], {"06:00"})
++        self.assertEqual(_fidelity_tokens("6 โมงเย็น")["time"], {"18:00"})
++        self.assertEqual(_fidelity_tokens("18 น.")["time"], {"18:00"})
++
++    def test_iso_and_slash_dates(self):
++        self.assertEqual(
++            _fidelity_tokens("on 2026-10-17 and 17/10/2026")["date"],
++            {"2026-10-17", "17/10/2026"})
++
++
++class WriteFidelityProblemsTest(unittest.TestCase):
++
++    def test_stored_tuesday_vs_narrated_monday_flags(self):
++        flags = _write_fidelity_problems(
++            "I've saved the page — watering is on Mondays at 6am.",
++            "",
++            _pub("Watering is on Tuesdays at 6am."))
++        self.assertTrue(any("day" in f and "tue" in f for f in flags))
++
++    def test_stored_vs_user_seed_flags(self):
++        flags = _write_fidelity_problems(
++            "Saved the page.",  # vague narration carries no day facts
++            "the garden watering schedule is Mondays and Thursdays at 6am",
++            _pub("Watering is on Tuesdays at 6am, prime the pump."))
++        self.assertTrue(any("user" in f for f in flags))
++
++    def test_agreeing_facts_silent(self):
++        flags = _write_fidelity_problems(
++            "Saved it — Mondays and Thursdays at 6am, pump primed first.",
++            "watering is Mondays and Thursdays at 6am, prime the pump",
++            _pub("Watering Mondays and Thursdays at 6am; prime the pump."))
++        self.assertEqual(flags, [])
++
++    def test_vague_narration_and_seed_silent(self):
++        self.assertEqual(
++            _write_fidelity_problems("Done, saved the page.", "",
++                                     _pub("Watering on Tuesdays.")),
++            [])
++
++    def test_partial_overlap_no_flag(self):
++        # 'Monday' narrated, stored Monday+Thursday — not disjoint.
++        flags = _write_fidelity_problems(
++            "saved — watering Mondays",
++            "",
++            _pub("Watering Mondays and Thursdays."))
++        self.assertEqual(flags, [])
++
++    def test_unpublished_results_never_flag(self):
++        for res in ({"ok": True, "status": "queued"},
++                    {"ok": False, "error": "denied"}):
++            flags = _write_fidelity_problems(
++                "saved Mondays", "",
++                [("cms_publish_page", {"content": "Tuesdays"}, res)])
++            self.assertEqual(flags, [], res)
++
++    def test_unwatched_tools_never_flag(self):
++        flags = _write_fidelity_problems(
++            "saved Mondays", "",
++            [("cms_edit", {"action": "note", "content": "Tuesdays"},
++              {"ok": True, "status": "published"})])
++        self.assertEqual(flags, [])
++
++    def test_time_contradiction_flags(self):
++        flags = _write_fidelity_problems(
++            "watering at 6am", "", _pub("Watering at 7am."))
++        self.assertTrue(any("time" in f for f in flags))
++
++    def test_cross_language_contradiction_flags(self):
++        # Thai narration 'วันจันทร์' vs stored 'Tuesday' — same fact space.
++        flags = _write_fidelity_problems(
++            "บันทึกแล้วค่ะ รดน้ำวันจันทร์", "",
++            _pub("Watering on Tuesdays."))
++        self.assertTrue(any("day" in f for f in flags))
++
++
++class PublishReadbackTest(unittest.IsolatedAsyncioTestCase):
++    """cms_publish_page post-write read-back: the stored doc is re-read
++    and stored_verified/stored_excerpt reflect what actually landed."""
++
++    async def _runner(self, stored_doc):
++        from backend.tool_runner import ToolRunner
++        ha = AsyncMock()
++        ha.base_url = "http://test:8123"
++        runner = ToolRunner(ha, instance_id="test")
++        runner.mddb = AsyncMock()
++        # get_document fires twice: existing-meta merge, then read-back.
++        runner.mddb.get_document.side_effect = [None, stored_doc]
++        runner.mddb.add_document.return_value = {"ok": True}
++        # create_task really schedules this — an AsyncMock keeps it silent.
++        runner._cms_reports_index = AsyncMock()
++        return runner
++
++    async def test_verbatim_store_verified(self):
++        content = "Watering Mondays and Thursdays at 6am."
++        runner = await self._runner({"contentMd": content})
++        out = await runner.cms_publish_page(
++            slug="garden", title="Garden", content=content)
++        self.assertEqual(out["status"], "published")
++        self.assertEqual(out["stored_verified"], True)
++        self.assertIn("stored_sha256", out)
++        self.assertEqual(out["stored_excerpt"], content[:240])
++
++    async def test_mangled_store_flags_warning(self):
++        runner = await self._runner({"contentMd": "Watering Tuesdays."})
++        out = await runner.cms_publish_page(
++            slug="garden", title="Garden", content="Watering Mondays.")
++        self.assertEqual(out["stored_verified"], False)
++        self.assertIn("WARNING", out["note"])
++
++    async def test_readback_miss_marks_unknown(self):
++        runner = await self._runner(None)
++        out = await runner.cms_publish_page(
++            slug="garden", title="Garden", content="x")
++        self.assertEqual(out["stored_verified"], "unknown")
++
++
++if __name__ == "__main__":
++    unittest.main()
