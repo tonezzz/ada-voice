@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
     <title>ADA Pi</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260823-home1">
+    <link rel="stylesheet" href="/static/style.css?v=20261120-gesture1">
   </head>
   <body>
     <main id="face-stage" aria-label="ADA voice assistant">
@@ -63,6 +63,7 @@
         </section>
         <button id="pose-toggle" aria-controls="pose-panel" aria-expanded="false">Pose</button>
         <button id="detect-toggle" aria-controls="detect-panel" aria-expanded="false">Detect</button>
+        <button id="gesture-toggle" aria-controls="gesture-panel" aria-expanded="false">Gestures</button>
         <button id="habits-toggle" aria-controls="habits-panel" aria-expanded="false">Habit tracker</button>
         <button id="habit-settings-toggle" aria-controls="habit-settings-panel" aria-expanded="false">Habit settings</button>
         <button id="home-toggle" aria-controls="home-panel" aria-expanded="false">Home Assistant</button>
@@ -156,6 +157,25 @@
           <div><span class="eyebrow">EFFICIENTDET-LITE0 · COCO · CPU</span><strong id="detect-status">Ready</strong></div>
         </div>
       </section>
+      <section id="gesture-panel" aria-label="Gesture controls" aria-hidden="true">
+        <header class="gesture-header">
+          <div><span class="eyebrow">YOLO-POSE · WRIST TRACKING</span><h2>Gestures</h2></div>
+          <button id="gesture-close" aria-label="Close gesture controls">×</button>
+        </header>
+        <div id="gesture-state" role="status">Checking gesture service…</div>
+        <div class="gesture-switches">
+          <label class="switch-row"><span>Enabled</span><input id="gesture-enabled" type="checkbox"><i></i></label>
+          <label class="switch-row"><span>Wave to activate</span><input id="gesture-require-arm" type="checkbox"><i></i></label>
+        </div>
+        <ul class="gesture-map">
+          <li><strong>Wave</strong><span>wake &amp; arm gesture control</span></li>
+          <li><strong>Swipe left / right</strong><span>cycle kiosk panels</span></li>
+          <li><strong>Hold hand up</strong><span>open settings</span></li>
+          <li><strong>Drop hand</strong><span>close everything / disarm</span></li>
+        </ul>
+        <div id="gesture-last" aria-live="polite"></div>
+      </section>
+      <div id="gesture-indicator" role="status" aria-live="polite" aria-hidden="true"></div>
       <section id="home-panel" aria-label="Home Assistant devices" aria-hidden="true">
         <header class="home-header">
           <div><span class="eyebrow">HOME ASSISTANT</span><h2>Devices</h2></div>
@@ -187,6 +207,6 @@
       </aside>
     </main>
     <script src="/static/idle-face.js?v=20260823-autoconnect1" defer></script>
-    <script src="/static/app.js?v=20260823-home2" defer></script>
+    <script src="/static/app.js?v=20261120-gesture1" defer></script>
   </body>
 </html>

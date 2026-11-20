@@ -338,3 +338,21 @@ body.hardware-open #idle-face { opacity: .32; }
 .visual-monitor-card:first-child { border-top: 0; }
 .monitor-live { margin: 8px 0 12px; color: var(--muted, #aeb5c0); font-size: .85rem; }
 .monitor-toggle { display: flex; align-items: center; gap: 8px; }
+
+/* Gesture controls — YOLO-pose wrist tracking (OPS-0683) */
+#gesture-panel { position: fixed; z-index: 74; inset: 0; display: grid; grid-template-rows: auto auto auto 1fr auto; gap: 18px; padding: clamp(20px,4vw,42px); color: #c9fbff; background: radial-gradient(circle at 20% 8%,rgba(53,255,154,.12),transparent 34%),linear-gradient(145deg,#00090f,#00131c 55%,#00070b); transform: translateY(105%); opacity: 0; transition: transform 300ms cubic-bezier(.2,.8,.2,1),opacity 220ms ease; cursor: auto; }
+#gesture-panel.open { transform: translateY(0); opacity: 1; }
+.gesture-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.gesture-header .eyebrow { color: #35ff9a; font-size: 11px; letter-spacing: .18em; }
+.gesture-header h2 { margin: 2px 0 0; color: #fff; font-size: clamp(30px,5vw,48px); }
+.gesture-header button { min-width: 44px; min-height: 44px; border: 1px solid rgba(23,223,255,.5); border-radius: 50%; color: #bffaff; background: rgba(0,18,28,.6); font-size: 22px; }
+#gesture-state { color: #9bd8df; font-size: 15px; }
+.gesture-switches { display: grid; gap: 12px; max-width: 380px; }
+.gesture-switches label { display: grid; gap: 8px; color: #73b8c0; font-size: 12px; }
+.gesture-map { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; align-self: start; }
+.gesture-map li { display: grid; grid-template-columns: minmax(150px,220px) 1fr; align-items: baseline; gap: 14px; padding: 10px 12px; border: 1px solid rgba(53,255,154,.25); border-radius: 10px; background: rgba(0,22,18,.5); }
+.gesture-map strong { color: #eaffff; font-size: 15px; }
+.gesture-map span { color: #9bd8df; font-size: 13px; }
+#gesture-last { color: #6f9aa0; font-size: 13px; }
+#gesture-indicator { position: fixed; z-index: 95; right: 18px; bottom: 18px; padding: 12px 18px; border: 1px solid rgba(53,255,154,.6); border-radius: 12px; color: #eaffff; background: rgba(0,20,14,.88); backdrop-filter: blur(8px); font: 650 15px system-ui,sans-serif; letter-spacing: .04em; box-shadow: 0 0 24px rgba(53,255,154,.25); opacity: 0; transform: translateY(12px); transition: opacity 200ms ease,transform 200ms ease; pointer-events: none; }
+#gesture-indicator.show { opacity: 1; transform: translateY(0); }

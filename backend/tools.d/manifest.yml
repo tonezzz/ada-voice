@@ -164,3 +164,8 @@ tools:
     policy: read
     secondary_allowed: false
     timeout_s: 90
+  gesture_controls:
+    module: gesture_controls
+    policy: read
+    secondary_allowed: true
+    timeout_s: 10

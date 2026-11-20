@@ -27,6 +27,7 @@ from .hailo_vision import HAILO_ROTATE_180, VisionBackendManager, letterbox
 from .posture import PoseService, PostureMonitor, PostureStore
 from .posture_verifier import GeminiClutterVerifier, GeminiPostureVerifier
 from .visual_habits import VisualHabitService
+from .gesture_controls import GestureControlService
 from .live_manager import LiveSessionManager
 from .home_assistant import HomeAssistantClient
 from .office_lights import OfficeLightMonitor
@@ -120,6 +121,7 @@ office_light_monitor = OfficeLightMonitor(
     notifier=notify_office_light_habit,
 )
 visual_habits = VisualHabitService(camera, pose_service, object_detector, posture_store, live_manager, GeminiClutterVerifier())
+gesture_controls = GestureControlService(pose_service, posture_store)
 oled_guard_task: asyncio.Task[None] | None = None
 
 
@@ -156,6 +158,7 @@ async def start_oled_guard() -> None:
     await live_manager.start()
     await pose_service.start()
     await visual_habits.start()
+    await gesture_controls.start()
     await office_light_monitor.start()
 
 
@@ -169,6 +172,7 @@ async def stop_oled_guard() -> None:
         oled_guard_task = None
     await office_light_monitor.stop()
     await visual_habits.stop()
+    await gesture_controls.stop()
     await pose_service.stop()
     vision_backend.close()
     await live_manager.stop()
@@ -478,7 +482,42 @@ async def pose_socket(browser: WebSocket) -> None:
         logger.exception("pose stream failed")
         with suppress(Exception):
             await send_json(browser, "pose_error", message=str(exc))
-            await browser.close(code=1011)
+
+
+@app.get("/api/gesture/status")
+async def gesture_status() -> dict[str, object]:
+    """Gesture-control state, settings, and per-gesture counters."""
+    return gesture_controls.status()
+
+
+@app.patch("/api/gesture/settings")
+async def gesture_settings(request: Request) -> dict[str, object]:
+    """Toggle/tune gesture control — same validation rules as the tool."""
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        return {"settings": gesture_controls.update_settings(payload),
+                "state": gesture_controls.state()}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.websocket("/ws/gesture")
+async def gesture_socket(browser: WebSocket) -> None:
+    """Fan out classified gesture events to the kiosk UI."""
+    await browser.accept()
+    try:
+        await send_json(browser, "gesture_status", **gesture_controls.status())
+        async for event in gesture_controls.events():
+            await send_json(browser, "gesture", **event)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.exception("gesture stream failed")
+        with suppress(Exception):
+            await send_json(browser, "gesture_error", message=str(exc))
 
 
 @app.websocket("/ws/habits")

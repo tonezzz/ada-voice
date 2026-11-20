@@ -1,0 +1,80 @@
+# SSOT Job: YOLO-pose gesture controls on the ada-pi desk companion.
+# Card: rebuild-gesture-controls-using-yolo-190356 (chaba kanban, ref
+# OPS-0683). Dispatch 20261120-213624-rebuild-gesture-controls-using,
+# runner tony-omen. Second dispatch attempt — the 20261117 run died at
+# service start (exit=1 in ~3s, no branch left behind).
+
+title: >-
+  Desk-companion gesture controls rebuilt on the shared YOLO-pose stream
+  — wave-to-arm, swipe navigation, palm-hold confirm, drop dismiss
+subtitle: >-
+  Replaces the old ada_v2 MediaPipe HandLandmarker controls. YOLOv8-pose
+  already emits wrist landmarks (Hailo yolov8s_pose, CPU MoveNet
+  fallback), so the pointer-class UX the kb-system assessment ruled out
+  for box-shaped YOLO is not needed — discrete room-scale gestures are.
+
+planning:
+  goal: |
+    The card: "rebuild gesture controls using YOLO on the desk
+    companion". Tony's answered decision pinned the ada-pi repo on
+    idc02. The desk companion is the kiosk face UI (frontend/) served by
+    backend/main.py, and the shared PoseService already runs YOLO-pose
+    wrist keypoints at ~2fps — the entire detection layer the rebuild
+    needs exists; what was missing is the gesture classifier, the fan-out
+    to the kiosk, and the Ada tool.
+  scope: |
+    Delivered:
+      - backend/gesture_controls.py — GestureClassifier (pure state
+        machine over wrist tracks) + GestureControlService (consumes
+        pose_service.results(), fans events out via condition-var
+        events()). Gestures: wave->wake/arms, swipe->nav (direction,
+        mirror-aware), palm_hold->confirm, drop->dismiss+disarm.
+        False-positive guards: require_arm (wave-to-wake, armed_ttl 12s),
+        arm_grace (post-wave settle), per-gesture cooldown, palm_hold
+        non-refire lock until the hand lowers, min-score gating, drop
+        disarm.
+      - backend/main.py — service lifecycle + GET /api/gesture/status,
+        PATCH /api/gesture/settings (validated, persisted in
+        posture_store monitor_state), WS /ws/gesture (gesture_status
+        snapshot then gesture events).
+      - backend/tools.d/gesture_controls.py + manifest + tool_guide —
+        status|enable|disable for voice control; active_service() seam
+        reports honest "not running" on camera-less instances.
+      - frontend — #gesture-panel (state, enabled + wave-to-activate
+        switches, gesture map, last event), #gesture-indicator toast,
+        always-on /ws/gesture client; nav swipes wrap-cycle the kiosk
+        panels (habits/home/pose/detect/hardware), confirm opens
+        settings, dismiss closes everything.
+      - tests/test_gesture_controls.py — 16 tests (classifier geometry,
+        arming/cooldowns/locks, service fan-out, settings persistence).
+      - tests/scenarios-live/gesture_controls.yaml — smoke tier; asserts
+        routing to gesture_controls (not vcast_gesture).
+      - ssot.tool-surface.yml count_cap 114->115 (+gesture_controls).
+    Explicitly NOT done:
+      - Pointer-class controls (pinch-click/fist-drag cursor UX) — the
+        sibling chaba card OPS-0440 covered the YOLO-bbox pointer
+        experiment; the kiosk face UI has no cursor surface.
+      - vcast display 'hand' mode — different codebase (input-bridge on
+        tony-dell).
+      - deploy/restart — deploy-ada.sh on idc03 is the only path.
+  success_criteria:
+    - 'unit suite: 16/16 gesture tests + full pytest 1870 green'
+    - 'tool-lint clean (count_cap bumped deliberately in-commit)'
+    - 'on device: wave -> gesture_indicator toast + panels cycle on
+      swipes; palm-hold opens settings; drop closes all'
+verification:
+  commands:
+    - python3 -m pytest tests/test_gesture_controls.py -x -q
+    - python3 scripts/tool-lint.py
+    - python3 -m pytest tests/ -x -q
+  results:
+    - '16 gesture tests pass; 1870 passed suite-wide (7 skipped)'
+    - 'tool-lint: clean (60 pre-existing warnings)'
+lessons:
+  - 'wave reversal counting must anchor on each leg''s extremum, not the
+    window''s first sample — and must only count legs formed after the
+    previous wave fire or the fired oscillation re-qualifies forever'
+  - 'post-wave grace (~1s) is required or the settle-back travel reads
+    as a navigation swipe'
+  - 'window-coverage hold detection saturates below threshold at 2fps —
+    an anchor timestamp (hold_since) is frame-rate independent'

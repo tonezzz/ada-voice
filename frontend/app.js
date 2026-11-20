@@ -72,6 +72,13 @@ const habitsEmpty = document.querySelector("#habits-empty");
 const officeLightsMonitor = document.querySelector("#office-lights-monitor");
 const homePanel = document.querySelector("#home-panel");
 const homeToggle = document.querySelector("#home-toggle");
+const gesturePanel = document.querySelector("#gesture-panel");
+const gestureToggle = document.querySelector("#gesture-toggle");
+const gestureState = document.querySelector("#gesture-state");
+const gestureEnabled = document.querySelector("#gesture-enabled");
+const gestureRequireArm = document.querySelector("#gesture-require-arm");
+const gestureLast = document.querySelector("#gesture-last");
+const gestureIndicator = document.querySelector("#gesture-indicator");
 const homeDevices = document.querySelector("#home-devices");
 const homeStatus = document.querySelector("#home-status");
 const habitSignal = document.querySelector("#habit-signal");
@@ -87,6 +94,8 @@ let detectSocket = null;
 let detectionResult = null;
 let detectionFrameCount = 0;
 let detectionFpsStarted = 0;
+let gestureSocket = null;
+let gestureIndicatorTimer = 0;
 let habitSocket = null;
 let lastPostureEventId = null;
 let reminderTimer = null;
@@ -113,7 +122,7 @@ let speechBelowFrames = 0;
 let microphoneNoiseFloor = .004;
 
 function setSettingsOpen(open) {
-  if (open) { closeHabits(); closeHabitSettings(); closeHome(); }
+  if (open) { closeHabits(); closeHabitSettings(); closeHome(); closeGesturePanel(); }
   settingsPanel.classList.toggle("open", open);
   settingsPanel.setAttribute("aria-hidden", String(!open));
   settingsToggle.setAttribute("aria-expanded", String(open));
@@ -123,6 +132,7 @@ function setSettingsOpen(open) {
 function openHabitSettings() {
   closePose();
   closeDetect();
+  closeGesturePanel();
   closeHabits();
   closeHome();
   setHardwareOpen(false);
@@ -286,6 +296,7 @@ async function refreshHabits() {
 function openHabits() {
   closePose();
   closeDetect();
+  closeGesturePanel();
   setHardwareOpen(false);
   setSettingsOpen(false);
   closeHabitSettings();
@@ -332,6 +343,7 @@ function closeHome() {
 function openHome() {
   closePose();
   closeDetect();
+  closeGesturePanel();
   closeHabits();
   closeHabitSettings();
   setHardwareOpen(false);
@@ -608,6 +620,7 @@ function drawPoseFrame(bitmap) {
 function openPose() {
   if (poseSocket) return;
   closeDetect();
+  closeGesturePanel();
   setHardwareOpen(false);
   closeHabits();
   closeHabitSettings();
@@ -695,6 +708,7 @@ function drawDetectionFrame(bitmap) {
 function openDetect() {
   if (detectSocket) return;
   closePose();
+  closeGesturePanel();
   setHardwareOpen(false);
   closeHabits();
   closeHabitSettings();
@@ -733,6 +747,141 @@ function closeDetect() {
   detectPanel.classList.remove("open");
   detectPanel.setAttribute("aria-hidden", "true");
   detectToggle.setAttribute("aria-expanded", "false");
+}
+
+// --- YOLO-pose gesture controls -------------------------------------------
+// The backend classifier turns wrist trajectories from the shared pose
+// stream into {gesture, action, direction} events on /ws/gesture:
+// wave arms the controller, swipe cycles panels, palm-hold opens
+// settings, drop dismisses everything.
+const GESTURE_PANEL_STOPS = ["habits", "home", "pose", "detect", "hardware"];
+const gesturePanelOpeners = {
+  habits: () => openHabits(),
+  home: () => openHome(),
+  pose: () => openPose(),
+  detect: () => openDetect(),
+  hardware: () => setHardwareOpen(true),
+};
+
+function openGesturePanel() {
+  closePose();
+  closeDetect();
+  setHardwareOpen(false);
+  closeHabits();
+  closeHabitSettings();
+  closeHome();
+  setSettingsOpen(false);
+  gesturePanel.classList.add("open");
+  gesturePanel.setAttribute("aria-hidden", "false");
+  gestureToggle.setAttribute("aria-expanded", "true");
+  refreshGestureStatus();
+}
+
+function closeGesturePanel() {
+  gesturePanel.classList.remove("open");
+  gesturePanel.setAttribute("aria-hidden", "true");
+  gestureToggle.setAttribute("aria-expanded", "false");
+}
+
+function closeAllPanels() {
+  closePose();
+  closeDetect();
+  setHardwareOpen(false);
+  closeHabits();
+  closeHabitSettings();
+  closeHome();
+  setSettingsOpen(false);
+  closeGesturePanel();
+}
+
+function currentGestureStop() {
+  if (habitsPanel.classList.contains("open")) return "habits";
+  if (homePanel.classList.contains("open")) return "home";
+  if (posePanel.classList.contains("open")) return "pose";
+  if (detectPanel.classList.contains("open")) return "detect";
+  if (hardwarePanel.classList.contains("open")) return "hardware";
+  return null;
+}
+
+function cycleGesturePanels(direction) {
+  const stops = GESTURE_PANEL_STOPS;
+  const step = direction === "left" ? -1 : 1;
+  const current = currentGestureStop();
+  const index = current ? stops.indexOf(current) : (step > 0 ? -1 : 0);
+  const next = ((index + step) % stops.length + stops.length) % stops.length;
+  closeAllPanels();
+  gesturePanelOpeners[stops[next]]();
+}
+
+function showGestureIndicator(text) {
+  gestureIndicator.textContent = text;
+  gestureIndicator.classList.add("show");
+  gestureIndicator.setAttribute("aria-hidden", "false");
+  clearTimeout(gestureIndicatorTimer);
+  gestureIndicatorTimer = setTimeout(() => {
+    gestureIndicator.classList.remove("show");
+    gestureIndicator.setAttribute("aria-hidden", "true");
+  }, 2200);
+}
+
+function handleGestureEvent(event) {
+  const labels = {
+    wake: "Wave — gestures armed",
+    nav: `Swipe ${event.direction || ""} — panels`,
+    confirm: "Hand held — settings",
+    dismiss: "Hand dropped — closed",
+  };
+  showGestureIndicator(labels[event.action] || event.gesture || "Gesture");
+  gestureLast.textContent = `Last: ${event.gesture} → ${event.action}${event.direction ? ` ${event.direction}` : ""}`;
+  if (event.action === "nav") cycleGesturePanels(event.direction === "left" ? "left" : "right");
+  else if (event.action === "confirm") setSettingsOpen(true);
+  else if (event.action === "dismiss") closeAllPanels();
+}
+
+function renderGestureStatus(status) {
+  if (!status || typeof status !== "object") return;
+  if (status.settings) {
+    gestureEnabled.checked = !!status.settings.enabled;
+    gestureRequireArm.checked = !!status.settings.require_arm;
+  }
+  const state = status.state || "unknown";
+  gestureState.textContent = `Gesture control · ${state}${status.occupied === false ? " · no one at the desk" : ""}`;
+  if (status.last_event) {
+    gestureLast.textContent = `Last: ${status.last_event.gesture} → ${status.last_event.action}`;
+  }
+}
+
+async function refreshGestureStatus() {
+  try {
+    const response = await fetch("/api/gesture/status", { cache: "no-store" });
+    renderGestureStatus(await response.json());
+  } catch (error) {
+    gestureState.textContent = "Gesture service unavailable";
+  }
+}
+
+async function updateGestureSettings(patch) {
+  const response = await fetch("/api/gesture/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const result = await response.json();
+  if (result.settings) renderGestureStatus({ settings: result.settings, state: result.state });
+}
+
+function connectGestureSocket() {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  gestureSocket = new WebSocket(`${scheme}://${location.host}/ws/gesture`);
+  gestureSocket.onmessage = event => {
+    const message = JSON.parse(event.data);
+    if (message.type === "gesture") handleGestureEvent(message);
+    else if (message.type === "gesture_status") renderGestureStatus(message);
+  };
+  gestureSocket.onclose = () => {
+    gestureSocket = null;
+    setTimeout(connectGestureSocket, 3000);
+  };
 }
 
 const metricGroups = [
@@ -805,6 +954,7 @@ function setHardwareOpen(open) {
   if (open) {
     closePose();
     closeDetect();
+    closeGesturePanel();
     closeHabits();
     closeHabitSettings();
     closeHome();
@@ -1177,6 +1327,10 @@ exitButton.addEventListener("click", async () => {
 hardwareToggle.addEventListener("click", () => setHardwareOpen(true));
 poseToggle.addEventListener("click", openPose);
 detectToggle.addEventListener("click", openDetect);
+gestureToggle.addEventListener("click", openGesturePanel);
+document.querySelector("#gesture-close").addEventListener("click", closeGesturePanel);
+gestureEnabled.addEventListener("change", event => updateGestureSettings({ enabled: event.target.checked }).catch(() => { gestureState.textContent = "Could not update gesture settings"; }));
+gestureRequireArm.addEventListener("change", event => updateGestureSettings({ require_arm: event.target.checked }).catch(() => { gestureState.textContent = "Could not update gesture settings"; }));
 settingsToggle.addEventListener("click", () => {
   const opening = !settingsPanel.classList.contains("open");
   if (opening) {
@@ -1250,7 +1404,7 @@ habitSignal.addEventListener("pointerdown", event => { if (event.target === habi
 
 // Clicking the face is only an outside-click action for the Settings drawer.
 faceStage.addEventListener("pointerdown", (event) => {
-  if (event.target.closest("#settings-toggle, #settings-panel, #hardware-panel, #pose-panel, #detect-panel, #habits-panel, #habit-settings-panel, #home-panel, #habit-signal")) return;
+  if (event.target.closest("#settings-toggle, #settings-panel, #hardware-panel, #pose-panel, #detect-panel, #gesture-panel, #habits-panel, #habit-settings-panel, #home-panel, #habit-signal")) return;
   if (settingsPanel.classList.contains("open")) {
     setSettingsOpen(false);
     return;
@@ -1260,6 +1414,7 @@ faceStage.addEventListener("pointerdown", (event) => {
 refreshPosture();
 refreshAdaSettings();
 connectHabitSocket();
+connectGestureSocket();
 // Chromium kiosk is launched with autoplay and microphone permission enabled,
 // so Ada can animate, connect, and greet without requiring a screen tap.
 window.idleFace?.setConnecting(true);

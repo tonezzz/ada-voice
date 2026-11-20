@@ -176,6 +176,13 @@ vcast_gesture: >-
   capable displays, 'off' stops. The display reports real capability in
   its state — a denied camera or unbuilt mode answers honestly.
 
+gesture_controls: >-
+  Desk-companion gesture nav on the shared YOLO-pose stream.
+  action='status' reports state + counters; 'enable'/'disable' toggle.
+  Gesture map: wave arms the controller, swipe cycles kiosk panels,
+  palm-hold opens settings, drop dismisses. Distinct from vcast_gesture
+  (remote cast displays).
+
 cctv_wall: >-
   Periodic-thumbnail grid for a camera zone on a vcast display — stills
   refreshed in the background, not live video. Zones: 'zone-a' (estate

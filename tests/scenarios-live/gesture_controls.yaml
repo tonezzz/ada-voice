@@ -1,0 +1,45 @@
+# gesture_controls — the desk companion's YOLO-pose gesture navigation
+# (card OPS-0683). Ada must route "is gesture control on" / "turn it
+# off/on" to the gesture_controls tool — never to vcast_gesture, which
+# drives remote cast displays, not the companion itself.
+#
+# Read-mostly: enable/disable toggles a local, instantly reversible UX
+# feature (policy: read) — smoke tier, no cleanup needed.
+name: gesture-controls
+tier: smoke
+transport: text
+turns:
+  - user: "Is hand gesture control enabled on this device right now?"
+    expect:
+      calls_any: [gesture_controls]
+      response_nonempty: true
+      no_calls_except:
+        - set_facial_expression
+        - gesture_controls
+        - ada_memory_search
+        - ada_session_recall
+      timeout_s: 60
+      settle_s: 6
+
+  - user: "Turn gesture control off for me."
+    expect:
+      calls_any: [gesture_controls]
+      response_nonempty: true
+      no_calls_except:
+        - set_facial_expression
+        - gesture_controls
+        - ada_memory_search
+      timeout_s: 60
+      settle_s: 6
+
+  - user: "Actually turn it back on — and remind me what the hand gestures do."
+    expect:
+      calls_any: [gesture_controls]
+      response_nonempty: true
+      response_contains_any: ["wave", "swipe", "hold", "drop", "gesture", "มือ"]
+      no_calls_except:
+        - set_facial_expression
+        - gesture_controls
+        - ada_memory_search
+      timeout_s: 60
+      settle_s: 6
