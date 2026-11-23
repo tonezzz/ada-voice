@@ -856,7 +856,8 @@ async function uploadDoc(file) {
       `[document uploaded via PWA] file=${file.name} intake_key=${out.key} ` +
       `type=${out.doc_type} size=${w}x${h}` +
       (warn ? ` warnings=${out.warnings.join("; ")}` : "") +
-      " — ask what to do with it (archive/print); the intake key is held in RAM only.");
+      " — ask what to do with it (archive/print); rendered results are " +
+      "held in RAM only, the original file is saved on disk.");
     flushDocNotes();
   } catch (e) {
     logLine(`📎 upload failed: ${e.message || e}`, "system");

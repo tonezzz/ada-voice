@@ -1,0 +1,97 @@
+# SSOT Job: PWA doc intake persists raw uploads before RAM-held result.
+# Card: pwa-intake-persist-uploads (chaba kanban, ref ADA-0589).
+# Dispatch 20261123-145126-goal-fix-pwa-document-intake-d, runner
+# tony-omen (attempt 2 — attempt 1 on 2026-11-17 died at the devin
+# process level in <2min, no code landed; branch never merged).
+
+title: >-
+  Document intake writes the raw upload to disk before any RAM
+  processing — restart no longer loses the original
+subtitle: >-
+  /api/documents/intake held everything in document_check._held
+  (RAM-only, cap 20): Tony lost 2 UPS photos (Oct 10) when the
+  process restarted before archive ran. intake() now persists the
+  raw blob + a LINE_MEDIA-shaped manifest.jsonl line first; held
+  results keep their RAM-only contract for preview/pdf.
+
+planning:
+  goal: |
+    Eliminate the PWA document-intake data-loss window: the raw
+    upload must hit durable storage before the RAM-held result is
+    produced, so a crash/restart mid-intake or before
+    ada_doc_archive runs cannot lose the user's file. Preserve the
+    existing intake pathways (REST endpoint, ToolRunner held-key
+    resolution, media-inbox consumption).
+  scope: |
+    Delivered:
+      - backend/document_check.py persist_upload() — writes raw
+        bytes to $ADA_DOC_INTAKE_DIR (default
+        ~/.local/share/ada/intake) as <ts>-<stem>-<sha1>.<ext>
+        (key tail) via tmp+os.replace, then appends a
+        manifest.jsonl line in the LINE_MEDIA shape (sha256, mime,
+        path, intake_key) so a media-inbox lane can pick it up.
+      - DocumentCheckEngine.intake() persists FIRST (before
+        Image.open), computes the intake key up-front so the disk
+        file pairs with the key, records source_path on
+        DocumentResult.to_dict() and in held meta. A persist
+        failure warns loudly (result.warnings) but never crashes
+        intake.
+      - Bounded retention: prunes oldest files past
+        $ADA_DOC_INTAKE_KEEP (default 200).
+      - pwa/app.js doc-note text now says the original is saved on
+        disk (rendered results remain RAM-only).
+    Not in scope (deliberate):
+      - ada_doc_archive still ships the enhanced archive_jpg, not
+        the raw original — source_path in held meta is the hook
+        for a later "archive originals" lane.
+      - media-inbox consumer for the new manifest is not built
+        here; the manifest shape matches LINE_MEDIA so an
+        existing/future lane can read it.
+
+decisions:
+  - persist-inside-engine:
+      why: >-
+        engine().intake() is the single funnel (REST, tools,
+        future callers) — persisting inside intake() covers every
+        pathway without touching pwa_server's endpoint logic.
+      alt: >-
+        persist in documents_intake (pwa_server) only — misses
+        non-REST callers and splits the contract.
+  - warn-dont-fail-on-persist-error:
+      why: >-
+        card constraint: "without crashing the intake flow". An
+        unwritable dir degrades to a visible warning rather than a
+        5xx; the file-loss risk returns but the feature stays up.
+  - tmp-then-replace:
+      why: >-
+        a reader (media-inbox, archive retry) must never see a
+        half-written upload; os.replace is atomic on POSIX.
+
+verification:
+  automated:
+    - >-
+      tests/test_document_check.py +4 tests:
+      test_intake_persists_original_to_disk (byte-identical file,
+      manifest line, held meta),
+      test_intake_persist_failure_does_not_crash,
+      test_intake_bad_bytes_still_persisted,
+      test_intake_prunes_to_keep_limit — 19/19 pass.
+    - 'python3 scripts/tool-lint.py — clean'
+    - 'python3 -m pytest tests/ -x -q — full suite green'
+  manual:
+    - >-
+      Instrumented intake run (measure() spy): the raw file and
+      manifest.jsonl exist on disk mid-pipeline, before processing
+      completes; bytes byte-identical to the upload.
+
+env:
+  ADA_DOC_INTAKE_DIR: "~/.local/share/ada/intake (default)"
+  ADA_DOC_INTAKE_KEEP: "200 (default)"
+
+refs:
+  card: pwa-intake-persist-uploads
+  ref: ADA-0589
+  files:
+    - backend/document_check.py
+    - pwa/app.js
+    - tests/test_document_check.py
