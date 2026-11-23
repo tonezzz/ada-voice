@@ -27,7 +27,10 @@ devices:
     verified_via: "ipptool get-printer-attributes from tony-dell"
     stale_targets:
       - target: "192.168.2.75"
-        note: "wireless repeater — HP_DeskJet_2700 queue still points here (broken)"
+        note: "wireless repeater — HP_DeskJet_2700 pointed here until the
+               2026-11-23 retarget (helper set-queue-uri after live IPP
+               verify; Tony approved via board request
+               ipp-identity-verified-2026-11-23-via-ton-f51f78)"
       - target: "192.168.2.78"
         note: "superseded DHCP lease — printer observed here before .92; host now down"
       - target: "192.168.2.74"
@@ -41,10 +44,12 @@ queues:
     name: "HP_DeskJet_2700"
     device: "hp-deskjet-2700"
     default_queue: true          # lpstat -d on tony-dell
-    device_uri_observed: "ipp://192.168.2.75/ipp/print"
-    status: "stale-target"       # retarget to the verified device pending
-                                 # Tony's queue-reconfiguration approval
-                                 # (helper op set-queue-uri, registry update)
+    device_uri_observed: "ipp://192.168.2.92/ipp/print"
+    status: "verified"           # retargeted 2026-11-23 from the stale
+                                 # .75 repeater via helper set-queue-uri —
+                                 # live IPP probe matched serial/uuid before
+                                 # lpadmin ran; post-change status shows
+                                 # probe ok, idle, accepting.
   - host: "tony-dell"
     name: "HP-2777"
     device: "hp-deskjet-2700"
