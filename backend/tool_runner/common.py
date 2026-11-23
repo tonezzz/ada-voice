@@ -140,6 +140,14 @@ DOC_CONFIRMED_TOOLS = {"docs"}
 DOC_TOOLS = {"docs"}
 DOC_BANK = "documents"
 
+# Printer diagnostics + bounded repair (ada-printer-diagnostics-safe-
+# repair, 2026-11-23): status/jobs/verify are free reads; action='repair'
+# mutates exactly one CUPS job (release/retry/cancel — the allowlist in
+# tool_runner/printer.py) and needs the confirmed=true/bound-token gate
+# like docs action=print. The whole tool stays owner-tier — it probes
+# LAN devices and can mutate the queue, neither guest-safe.
+PRINTER_TOOLS = {"printer"}
+
 # Upper bound for list_home_devices — an unbounded HA entity dump stays in
 # the live-voice context for the rest of the session (see the 2026-10-01
 # 1M-token tool storm). search_home_devices is the precise path.
@@ -172,6 +180,7 @@ _IDENTITY_UNSET = object()
 SECONDARY_BLOCKED_TOOLS = (
     CONTROL_TOOLS | MEMORY_WRITE_TOOLS | CALENDAR_WRITE_TOOLS
     | CMS_WRITE_TOOLS | DEVIN_CONFIRMED_TOOLS | DOC_TOOLS | DRIVE_TOOLS
+    | PRINTER_TOOLS
     | {
         "ada_enroll_speaker", "ada_memory_search",
         # tools-merge-ha: ha_confidence absorbed the confidence pair; the
@@ -202,6 +211,7 @@ _SECONDARY_BLOCKED_GROUPS = {
     "cms_write": CMS_WRITE_TOOLS,
     "devin_confirmed": DEVIN_CONFIRMED_TOOLS,
     "doc": DOC_TOOLS | DRIVE_TOOLS,
+    "printer": PRINTER_TOOLS,
 }
 
 
@@ -354,7 +364,7 @@ _CONFIRM_AUDIT_MAX = 200
 CONFIRM_GATED_TOOLS = (
     CONTROL_TOOLS | MEMORY_WRITE_TOOLS | CALENDAR_WRITE_TOOLS
     | CMS_WRITE_TOOLS | DEVIN_CONFIRMED_TOOLS | CAPTURE_CONFIRMED_TOOLS
-    | DOC_CONFIRMED_TOOLS | DRIVE_CONFIRMED_TOOLS
+    | DOC_CONFIRMED_TOOLS | DRIVE_CONFIRMED_TOOLS | PRINTER_TOOLS
 )
 
 # Infra-class failure markers: transport errors where the action provably

@@ -19,7 +19,7 @@
 #                   NOT join this list (lint fails) — write a scenario for
 #                   the tool or move an existing entry out when it gains one.
 
-count_cap: 114          # 103 builtin + 11 tools.d (+wiki_read/wiki_search, card ada-tools-wiki-read-wiki-search 2026-11-20)
+count_cap: 115          # 103 builtin + 11 tools.d (+wiki_read/wiki_search 2026-11-20; +printer builtin, card ada-printer-diagnostics-safe-repair 2026-11-23)
 target_count: 38        # spec: docs/assessments/tool-consolidation-spec-2026-10-04.md
 # Description-size contract (card ada-tools-desc-slim, 2026-10-05): the
 # shipped schema description is a <=2-line routing blurb — operational

@@ -1,0 +1,21 @@
+# ada-printer-diagnostics-safe-repair (2026-11-23): the printer tool's
+# read-only surface — status/jobs/verify must route without any
+# confirmation ask; repair stays confirm-gated behind unit tests in
+# tests/test_printer.py (a live repair would mutate the real queue).
+name: printer_diag
+tier: full
+turns:
+  - user: >-
+      Check the printer for me — is it reachable, what's its state, and
+      is anything queued?
+    expect:
+      calls_any: [printer]
+      timeout_s: 90
+      settle_s: 10
+  - user: >-
+      How much ink is left, and is that queue actually pointing at the
+      right printer?
+    expect:
+      calls_any: [printer]
+      timeout_s: 90
+      settle_s: 10

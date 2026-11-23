@@ -371,6 +371,7 @@ _CLAIM_BACKING_ACTIONS = {
     "ada_ops": frozenset({"outcome"}),
     "cms_edit": frozenset({"note", "delete", "automate", "edit"}),
     "docs": frozenset({"archive", "print"}),
+    "printer": frozenset({"repair"}),
     "drive": frozenset({"update"}),
     "yt": frozenset({"cast", "stop"}),
     "ada_persona": frozenset({"set", "reset", "set_voice"}),
@@ -2791,6 +2792,54 @@ def _builtin_declarations() -> list[dict[str, Any]]:
                     "confirmed": {
                         "type": "boolean",
                         "description": "update: required; set true only after explicit user confirmation.",
+                    },
+                    "confirm_token": {
+                        "type": "string",
+                        "description": "Bound confirmation token returned by a denied call; after the user confirms, replay the same call with it. Single use, expires in 120s.",
+                    },
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        }, {
+            # ada-printer-diagnostics-safe-repair (2026-11-23): read-only
+            # CUPS diagnostics + one confirmed per-job repair op through
+            # the print host's narrow helper (scripts/ada-cups-helper.py)
+            # — never an arbitrary command channel.
+            "name": "printer",
+            "description": (
+                "Printer/CUPS diagnostics and safe repair — action='status'|"
+                "'jobs'|'verify' are read-only; 'repair' releases|retries|"
+                "cancels ONE queued job and is confirmed-gated."
+            ),
+            "parameters_json_schema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "jobs", "verify", "repair"],
+                        "description": "status|jobs|verify|repair — which printer operation.",
+                    },
+                    "queue": {
+                        "type": "string",
+                        "description": "CUPS queue name (default: the configured DeskJet queue).",
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "repair: one queued job id, e.g. 'HP_DeskJet_2700-42' or '42'.",
+                    },
+                    "op": {
+                        "type": "string",
+                        "enum": ["release", "retry", "cancel"],
+                        "description": "repair: release a held job | retry a stopped job | cancel that one job — never all jobs.",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "verify: IP or hostname to probe over IPP for device identity.",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "repair: required; set true only after explicit user confirmation.",
                     },
                     "confirm_token": {
                         "type": "string",
@@ -5532,6 +5581,11 @@ class GeminiLiveProvider(RealtimeProvider):
                                 call.name == "docs" and str(
                                     _cargs_probe.get("action") or "")
                                 .strip().lower() in ("archive", "print")) or (
+                                # printer's repair seat mutates the CUPS
+                                # queue — status/jobs/verify are reads.
+                                call.name == "printer" and str(
+                                    _cargs_probe.get("action") or "")
+                                .strip().lower() == "repair") or (
                                 # ada_set_voice's old seat: persona's
                                 # set_voice drops the session to reconnect.
                                 call.name == "ada_persona"

@@ -20,6 +20,7 @@ from .gev import GevMixin
 from .ha import HaMixin
 from .memory import MemoryMixin
 from .meta import MetaMixin
+from .printer import PrinterMixin
 from .screens import ScreensMixin
 from .web import WebMixin
 
@@ -28,6 +29,7 @@ class ToolRunner(
     DevinMixin,
     DocsDriveMixin,
     MetaMixin,
+    PrinterMixin,
     CalendarMixin,
     HaMixin,
     WebMixin,
@@ -511,6 +513,10 @@ class ToolRunner(
                 self._check_cms_write_allowed(name, call_args, *confirm)
             elif name in DEVIN_CONFIRMED_TOOLS:
                 self._check_devin_confirmed(name, call_args, *confirm)
+            elif name in PRINTER_TOOLS:
+                # printer: status/jobs/verify are free reads; only
+                # action='repair' takes the bound-confirmation gate.
+                self._check_printer_confirmed(name, call_args, *confirm)
             elif dyn_spec is not None:
                 self._check_dynamic_allowed(name, dyn_spec, call_args, *confirm)
             elif name in DOC_TOOLS:
@@ -609,7 +615,7 @@ class ToolRunner(
     # excluded — noisy, and already tracked elsewhere.
     _CHANGE_LOG_TOOLS = {
         "cms_publish_page", "cms_edit", "docs", "ada_forget",
-        "ha_confidence", "devin", "devin_read",
+        "ha_confidence", "devin", "devin_read", "printer",
     }
 
     def _log_change_request(self, name: str, args: dict[str, Any],
@@ -623,6 +629,11 @@ class ToolRunner(
         # state change worth logging, not the read actions.
         if (name == "docs" and str(args.get("action") or "").lower()
                 != "archive"):
+            return
+        # printer: only action='repair' mutates state — status/jobs/
+        # verify are reads and must not log a change-request.
+        if (name == "printer" and str(args.get("action") or "").lower()
+                != "repair"):
             return
         # ha_confidence holds the absorbed ada_ha_set_device_confidence
         # seat — reads (no status/safety) aren't changes.

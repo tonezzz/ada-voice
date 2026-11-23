@@ -511,6 +511,19 @@ docs: >-
   true_size_mm='85.6x54' for ID-1, else fit-to-A4). archive/print
   confirmed-gated. Absorbs ada_doc_search/get/archive/print.
 
+printer: >-
+  HP DeskJet / CUPS surface (tony-dell print host, narrow helper — not a
+  shell). 'status' queues + device identity, reachability, state,
+  accepting, queued ids, ink levels — queue jobs carry origin='cups',
+  device-side jobs origin='printer-internal'. 'jobs' just the job list.
+  'verify' IPP identity probe of target= (serial/uuid/dns-sd) — run it
+  before trusting any queue target or after suspected IP drift; the
+  registry verdicts in status flag stale targets by name. 'repair'
+  op=release|retry|cancel ONE job_id= in queue= — confirmed-gated;
+  re-reads the queue after acting and returns an audit block. Never
+  cancel-all, never a test page, never a queue retarget — those need
+  the operator path.
+
 drive: >-
   'search' files by name/content (query=; mime= narrows e.g. 'image/') —
   for archived deed/ID sets use docs action='search' instead. 'get'
