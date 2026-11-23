@@ -2,7 +2,10 @@
 # Card: ada-printer-diagnostics-safe-repair (chaba kanban, ref ADA-1049).
 # Dispatch 20261123-105454-use-the-existing-ada-document-, runner idc02
 # (attempt 3 — attempts 1-2 on tony-omen died on provider exits, no
-# code was ever pushed).
+# code was ever pushed). Dispatch 20261123-140159, runner idc02
+# (attempt 4) executed the approved queue retarget — Tony answered
+# "proceed" on board request ipp-identity-verified-2026-11-23-via-ton-
+# f51f78 at 13:59.
 
 title: >-
   Ada diagnoses the HP DeskJet queue and repairs one verified job at a
@@ -13,7 +16,8 @@ subtitle: >-
   confirmation gate. Live verification on tony-dell caught the card's
   own intel stale: the printer is at 192.168.2.92 (not .78) with UUID
   ...b906fe (card's ...b90fe6 is a transposition), and the default
-  HP_DeskJet_2700 queue still targets the .75 wireless repeater.
+  HP_DeskJet_2700 queue targeted the .75 wireless repeater until the
+  approved 2026-11-23 retarget to .92.
 
 planning:
   goal: |
@@ -54,10 +58,6 @@ planning:
         count_cap 114->115, tests/scenarios-live/printer_diag.yaml,
         tests/test_printer.py (25 tests)
     Explicitly NOT done:
-      - lpadmin retarget of HP_DeskJet_2700 .75->.92 — the verified
-        path ships (set-queue-uri + expectation check) but the live
-        change is gated on a separate Tony approval (board request
-        raised); HP-2777 dnssd queue already follows the printer
       - production deploy — staging verification on idc02 only, per
         AGENTS.md deploy flow
       - arbitrary job ops — resume/retry/cancel are the whole
@@ -131,11 +131,18 @@ processing:
       label: "board + retarget gate"
       status: done
       notes: >-
-        progress comment posted; request raised for explicit approval
-        to retarget HP_DeskJet_2700 -> ipp://192.168.2.92/ipp/print
-        via set-queue-uri with --expect-serial CN33BDZ0KS
-        --expect-uuid ...b906fe. No reply by session end; no lpadmin
-        run.
+        request raised for explicit approval; Tony answered "proceed"
+        at 13:59. Attempt 4 (dispatch 140159): re-verified identity
+        live at .92 (serial CN33BDZ0KS, uuid ...b906fe, idle/
+        accepting, ink 70/40), then ran helper set-queue-uri
+        HP_DeskJet_2700 ipp://192.168.2.92/ipp/print with
+        --expect-serial/--expect-uuid — the helper re-probed, matched,
+        lpadmin applied, device_uri_now confirmed .92. Post-change
+        status: all three queues probe the verified device; default
+        HP_DeskJet_2700 idle + accepting, no stale_target drift;
+        HP_DeskJet_2700_series_05C516 (CUPS-auto driverless) currently
+        stopped/not-accepting — cosmetic, it re-enables on use.
+        Registry updated to match.
 
 invoke:
   tool:
@@ -163,25 +170,26 @@ verification:
   live_read: >-
     ssh tony-dell python3 ~/bin/ada-cups-helper.py status ->
     HP-2777 dnssd-resolved_ip 192.168.2.92, uuid ...b906fe, markers
-    70/40; HP_DeskJet_2700 target .75 'Host is down';
+    70/40; HP_DeskJet_2700 now ipp://192.168.2.92/ipp/print (probe ok,
+    serial/uuid match, idle, accepting — retargeted 2026-11-23);
     HP_DeskJet_2700_series_05C516 (CUPS-auto driverless,
     ipps://HPE073E705C516.local) resolves -> .92 match
   live_repair: >-
     held job on dead queue: release -> processing, cancel -> removed;
     jobs HP_DeskJet_2700 -> []
   registry_eval: >-
-    evaluate_status: HP-2777 match/follows_mdns; HP_DeskJet_2700
-    unreachable/stale_target + remediation hint (operator path only)
+    evaluate_status pre-retarget: HP-2777 match/follows_mdns;
+    HP_DeskJet_2700 unreachable/stale_target + remediation hint.
+    Post-retarget (2026-11-23): all three queues probe the verified
+    device — no drift flags.
 
 followups:
   - >-
-    On Tony approval: install helper at a stable path on tony-dell,
-    then `python3 ada-cups-helper.py set-queue-uri HP_DeskJet_2700
-    ipp://192.168.2.92/ipp/print --expect-serial CN33BDZ0KS
-    --expect-uuid 5ba42c21-ae68-7f6d-830e-600ee5b906fe`; re-run
-    status to confirm match. Registry current_ip is informational
-    only — verify is the gate.
+    Deploy to idc03 via deploy-ada.sh once staging passes; consider
+    pointing docs(action=print) DOC_PRINT_QUEUE at HP-2777 (dnssd
+    follows the printer across DHCP — static ipp:// queues are what
+    drift, as .75 proved)
   - >-
-    Deploy to idc03 via deploy-ada.sh once staging passes + retarget
-    decided; consider pointing docs(action=print) DOC_PRINT_QUEUE at
-    HP-2777 (dnssd follows the printer across DHCP)
+    If the printer's DHCP lease moves again: `printer action=verify
+    target=<new-ip>` or helper verify --ip, then set-queue-uri with
+    --expect-serial/--expect-uuid — never retarget on IP alone
