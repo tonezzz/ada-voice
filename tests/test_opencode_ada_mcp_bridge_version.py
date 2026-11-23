@@ -1,6 +1,7 @@
 """Unit tests for opencode/ada_mcp.py BRIDGE_VERSION + response envelope."""
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +50,51 @@ def test_stale_copy_reports_different_version(ada_mcp, tmp_path, monkeypatch):
     copy.write_bytes(ADA_MCP.read_bytes() + b"# stale marker\n")
     stale = _load(copy, "ada_mcp_stale_copy")
     assert stale.BRIDGE_VERSION != ada_mcp.BRIDGE_VERSION
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+
+
+def _init_repo(path: Path) -> None:
+    assert _git(path, "init", "-q").returncode == 0
+    (path / "seed.txt").write_text("seed\n", encoding="utf-8")
+    assert _git(path, "add", "seed.txt").returncode == 0
+    commit = _git(path, "-c", "user.email=t@t", "-c", "user.name=t",
+                  "commit", "-qm", "init")
+    assert commit.returncode == 0
+
+
+def test_untracked_copy_inside_checkout_gets_copy_tag(tmp_path, monkeypatch):
+    """A loose copy inside a git checkout must not claim that repo's sha.
+
+    `git describe` ignores untracked files, so without the tag the copy
+    would report the enclosing repo's exact `git-<sha>` and collide with
+    the canonical bridge copy — the incident this guards against.
+    """
+    monkeypatch.delenv("ADA_BRIDGE_VERSION", raising=False)
+    _init_repo(tmp_path)
+    copy = tmp_path / "ada_mcp.py"
+    copy.write_bytes(ADA_MCP.read_bytes())
+    mod = _load(copy, "ada_mcp_untracked_copy")
+    assert mod.BRIDGE_VERSION.startswith("git-")
+    assert "+copy-" in mod.BRIDGE_VERSION
+
+
+def test_tracked_copy_inside_checkout_has_no_copy_tag(tmp_path, monkeypatch):
+    """A tracked file inside a checkout IS that repo's copy — no tag."""
+    monkeypatch.delenv("ADA_BRIDGE_VERSION", raising=False)
+    _init_repo(tmp_path)
+    copy = tmp_path / "ada_mcp.py"
+    copy.write_bytes(ADA_MCP.read_bytes())
+    assert _git(tmp_path, "add", "ada_mcp.py").returncode == 0
+    commit = _git(tmp_path, "-c", "user.email=t@t", "-c", "user.name=t",
+                  "commit", "-qm", "add bridge")
+    assert commit.returncode == 0
+    mod = _load(copy, "ada_mcp_tracked_copy")
+    assert mod.BRIDGE_VERSION.startswith("git-")
+    assert "+copy-" not in mod.BRIDGE_VERSION
 
 
 def test_tool_response_carries_bridge_envelope(ada_mcp, monkeypatch, tmp_path):

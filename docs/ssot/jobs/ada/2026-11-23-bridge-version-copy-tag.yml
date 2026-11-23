@@ -1,0 +1,47 @@
+# SSOT Job: bridge version — untracked-copy collision fix.
+# Card: ada-ocb-bridge-version (chaba kanban, ADA-0177). Dispatch
+# 20261123-105125-in-ada-voice-opencode-ada-mcp-, runner tony-omen.
+# Follow-up to docs/ssot/jobs/ada/2026-11-17-bridge-version-envelope.yml.
+
+title: >-
+  bridge version gains +copy-<hash> suffix so an untracked ada_mcp.py
+  inside any git checkout can no longer collide with canonical git-<sha>
+
+summary: |
+  The 11-17 feature (BRIDGE_VERSION envelope, calls.jsonl stamp,
+  ada_bridge_info) resolved `git describe` in the file's directory.
+  Gap: `git describe --dirty` ignores untracked files, so a loose
+  ada_mcp.py copy dropped inside ANY checkout reported that repo's
+  exact git-<sha> — identical to the canonical bridge copy, silently.
+  Fix: after git resolution, `git ls-files --error-unmatch` checks
+  whether the file is tracked there; untracked files get
+  `+copy-<sha256(file)[:10]>` appended. Tracked files are untouched —
+  a tracked file at sha X IS canonical for X.
+
+files:
+  - opencode/ada_mcp.py            # _file_digest, _untracked_copy_tag, resolver + ada_bridge_info text
+  - tests/test_opencode_ada_mcp_bridge_version.py  # +2 tests (9 total)
+
+resolution_order: |
+  ADA_BRIDGE_VERSION env
+  > opencode/VERSION file next to ada_mcp.py
+  > git describe --always --dirty --tags  (+copy-<hash> when file untracked in that repo)
+  > dev-<sha256(file)[:10]>
+
+verification:
+  unit: 19/19 (bridge_version + envelope test files); tool-lint clean
+  live_stdio_probe: |
+    canonical worktree copy        -> git-00090e9-dirty
+    untracked copy, foreign repo   -> git-fa4f5a6+copy-3cd10becaa
+    untracked copy, this worktree  -> git-00090e9-dirty+copy-1462d6fd74
+    (pre-fix rows 1 and 3 were identical — the collision)
+  session_evidence: |
+    stderr startup line + calls.jsonl "startup" event + per-call
+    bridge_version — identifies which copy served each MCP child.
+
+notes: |
+  Prior dispatch attempts (11-17 tony-dell, 11-20 x2) all completed the
+  verification work but the runner exited non-zero afterward; nothing
+  was wrong with the code path itself. Keep verification strictly
+  inside the worktree — probing live checkouts (~/CascadeProjects/*)
+  trips the sandbox guard and can end the session.
