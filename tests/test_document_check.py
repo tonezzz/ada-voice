@@ -2,8 +2,10 @@ import asyncio
 import base64
 import io
 import json
+import os
+import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
@@ -154,6 +156,77 @@ class IntakeTests(unittest.TestCase):
         r = asyncio.run(eng.intake(blob, "image/jpeg"))
         self.assertTrue(r.ok)  # render still succeeds without classification
         self.assertEqual(r.doc_type, "other")
+
+    def test_intake_persists_original_to_disk(self):
+        """Raw upload must hit disk before RAM processing — the held
+        store evicts at RESULT_CAP/restart, disk is the safety net."""
+        _, blob = _img()
+        eng = _engine()
+        with tempfile.TemporaryDirectory() as td, \
+                patch.dict(os.environ, {"ADA_DOC_INTAKE_DIR": td}):
+            r = asyncio.run(eng.intake(blob, "image/jpeg",
+                                       filename="Deed Scan.JPG"))
+            self.assertTrue(r.ok)
+            self.assertIsNotNone(r.source_path)
+            self.assertTrue(r.source_path.startswith(td))
+            self.assertTrue(r.source_path.endswith(".jpg"))
+            with open(r.source_path, "rb") as fh:
+                self.assertEqual(fh.read(), blob)  # byte-identical original
+            # held meta carries the path for archive/recovery flows
+            self.assertEqual(eng.held(r.key).meta["source_path"],
+                             r.source_path)
+            # filename pairs with the intake key tail
+            self.assertIn(r.key.split("/", 1)[-1], r.source_path)
+            # manifest.jsonl line in the LINE_MEDIA shape for media-inbox
+            import hashlib as _hl
+            lines = [json.loads(ln) for ln in
+                     open(os.path.join(td, "manifest.jsonl"))]
+            self.assertEqual(len(lines), 1)
+            m = lines[0]
+            self.assertEqual(m["sha256"], _hl.sha256(blob).hexdigest())
+            self.assertEqual(m["path"], r.source_path)
+            self.assertEqual(m["intake_key"], r.key)
+            self.assertEqual(m["file_name"], "Deed Scan.JPG")
+
+    def test_intake_persist_failure_does_not_crash(self):
+        """An unwritable intake dir warns loudly but intake still
+        completes — persistence must not break the PWA flow."""
+        _, blob = _img()
+        eng = _engine()
+        with tempfile.TemporaryDirectory() as td:
+            blocker = os.path.join(td, "not-a-dir")
+            with open(blocker, "w") as fh:
+                fh.write("x")
+            with patch.dict(os.environ, {"ADA_DOC_INTAKE_DIR": blocker}):
+                r = asyncio.run(eng.intake(blob, "image/jpeg"))
+        self.assertTrue(r.ok)
+        self.assertIsNone(r.source_path)
+        self.assertTrue(any("not persisted" in w for w in r.warnings))
+
+    def test_intake_bad_bytes_still_persisted(self):
+        """Even an undecodable upload is kept on disk — it was the
+        user's file, loss is worse than storing junk."""
+        eng = _engine()
+        with tempfile.TemporaryDirectory() as td, \
+                patch.dict(os.environ, {"ADA_DOC_INTAKE_DIR": td}):
+            r = asyncio.run(eng.intake(b"not an image", "image/jpeg"))
+            self.assertFalse(r.ok)
+            self.assertIsNotNone(r.source_path)
+            with open(r.source_path, "rb") as fh:
+                self.assertEqual(fh.read(), b"not an image")
+
+    def test_intake_prunes_to_keep_limit(self):
+        """Retention is bounded: oldest uploads drop past
+        ADA_DOC_INTAKE_KEEP."""
+        eng = _engine()
+        with tempfile.TemporaryDirectory() as td, \
+                patch.dict(os.environ, {"ADA_DOC_INTAKE_DIR": td,
+                                        "ADA_DOC_INTAKE_KEEP": "2"}):
+            for i in range(3):
+                _, blob = _img(gray=200 + i * 10)
+                asyncio.run(eng.intake(blob, "image/jpeg"))
+            kept = [f for f in os.listdir(td) if f != "manifest.jsonl"]
+            self.assertLessEqual(len(kept), 2)
 
 
 class DecodeTests(unittest.TestCase):

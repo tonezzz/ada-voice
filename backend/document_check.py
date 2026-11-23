@@ -1,12 +1,16 @@
 """Document intake pipeline — classify, measure, optimize for print/archive.
 
-Stages: decode -> measure -> classify -> plan -> render -> hold.
+Stages: persist -> decode -> measure -> classify -> plan -> render ->
+hold.
 
 Same shape as decision_check: an engine holds a lazy Gemini client and
-exposes one async entry point. Imaging is pure PIL/numpy, RAM-only —
-rendered artifacts live in a small in-process result store and are
-served back by /api/documents/{key}/{pdf,preview}; nothing touches disk
-(the archive service owns persistence — see chaba
+exposes one async entry point. The raw upload is persisted to
+$ADA_DOC_INTAKE_DIR (default ~/.local/share/ada/intake)
+BEFORE any processing — held results are RAM-only and evict at
+RESULT_CAP or restart, so the original must hit disk first or a crash
+loses the user's document. Rendered artifacts live in the in-process
+result store and are served back by /api/documents/{key}/{pdf,preview};
+the archive service owns long-term curated persistence (see chaba
 docs/kb/document-archive-service.md).
 
 Doc-type profiles decide output shape: most documents render onto a
@@ -53,6 +57,85 @@ _CLASSIFY_CACHE_TTL_S = float(
     os.environ.get("ADA_DOC_CLASSIFY_CACHE_TTL_S", "86400"))
 RESULT_CAP = 20  # in-process result store: newest N intakes
 
+_EXT_FOR_MIME = {
+    "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+    "image/webp": "webp", "image/heic": "heic", "image/heif": "heif",
+    "image/tiff": "tif", "image/gif": "gif", "image/bmp": "bmp",
+}
+
+
+def _intake_dir() -> str:
+    return os.path.expanduser(os.environ.get(
+        "ADA_DOC_INTAKE_DIR", "~/.local/share/ada/intake"))
+
+
+def _intake_keep() -> int:
+    try:
+        return max(1, int(os.environ.get("ADA_DOC_INTAKE_KEEP", "200")))
+    except ValueError:
+        return 200
+
+
+def _ext_for_mime(image_mime: str) -> str:
+    ext = _EXT_FOR_MIME.get(str(image_mime).lower())
+    if ext:
+        return ext
+    sub = str(image_mime).partition("/")[2]
+    return re.sub(r"[^a-z0-9]+", "", sub.lower())[:8] or "img"
+
+
+def persist_upload(image: bytes, image_mime: str, key: str,
+                   filename: str = "") -> str:
+    """Write the raw upload to $ADA_DOC_INTAKE_DIR before processing.
+
+    The held-result store is RAM-only — if intake crashes or the process
+    restarts before the user archives, the original is unrecoverable
+    unless it already lives on disk. Named `<ts>-<stem>-<sha>.<ext>`
+    (key tail) so the file pairs with the intake key in logs, plus a
+    manifest.jsonl line in the LINE_MEDIA shape (sha256/mime/path) so a
+    media-inbox lane can pick uploads up after a restart. Returns the
+    absolute path; raises on failure so callers can warn loudly."""
+    d = _intake_dir()
+    os.makedirs(d, exist_ok=True)
+    name = f"{key.split('/', 1)[-1]}.{_ext_for_mime(image_mime)}"
+    path = os.path.join(d, name)
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "wb") as fh:
+        fh.write(image)
+    os.replace(tmp, path)
+    try:
+        with open(os.path.join(d, "manifest.jsonl"), "a") as fh:
+            fh.write(json.dumps({
+                "ts": datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds"),
+                "sender": "pwa", "chat_id": "pwa",
+                "kind": "document",
+                "message_id": key.split("/", 1)[-1],
+                "intake_key": key,
+                "mime": image_mime,
+                "sha256": hashlib.sha256(image).hexdigest(),
+                "size": len(image),
+                "file_name": filename or None,
+                "persona": None, "caller": None,
+                "path": path, "url": None},
+                ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.info("intake manifest write failed: %s", exc)
+    # Bounded retention: prune oldest past ADA_DOC_INTAKE_KEEP. The dir
+    # is dedicated to raw uploads, so every file here is fair game.
+    try:
+        files = sorted(
+            (os.path.join(d, f) for f in os.listdir(d)
+             if f != "manifest.jsonl"),
+            key=lambda f: os.path.getmtime(os.path.join(d, f)))
+        for stale in files[:max(0, len(files) - _intake_keep())]:
+            if os.path.join(d, stale) != path:
+                os.remove(os.path.join(d, stale))
+    except OSError as exc:
+        logger.warning("intake dir prune failed: %s", exc)
+    return path
+
+
 A4_PX = (2480, 3508)  # A4 portrait at 300 DPI
 DPI = 300
 MM_PER_INCH = 25.4
@@ -93,6 +176,7 @@ class DocumentResult:
     plan: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     durations_ms: dict[str, int] = field(default_factory=dict)
+    source_path: str | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,6 +190,7 @@ class DocumentResult:
             "plan": self.plan,
             "warnings": self.warnings,
             "durations_ms": self.durations_ms,
+            "source_path": self.source_path,
             "error": self.error,
         }
         if self.key:
@@ -358,6 +443,23 @@ class DocumentCheckEngine:
         started = time.monotonic()
         durations: dict[str, int] = {}
         result = DocumentResult(durations_ms=durations)
+
+        # Persist the raw upload FIRST — held results are RAM-only, so a
+        # crash or restart mid-intake loses the original unless it is
+        # already on disk. A persist failure must not kill intake (the
+        # PWA flow stays usable); it surfaces as a warning instead.
+        now = datetime.now(timezone.utc)
+        stem = re.sub(r"[^a-z0-9]+", "-", (filename or "doc").lower())[:24] or "doc"
+        key = f"doc/{now.strftime('%Y%m%d-%H%M%S')}-{stem}-{hashlib.sha1(image).hexdigest()[:6]}"
+        try:
+            result.source_path = persist_upload(
+                image, image_mime, key, filename)
+        except Exception as exc:
+            logger.warning("document upload persist failed key=%s: %s",
+                           key, exc)
+            result.warnings.append(
+                f"original upload not persisted to disk: {exc}")
+
         try:
             im = Image.open(io.BytesIO(image))
             im = ImageOps.exif_transpose(im)  # phone shots carry EXIF orientation
@@ -417,9 +519,6 @@ class DocumentCheckEngine:
         archive_jpg = to_jpeg_bytes(enhance_for_archive(trimmed), max_w=2000, quality=90)
         durations["render_ms"] = int((time.monotonic() - t) * 1000)
 
-        now = datetime.now(timezone.utc)
-        stem = re.sub(r"[^a-z0-9]+", "-", (filename or "doc").lower())[:24] or "doc"
-        key = f"doc/{now.strftime('%Y%m%d-%H%M%S')}-{stem}-{hashlib.sha1(image).hexdigest()[:6]}"
         result.key = key
         result.plan = {
             "output": placement["mode"],
@@ -432,6 +531,7 @@ class DocumentCheckEngine:
         self._hold(key, pdf, preview, {
             "doc_type": result.doc_type, "filename": filename,
             "archive_jpg": archive_jpg,
+            "source_path": result.source_path,
             "created": now.isoformat(timespec="seconds"),
         })
         result.ok = True
