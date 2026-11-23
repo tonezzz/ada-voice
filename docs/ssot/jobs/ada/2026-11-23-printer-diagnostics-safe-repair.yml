@@ -1,0 +1,187 @@
+# SSOT Job: printer diagnostics + bounded single-job repair surface.
+# Card: ada-printer-diagnostics-safe-repair (chaba kanban, ref ADA-1049).
+# Dispatch 20261123-105454-use-the-existing-ada-document-, runner idc02
+# (attempt 3 — attempts 1-2 on tony-omen died on provider exits, no
+# code was ever pushed).
+
+title: >-
+  Ada diagnoses the HP DeskJet queue and repairs one verified job at a
+  time — never shells, never cancel-all
+subtitle: >-
+  docs(action=print) stays scoped to archived pages; printer ops are a
+  new canonical `printer` tool riding the SAME same-session
+  confirmation gate. Live verification on tony-dell caught the card's
+  own intel stale: the printer is at 192.168.2.92 (not .78) with UUID
+  ...b906fe (card's ...b90fe6 is a transposition), and the default
+  HP_DeskJet_2700 queue still targets the .75 wireless repeater.
+
+planning:
+  goal: |
+    Extend the document-print lane into a safe printer surface:
+    read-only status/jobs/verify plus a fixed-allowlist repair
+    (release-job, retry-job, cancel-job) bound to one verified
+    queue/job through Ada's existing confirm fingerprint. A narrow
+    CUPS helper on the print host replaces any Ada SSH/root — Ada
+    ships exactly {op, args} JSON over the established `ssh tony-dell`
+    lane and never sees a shell. Identity drift is resolved by IPP
+    probe (serial/uuid), never by trusting queue URIs.
+  scope: |
+    Delivered:
+      - scripts/ada-cups-helper.py — print-host helper; ops =
+        status/jobs/verify/release-job/retry-job/cancel-job/
+        set-queue-uri. Resolves dnssd:// queue URIs via
+        `avahi-browse -rtp _ipp._tcp`, probes IPP per queue,
+        separates cups-host jobs from printer-internal Get-Jobs,
+        and refuses set-queue-uri unless --expect-serial/--expect-uuid
+        match the live probe (mismatch = no lpadmin, exit 1)
+      - backend/printer_registry.yml — hp-deskjet-2700 identity
+        (serial CN33BDZ0KS, uuid ...b906fe, mDNS
+        HPE073E705C516.local, current ip .92 verified 2026-11-23,
+        stale_targets .75 repeater/.74 mn01), queues,
+        repair_allowlist, repair_guard
+      - backend/printer_client.py — async ssh lane to the helper
+        (ADA_CUPS_SSH/ADA_CUPS_HELPER env-overridable, 60s cap) +
+        evaluate_status(): identity verdict, drift verdict
+        (stale_target/follows_mdns), remediation hints
+      - backend/tool_runner/printer.py — PrinterMixin: _status/_jobs/
+        _verify/_repair; repair resolves the job against the LIVE
+        queue listing only (no trust in caller job ids), runs the
+        allowlist op, re-reads status, returns audit-shaped result
+      - wiring: common.py PRINTER_TOOLS/PRINTER_REPAIRS gate +
+        _CHANGE_LOG_TOOLS, __init__.py mixin + elif,
+        realtime_provider.py declaration + claim-backing +
+        actuation budget 1, tool_guide.yml, ssot.tool-surface.yml
+        count_cap 114->115, tests/scenarios-live/printer_diag.yaml,
+        tests/test_printer.py (25 tests)
+    Explicitly NOT done:
+      - lpadmin retarget of HP_DeskJet_2700 .75->.92 — the verified
+        path ships (set-queue-uri + expectation check) but the live
+        change is gated on a separate Tony approval (board request
+        raised); HP-2777 dnssd queue already follows the printer
+      - production deploy — staging verification on idc02 only, per
+        AGENTS.md deploy flow
+      - arbitrary job ops — resume/retry/cancel are the whole
+        allowlist; cancel-all and test-page do not exist in the
+        helper or the tool schema
+  success_criteria:
+    - 'printer action=status returns per-queue state + accepting +
+      live job ids + device probe (serial/uuid/ink) with source_host'
+    - 'HP-2777 reports verdict match + follows_mdns; HP_DeskJet_2700
+      reports unreachable + stale_target + remediation hint'
+    - 'repair denies without confirm token; token binds exact args;
+      job must exist in live queue listing; after is re-read'
+    - 'helper rejects unknown ops, bad job ids, cancel-all, and
+      retarget without identity match'
+    - 'tool-lint clean; focused tests green; full suite green'
+  risks:
+    - 'DHCP may move the printer again — .92 is "current" not
+      "static"; the dnssd queue + IPP verify are the durable truth'
+    - 'printer-internal Get-Jobs reports device-side state that CUPS
+      repair ops cannot reach — surface labels them origin:printer
+      and repair refuses them'
+  resources:
+    - print-host lane: ssh tony-dell (key auth, existing)
+    - helper contract: scripts/ada-cups-helper.py --help (JSON in/out)
+    - registry: backend/printer_registry.yml
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-23"
+  steps:
+    - id: 1
+      label: "live identity verification"
+      status: done
+      notes: >-
+        ssh tony-dell: avahi-resolve HPE073E705C516.local ->
+        192.168.2.92; ipptool confirm serial CN33BDZ0KS, uuid
+        ...b906fe, idle/accepting, ink 70/40. Card intel stale on TWO
+        axes (.78 superseded by DHCP; ...b90fe6 is a digit swap).
+        HP-2777 = dnssd queue carrying the printer UUID; HP_DeskJet_
+        2700 = default, ipp://192.168.2.75, Host is down (repeater).
+    - id: 2
+      label: "helper + client + mixin"
+      status: done
+      notes: >-
+        4-file stack + wiring; public helpers underscore-prefixed for
+        tool-lint; repair re-resolves job ids against live queue data
+        (helper may report '19' or 'queue-19' — normalized both ways)
+    - id: 3
+      label: "tests + lint"
+      status: done
+      notes: >-
+        tests/test_printer.py 25 green: read-only actions ungated,
+        repair denied->token issued->exact-match confirm->post re-
+        read, token mismatch on arg change, unknown op/unknown job/
+        internal-job refusal, evaluate verdicts, helper argv allow-
+        list. tool-lint clean (71 declared, cap 115).
+    - id: 4
+      label: "live smoke on tony-dell"
+      status: done
+      notes: >-
+        helper status: HP-2777 dnssd-resolved -> .92 probe ok
+        (serial/uuid/ink), HP_DeskJet_2700 -> Host is down on .75;
+        submitted held job HP_DeskJet_2700-19 to the dead-target queue
+        -> release-job (held->processing), retry-job honest-fail
+        (job not complete), cancel-job removed it; negatives refused:
+        job 9999 not listed, 'cancel-job -a' bad id, op 'shell'
+        unknown. Queue left empty.
+    - id: 5
+      label: "board + retarget gate"
+      status: done
+      notes: >-
+        progress comment posted; request raised for explicit approval
+        to retarget HP_DeskJet_2700 -> ipp://192.168.2.92/ipp/print
+        via set-queue-uri with --expect-serial CN33BDZ0KS
+        --expect-uuid ...b906fe. No reply by session end; no lpadmin
+        run.
+
+invoke:
+  tool:
+    - "printer action=status [queue=<name>]"
+    - "printer action=jobs [queue=<name>]"
+    - "printer action=verify [queue=<name>] [target=<host>]"
+    - >-
+      printer action=repair op=release-job|retry-job|cancel-job
+      queue=<name> job_id=<id> confirm=... confirm_token=...
+
+env:
+  ADA_CUPS_SSH: >-
+    ssh target for the print host — backend/printer_client.py default
+    tony-dell
+  ADA_CUPS_HELPER: >-
+    helper invocation on the print host — default
+    'python3 ~/bin/ada-cups-helper.py' (installed there 2026-11-23;
+    non-interactive ssh PATH skips ~/.local/bin so a full path is
+    required; a sudoers-narrowed wrapper for lpadmin is a later
+    operator step if retarget is approved)
+
+verification:
+  unit: "pytest tests/test_printer.py -x -q  # 25 passed"
+  lint: "python3 scripts/tool-lint.py  # clean, 71 declared / cap 115"
+  live_read: >-
+    ssh tony-dell python3 ~/bin/ada-cups-helper.py status ->
+    HP-2777 dnssd-resolved_ip 192.168.2.92, uuid ...b906fe, markers
+    70/40; HP_DeskJet_2700 target .75 'Host is down';
+    HP_DeskJet_2700_series_05C516 (CUPS-auto driverless,
+    ipps://HPE073E705C516.local) resolves -> .92 match
+  live_repair: >-
+    held job on dead queue: release -> processing, cancel -> removed;
+    jobs HP_DeskJet_2700 -> []
+  registry_eval: >-
+    evaluate_status: HP-2777 match/follows_mdns; HP_DeskJet_2700
+    unreachable/stale_target + remediation hint (operator path only)
+
+followups:
+  - >-
+    On Tony approval: install helper at a stable path on tony-dell,
+    then `python3 ada-cups-helper.py set-queue-uri HP_DeskJet_2700
+    ipp://192.168.2.92/ipp/print --expect-serial CN33BDZ0KS
+    --expect-uuid 5ba42c21-ae68-7f6d-830e-600ee5b906fe`; re-run
+    status to confirm match. Registry current_ip is informational
+    only — verify is the gate.
+  - >-
+    Deploy to idc03 via deploy-ada.sh once staging passes + retarget
+    decided; consider pointing docs(action=print) DOC_PRINT_QUEUE at
+    HP-2777 (dnssd follows the printer across DHCP)

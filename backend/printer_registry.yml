@@ -1,0 +1,61 @@
+# Printer device registry — the authoritative identity map Ada's printer
+# tool reasons against (card ada-printer-diagnostics-safe-repair).
+#
+# Identity is anchored on serial + printer-uuid + dns-sd/mDNS name — IP
+# addresses are OBSERVATIONS, not identity. This LAN DHCP-drifts: the
+# card's 2026-11 intel said the printer was at .78, the live probe on
+# 2026-11-23 found it answering at .92.
+#
+# Verified 2026-11-23 via `ipptool Get-Printer-Attributes
+# ipp://192.168.2.92/ipp/print` from tony-dell:
+#   printer-device-id SN: CN33BDZ0KS            (matches card)
+#   printer-uuid: urn:uuid:5ba42c21-ae68-7f6d-830e-600ee5b906fe
+#     NOTE: the card spec quoted ...600ee5b90fe6 — last-octet digits were
+#     transposed; the live-probed value below is authoritative.
+#   printer-name: HP05C516; dns-sd-name: "HP DeskJet 2700 series [05C516]"
+#   state idle, accepting, queued-job-count 0; ink tri-color 70, black 40.
+
+devices:
+  hp-deskjet-2700:
+    model: "HP DeskJet 2700 series"
+    serial: "CN33BDZ0KS"
+    uuid: "5ba42c21-ae68-7f6d-830e-600ee5b906fe"
+    dns_sd_name: "HP DeskJet 2700 series [05C516]"
+    mdns: "HPE073E705C516.local"
+    last_verified_ip: "192.168.2.92"
+    verified_at: "2026-11-23"
+    verified_via: "ipptool get-printer-attributes from tony-dell"
+    stale_targets:
+      - target: "192.168.2.75"
+        note: "wireless repeater — HP_DeskJet_2700 queue still points here (broken)"
+      - target: "192.168.2.78"
+        note: "superseded DHCP lease — printer observed here before .92; host now down"
+      - target: "192.168.2.74"
+        note: "mn01 print-plan host (older Ada plan) — a different machine, not the printer"
+
+# CUPS queues that print to the device. `host` is the ssh alias the
+# doc-print lane already uses (DOC_PRINT_SSH); `helper` is the narrow
+# allowlist binary Ada invokes there.
+queues:
+  - host: "tony-dell"
+    name: "HP_DeskJet_2700"
+    device: "hp-deskjet-2700"
+    default_queue: true          # lpstat -d on tony-dell
+    device_uri_observed: "ipp://192.168.2.75/ipp/print"
+    status: "stale-target"       # retarget to the verified device pending
+                                 # Tony's queue-reconfiguration approval
+                                 # (helper op set-queue-uri, registry update)
+  - host: "tony-dell"
+    name: "HP-2777"
+    device: "hp-deskjet-2700"
+    device_uri_observed: "dnssd://HP%20DeskJet%202700%20series%20%5B05C516%5D._ipp._tcp.local/?uuid=5ba42c21-ae68-7f6d-830e-600ee5b90fe"
+    status: "follows-mdns"       # tracks the device via dns-sd — the
+                                 # resilient form; static ipp:// queues
+                                 # are what drift.
+  - host: "tony-dell"
+    name: "HP_DeskJet_2700_series_05C516"
+    device: "hp-deskjet-2700"
+    device_uri_observed: "ipps://HPE073E705C516.local:631/ipp/print"
+    status: "follows-mdns"       # CUPS auto-discovered driverless queue
+                                 # (appeared 2026-11-23) — resolves the
+                                 # mDNS hostname, verified -> .92 match.
