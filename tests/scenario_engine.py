@@ -35,6 +35,7 @@ confirmations` snapshots the runner's structured confirm ledger.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -48,6 +49,9 @@ from typing import Any
 import httpx
 import yaml
 
+from backend import board_client as board_client_mod
+from backend import devin_dispatch as devin_dispatch_mod
+from backend import lane_budget
 from backend import memory_ops
 from backend.conversation_memory import ConversationMemory
 from backend.home_assistant import HomeAssistantClient
@@ -214,6 +218,12 @@ class FakeMddb:
             doc["meta"] = dict(meta)
         return {"key": str(key)}
 
+    async def delete_document(self, collection, key, lang="en",
+                              durable=False, tool="", session_id=None):
+        return ({"key": str(key)}
+                if self._coll(collection).pop(str(key), None) is not None
+                else None)
+
     @staticmethod
     def _meta_match(doc: dict, filter_meta: dict[str, list[str]] | None) -> bool:
         if not filter_meta:
@@ -257,6 +267,217 @@ class FakeMddb:
                 out.append({**dict(d), "score": round(score, 3)})
         out.sort(key=lambda d: d["score"], reverse=True)
         return out[: int(limit)]
+
+
+def _board_slug(text: Any) -> str:
+    return re.sub(r"-+", "-",
+                  re.sub(r"[^a-z0-9]+", "-",
+                         str(text or "").lower())).strip("-")
+
+
+_BOARD_COLUMNS = ("lab", "backlog", "doing", "review", "done")
+
+
+class FakeBoard:
+    """In-memory kanban board-api stand-in.
+
+    Declared per scenario as `board: {cards: [...], doing_limit: n,
+    columns: [...], unreachable: bool, errors: {"METHOD /path": {...}}}`.
+    Every board-api call in the codebase funnels through
+    board_client.request, so run_scenario patches that single seam — the
+    real tool code (kanban, ada_opencode*, ada_sweep, wiki_extension,
+    devin board dispatch) runs verbatim against this fixture. `calls`
+    records every (method, path, body) for audit: board assertions.
+    """
+
+    def __init__(self, spec: dict[str, Any] | None = None) -> None:
+        spec = spec or {}
+        self.columns = [str(c) for c in
+                        (spec.get("columns") or _BOARD_COLUMNS)]
+        self.doing_limit = int(spec.get("doing_limit") or 2)
+        self.unreachable = bool(spec.get("unreachable"))
+        self.errors = {str(k): dict(v) for k, v in
+                       (spec.get("errors") or {}).items()}
+        self.cards: list[dict[str, Any]] = []
+        for raw in spec.get("cards") or []:
+            card = dict(raw)
+            card.setdefault("id", _board_slug(card.get("title")) or "card")
+            card.setdefault("column", "backlog")
+            self.cards.append(card)
+        self.calls: list[list[Any]] = []
+        self._stamp_n = 0
+        self._req_n = 0
+
+    def _stamp(self) -> str:
+        # Deterministic 'updated' bumps so the stale-write guard can tell
+        # a moved card apart from the fixture's declared stamps.
+        self._stamp_n += 1
+        return f"2026-11-19 09:{self._stamp_n:02d}"
+
+    def _find(self, cid: str) -> dict[str, Any] | None:
+        for c in self.cards:
+            if str(c.get("id")) == cid:
+                return c
+        return None
+
+    async def handle(self, client: Any, method: str, path: str,
+                     **kw: Any) -> tuple[dict[str, Any] | None,
+                                         str | None, int]:
+        """Drop-in for board_client.request -> (data, err, http_status)."""
+        method = str(method).upper()
+        path_only, _, query = str(path).partition("?")
+        params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+        body = dict(kw.get("json") or {})
+        self.calls.append([method, path_only, body])
+        if self.unreachable:
+            return None, "I couldn't reach the board (ConnectError)", 0
+        fail = self.errors.get(f"{method} {path_only}")
+        if fail is not None:
+            status = int(fail.get("status") or 500)
+            return None, str(fail.get("error") or f"HTTP {status}"), status
+
+        if method == "GET" and path_only == "/cards":
+            cards = self.cards
+            col = str(params.get("column") or "")
+            if col:
+                cards = [c for c in cards
+                         if str(c.get("column") or "backlog") == col]
+            cid = str(params.get("id") or "")
+            if cid:
+                cards = [c for c in cards if str(c.get("id")) == cid]
+            return ({"ok": True,
+                     "cards": [dict(c) for c in cards],
+                     "columns": [{"id": c} for c in self.columns],
+                     "doing_limit": self.doing_limit}, None, 200)
+        m = re.match(r"^/card/(.+)$", path_only)
+        if method == "GET" and m:
+            card = self._find(m.group(1)) or next(
+                (c for c in self.cards
+                 if str(c.get("ref") or "") == m.group(1)), None)
+            if card is None:
+                return None, f"no card {m.group(1)}", 404
+            return {"ok": True, "card": dict(card)}, None, 200
+        if method == "POST" and path_only == "/card":
+            cid = str(body.get("id") or _board_slug(body.get("title")))
+            card = self._find(cid)
+            if card is not None:
+                card.update(
+                    {k: v for k, v in body.items() if k != "on_exists"})
+                if body.get("queue") or body.get("on_exists") == "queue":
+                    card.setdefault("action", {})["status"] = "queued"
+                card["updated"] = self._stamp()
+                return ({"ok": True, "id": cid,
+                         "message": f"card {cid} updated",
+                         "card": dict(card)}, None, 200)
+            card = dict(body)
+            card.update({
+                "id": cid,
+                "title": str(body.get("title") or cid)[:160],
+                "column": str(body.get("column") or "backlog"),
+                "updated": self._stamp(),
+                "comms": [{"at": self._stamp(),
+                           "from": str(body.get("from") or "ada"),
+                           "text": str(body.get("text") or "card filed")}],
+                "requests": [],
+            })
+            if body.get("queue"):
+                card.setdefault("action", {})["status"] = "queued"
+            card.pop("on_exists", None)
+            card.pop("queue", None)
+            self.cards.append(card)
+            return ({"ok": True, "id": cid,
+                     "message": f"card {cid} created",
+                     "card": dict(card)}, None, 200)
+        if method == "POST" and path_only == "/comment":
+            card = self._find(str(body.get("id") or ""))
+            if card is None:
+                return None, f"no card {body.get('id')}", 404
+            card.setdefault("comms", []).append({
+                "at": self._stamp(),
+                "from": str(body.get("from") or "ada"),
+                "text": str(body.get("text") or "")})
+            card["updated"] = self._stamp()
+            return {"ok": True, "message": "comment added"}, None, 200
+        if method == "POST" and path_only == "/request":
+            card = self._find(str(body.get("id") or ""))
+            if card is None:
+                return None, f"no card {body.get('id')}", 404
+            self._req_n += 1
+            req = {"id": f"r{self._req_n}", "status": "open",
+                   "from": str(body.get("from") or "ada"),
+                   "ask": str(body.get("ask") or "")}
+            if body.get("options"):
+                req["options"] = body["options"]
+            if body.get("suggested"):
+                req["suggested"] = body["suggested"]
+            card.setdefault("requests", []).append(req)
+            card["updated"] = self._stamp()
+            return ({"ok": True, "message": "request added",
+                     "request_id": req["id"]}, None, 200)
+        if method == "POST" and path_only == "/respond":
+            card = self._find(str(body.get("id") or ""))
+            if card is None:
+                return None, f"no card {body.get('id')}", 404
+            rid = str(body.get("request_id") or "")
+            req = next((r for r in (card.get("requests") or [])
+                        if str(r.get("id")) == rid), None)
+            if req is None:
+                return None, f"no request {rid}", 404
+            req["status"] = "answered"
+            req["answer"] = str(body.get("answer") or "")
+            card.setdefault("comms", []).append({
+                "at": self._stamp(), "from": "tony",
+                "text": f"answered {rid}: {req['answer'][:200]}"})
+            card["updated"] = self._stamp()
+            return {"ok": True, "message": "answer saved"}, None, 200
+        if method == "POST" and path_only == "/action":
+            card = self._find(str(body.get("id") or ""))
+            if card is None:
+                return None, f"no card {body.get('id')}", 404
+            do = str(body.get("do") or "")
+            if do == "move":
+                target = str(body.get("column") or "")
+                if target not in self.columns:
+                    return (None, f"no column {target}", 400)
+                card["column"] = target
+            elif do == "queue":
+                card.setdefault("action", {})["status"] = "queued"
+            elif do == "park":
+                card.setdefault("action", {})["status"] = "parked"
+            else:
+                return None, f"unknown action {do!r}", 400
+            card["updated"] = self._stamp()
+            return {"ok": True, "message": f"{do} ok"}, None, 200
+        if method == "POST" and path_only == "/wiki/extension":
+            action = str(body.get("action") or "list")
+            if action == "list":
+                return ({"ok": True, "action": "list",
+                         "extensions": ["CategoryTree", "Mermaid",
+                                        "MsUpload"]}, None, 200)
+            return ({"ok": True, "action": action,
+                     "name": body.get("name"),
+                     "message": f"{action} {body.get('name')} ok"},
+                    None, 200)
+        return None, f"fakeboard: unhandled {method} {path_only}", 404
+
+
+class _FakeProc:
+    """Subprocess stand-in for the dispatch_ssh fixture."""
+
+    def __init__(self, out: bytes = b"", err: bytes = b"",
+                 rc: int = 0) -> None:
+        self._out, self._err, self.returncode = out, err, rc
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._out, self._err
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = self.returncode or -9
+
+    async def wait(self) -> int:
+        return self.returncode
 
 
 def build_registry(instance: str, spec: dict | None = None) -> MemoryBankRegistry:
@@ -375,8 +596,52 @@ async def run_scenario(path: str | Path) -> dict[str, Any]:
             json.dump(data["cast_screens"], f)
             tmp_files.append(f.name)
         env_spec["ADA_CAST_SCREENS"] = f.name
+    # `usage_log:` writes fixture usage-ledger records to a temp jsonl and
+    # points ADA_USAGE_LOG at it — lane_budget's monthly-spend scan reads
+    # that file. Records without `ts` are stamped inside the current
+    # billing period so spend-cap scenarios stay deterministic year-round.
+    if "usage_log" in data:
+        period = lane_budget.current_period()
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".jsonl", delete=False) as f:
+            for rec in data.get("usage_log") or []:
+                r = dict(rec)
+                if not r.get("ts"):
+                    r["ts"] = f"{period}-15T00:00:00+00:00"
+                f.write(json.dumps(r) + "\n")
+            tmp_files.append(f.name)
+        env_spec["ADA_USAGE_LOG"] = f.name
+        if "ADA_LANE_BUDGET_STATE" not in env_spec:
+            with tempfile.NamedTemporaryFile(
+                    "w", suffix=".json", delete=False) as f:
+                f.write("{}")
+                tmp_files.append(f.name)
+            env_spec["ADA_LANE_BUDGET_STATE"] = f.name
+        lane_budget.reset()
     saved_env = {k: os.environ.get(k) for k in env_spec}
     os.environ.update(env_spec)
+
+    # `budget_state:` seeds the provider-cap latch file — "__PERIOD__"
+    # -> current billing period, "__KEYFP__" -> the GEMINI_API_KEY
+    # fingerprint lane_budget matches against. Written after env_spec
+    # applies so the fingerprint sees the scenario's key.
+    if "budget_state" in data:
+        state_txt = json.dumps(data["budget_state"]).replace(
+            "__PERIOD__", lane_budget.current_period()).replace(
+            "__KEYFP__", lane_budget.key_fingerprint(
+                os.environ.get("GEMINI_API_KEY") or ""))
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".json", delete=False) as f:
+            f.write(state_txt)
+            tmp_files.append(f.name)
+        if "ADA_LANE_BUDGET_STATE" not in saved_env:
+            saved_env["ADA_LANE_BUDGET_STATE"] = os.environ.get(
+                "ADA_LANE_BUDGET_STATE")
+        os.environ["ADA_LANE_BUDGET_STATE"] = f.name
+        lane_budget.reset()
+
+    # Attribute patches needing restore after the run — [(obj, attr, orig)].
+    restores: list[tuple[Any, str, Any]] = []
 
     # `ha_entities:` stub ha_client.entities() — the controllable-device
     # list the confidence gate (_ensure_confidence) reads on every
@@ -451,9 +716,55 @@ async def run_scenario(path: str | Path) -> dict[str, Any]:
                 return dict(resp)
             return resp if resp is not None else {}
         runner._vcast_api = _fake_vcast
+    # `board:` in-memory kanban board — every board-api call in the
+    # codebase funnels through board_client.request, so patching that one
+    # seam runs the real tool code (kanban, ada_opencode*, ada_sweep,
+    # wiki_extension, devin's card-dispatch path) against the fixture.
+    # `audit: board` dumps the call log + final card state.
+    fake_board: FakeBoard | None = None
+    if "board" in data:
+        fake_board = FakeBoard(
+            data["board"] if isinstance(data["board"], dict) else {})
+        restores.append((board_client_mod, "request",
+                         board_client_mod.request))
+        board_client_mod.request = fake_board.handle
+    # `dispatch_ssh:` stubs the `ssh devin-dispatch ...` calls the playbook
+    # dispatch path shells out to — {command: stdout} or
+    # {command: {rc, out, err}} per _run subcommand (status/start/followup).
+    # `audit: dispatch` dumps the intercepted argv list.
+    dispatch_calls: list[list[str]] = []
+    if "dispatch_ssh" in data:
+        ssh_spec = {
+            str(k): v for k, v in
+            (data.get("dispatch_ssh") or {}).items()}
+
+        async def _fake_exec(*a: Any, **kw: Any) -> _FakeProc:
+            argv = [str(x) for x in a]
+            remote = argv[-1] if argv else ""
+            # remote_cmd = "<BIN> <args...>" — key on the subcommand.
+            # `remote` stays whole so quoted args (the rendered task
+            # text, e.g. 'Playbook: build-tool') audit contiguously.
+            parts = remote.split()
+            cmd = parts[1] if len(parts) > 1 else ""
+            dispatch_calls.append({"argv": parts[1:], "remote": remote})
+            spec = ssh_spec.get(cmd)
+            if isinstance(spec, dict):
+                return _FakeProc(
+                    out=str(spec.get("out") or "").encode(),
+                    err=str(spec.get("err") or "").encode(),
+                    rc=int(spec.get("rc") or 0))
+            return _FakeProc(out=str(spec or "").encode())
+
+        restores.append(
+            (asyncio, "create_subprocess_exec",
+             asyncio.create_subprocess_exec))
+        asyncio.create_subprocess_exec = _fake_exec  # type: ignore[assignment]
     conv = ConversationMemory(session_id="scenario")
     usage_ledger.configure(None)  # no data/usage.jsonl writes in offline runs
     usage_ledger.reset()
+    # Module-level dispatch dedup cache — clear per scenario so one
+    # scenario's dispatched tasks can't dedup a later scenario's call.
+    devin_dispatch_mod._recent_dispatches.clear()
     today = datetime.now(timezone.utc).date().isoformat()
 
     for i, seed in enumerate(data.get("seed") or []):
@@ -499,6 +810,8 @@ async def run_scenario(path: str | Path) -> dict[str, Any]:
         return value
 
     def _restore_env() -> None:
+        for obj, attr, orig in restores:
+            setattr(obj, attr, orig)
         for k, v in saved_env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -521,9 +834,19 @@ async def run_scenario(path: str | Path) -> dict[str, Any]:
             elif "expand_query" in step:
                 result = {"expanded": conv.expand_query(str(step["expand_query"]))}
             elif "audit" in step:
-                if str(step["audit"]) == "confirmations":
+                what = str(step["audit"])
+                if what == "confirmations":
                     entries = runner.confirmation_audit()
                     result = {"count": len(entries), "entries": entries}
+                elif what == "board":
+                    result = ({
+                        "calls": fake_board.calls,
+                        "cards": fake_board.cards,
+                    } if fake_board is not None else
+                        {"error": "no board fixture in this scenario"})
+                elif what == "dispatch":
+                    result = {"count": len(dispatch_calls),
+                              "calls": dispatch_calls}
                 else:
                     result = {"error": f"unknown audit {step['audit']!r}"}
             elif "reconnect_after" in step:
@@ -552,6 +875,38 @@ async def run_scenario(path: str | Path) -> dict[str, Any]:
             elif "record_usage" in step:
                 usage_ledger.record(**dict(step["record_usage"]))
                 result = {"output": "recorded"}
+            elif "call" in step:
+                # Direct call: a runner method name, or a dotted
+                # 'module.function' for module-level helpers the model
+                # surface can't reach (lane_budget.check, the playbook
+                # dispatch path behind runner.devin_dispatch). Args are
+                # kwargs. Exceptions wrap into the canonical error shape
+                # so gate refusals are assertable like tool denials.
+                target = str(step["call"])
+                fn = getattr(runner, target, None)
+                if fn is None and "." in target:
+                    mod_name, _, attr = target.rpartition(".")
+                    try:
+                        fn = getattr(
+                            __import__(mod_name, fromlist=[attr]), attr)
+                    except Exception:
+                        fn = None
+                if not callable(fn):
+                    result = {
+                        "error": f"no callable {target!r} on the runner "
+                                 "or as a dotted module path"}
+                else:
+                    try:
+                        res = fn(**_subst(dict(step.get("args") or {})))
+                        if hasattr(res, "__await__"):
+                            res = await res
+                        result = res
+                    except Exception as exc:
+                        result = {
+                            "ok": False,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "error_type": type(exc).__name__,
+                        }
             elif "tool" in step:
                 try:
                     result = await runner.execute(
