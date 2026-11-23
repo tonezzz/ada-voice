@@ -1,0 +1,66 @@
+# SSOT Job: DEFAULT_ADA_INSTRUCTIONS compaction — one-line duty rules +
+# canonical-doc pointer. Card: ada-prompt-slim (chaba kanban, ref
+# ADA-1282). Dispatch 20261123-105302-ada-voice-backend-realtime-pro,
+# runner tony-dell. Prior attempts: Jules lane (retired 2026-11-20) and a
+# rate-limited devin run died mid-flight; a Jules code review had flagged
+# its approach for duplicating the duties section 3x in AGENTS.md — this
+# run adds only a pointer section, no duty text copy.
+
+title: Ada prompt slim — DEFAULT_ADA_INSTRUCTIONS to one-line rules
+subtitle: >-
+  The voice prompt carried full duty paragraphs (attention dilution +
+  per-turn token cost). The duties are now one-line rules named after the
+  canonical chaba AGENTS.md duty sections, which stay the long-form text;
+  ada-voice AGENTS.md gained a pointer section, not a copy.
+
+planning:
+  goal: |
+    Compact backend/realtime_provider.py DEFAULT_ADA_INSTRUCTIONS ~50%+,
+    keep every duty named, preserve semantics, maintain the parity rule
+    (Ada's one-line rules mirror chaba's AGENTS.md duty sections — change
+    either side, sync the other).
+  scope: |
+    Delivered:
+      - DEFAULT_ADA_INSTRUCTIONS 14016 -> 7004 chars (50.0%), 78 -> 46
+        lines. Every paragraph re-expressed as a one-line rule; the
+        duplicated DONE MEANS DONE paragraph (cast + capture + board
+        write + send law appeared twice) merged into one rule.
+      - Duties renamed to canonical chaba AGENTS.md section names and
+        tagged (AGENTS.md): operator-correction & education duty,
+        kanban-first teamwork, open-ask capture (was "Request capture"),
+        idea-pipeline (was "Idea momentum" + "Idea intake routing",
+        merged), field-ownership (new line — the KNB-0453 rule was in
+        the canonical doc but missing from the prompt), report-integration,
+        spec-gathering, project steward duty (ssot.project-lifecycle),
+        procedure-lookup.
+      - Header line carries the parity pointer: "(AGENTS.md) tags mirror
+        chaba's AGENTS.md duties — keep both in sync (the parity rule)."
+      - AGENTS.md new "Ada prompt parity" section pointing at chaba's
+        AGENTS.md as the canonical doc — pointer only, no duty text.
+    Explicitly NOT done:
+      - chaba-side AGENTS.md edit — not needed: Ada's duty names/semantics
+        now match canonical verbatim; nothing on that side changed.
+      - deploy/restart (deploy-ada.sh on idc03 is the only path).
+      - Live smoke scenario run (education_correction drives a real /ws
+        session on ada-dev; deferred to post-deploy cadence per the
+        scenario-live convention).
+  success_criteria:
+    - 'instruction block >=50% shorter: 14016 -> 7004 chars (50.0%)'
+    - 'all duties still named: correction, kanban-first, open-ask capture,
+      idea-pipeline, field-ownership, report-integration, spec-gathering,
+      project steward, procedure-lookup'
+    - 'parity maintained: duty names match chaba AGENTS.md sections;
+      pointer in both prompt header and ada-voice AGENTS.md'
+    - 'tests/test_card_ops_instructions.py still passes (frozen live-status
+      line kept verbatim)'
+    - 'tool-lint clean; pytest tests/ green'
+
+notes:
+  - 'Semantics kept per line: LANGUAGE FIDELITY (TH/EN only, no mid-turn
+    flips, session-language persistence), DONE MEANS DONE (tool ok THIS
+    turn or it did not happen — screens, captures, board writes, sends),
+    ERROR TRUTHFULNESS, BAD CALLS (retry once), CONNECTION RESET,
+    TITLE/PLAYING-STATE claims, NEWS vs MEDIA, DATE ECHO,
+    POST-MIDNIGHT AMBIGUITY, word coaching via ada_remember kind=vocab.'
+  - 'Verification env: system python3 + pytest 9.0.2 with tests/dep_stubs
+    (worktree ships no .venv).'

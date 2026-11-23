@@ -11,6 +11,10 @@
 
 Never `git switch -f` / `checkout -f` / `reset --hard` on a checkout another session may be using — `-f` discards uncommitted work silently (incident 2026-10-01). Snapshot first; the deploy script does this for you.
 
+## Ada prompt parity (DEFAULT_ADA_INSTRUCTIONS)
+
+`backend/realtime_provider.py` `DEFAULT_ADA_INSTRUCTIONS` carries one-line rules only; duties tagged `(AGENTS.md)` mirror the canonical duty sections in the **chaba** repo's AGENTS.md (operator-correction & education, open-ask capture, kanban-first, idea-pipeline, field-ownership, report-integration, spec-gathering, procedure-lookup). Long-form semantics live there — do not re-expand the prompt. Change either side, sync the other (the parity rule).
+
 ## ada-control bridge stable path (ocb)
 
 OpenCode/OpenChamber MCP clients should point `mcp.ada-control.command` at the dedicated ff-only worktree `~/CascadeProjects/ada-bridge` (`opencode/ada_mcp.py`) — never the edit/staging checkout, which can be dirty or mid-rebase. `scripts/sync-ocb-bridge.sh` (driven by the `ada-ocb-bridge-sync` user timer) fast-forwards it to `origin/main` and refuses a dirty or diverged tree. Details + client cutover: `docs/kb/ada-ocb-bridge.md`.
