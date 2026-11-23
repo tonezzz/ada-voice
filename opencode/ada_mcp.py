@@ -44,13 +44,42 @@ ADOBE_STOCK_INDEX_FILES = (
     "prompt-patterns.json",
 )
 
+def _file_digest() -> str:
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:10]
+    except OSError:
+        return "unknown"
+
+
+def _untracked_copy_tag(here: Path) -> str:
+    """'+copy-<hash>' when this file is not tracked by the repo git resolved.
+
+    An ada_mcp.py copy dropped inside some checkout resolves that repo's
+    `git describe` — `git-<sha>` alone would masquerade as canonical even
+    though the content differs. Tagging untracked files keeps versions
+    unique per copy; a tracked file at the same sha IS canonical.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", Path(__file__).name],
+            cwd=here, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return ""
+    if proc.returncode == 0:
+        return ""
+    return f"+copy-{_file_digest()}"
+
+
 def _resolve_bridge_version() -> str:
     """Identify which bridge copy is serving: env > VERSION file > git > content hash.
 
-    Deploy can inject ADA_BRIDGE_VERSION or write .opencode/VERSION
-    (e.g. `git rev-parse HEAD > .opencode/VERSION`). A repo checkout
-    resolves `git describe --always --dirty`. Anything else falls back to
-    a hash of this file so a stale copy still reports a different version.
+    Deploy can inject ADA_BRIDGE_VERSION or write opencode/VERSION
+    (e.g. `git rev-parse HEAD > opencode/VERSION`). A repo checkout
+    resolves `git describe --always --dirty`; when this file is not
+    tracked there (a loose copy sitting inside a checkout) a
+    `+copy-<hash>` suffix keeps it from colliding with canonical.
+    Anything else falls back to a hash of this file.
     """
     env_version = os.environ.get("ADA_BRIDGE_VERSION", "").strip()
     if env_version:
@@ -69,14 +98,11 @@ def _resolve_bridge_version() -> str:
         )
         sha = proc.stdout.strip()
         if proc.returncode == 0 and sha:
-            return f"git-{sha}"
+            return f"git-{sha}{_untracked_copy_tag(here)}"
     except Exception:
         pass
-    try:
-        digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:10]
-        return f"dev-{digest}"
-    except OSError:
-        return "dev-unknown"
+    digest = _file_digest()
+    return f"dev-{digest}" if digest != "unknown" else "dev-unknown"
 
 
 BRIDGE_VERSION = _resolve_bridge_version()
@@ -3646,8 +3672,9 @@ def ada_bridge_info() -> str:
             "response_bridge_envelope": True,
             "call_audit_jsonl": str(_audit_dir() / "calls.jsonl"),
             "version_resolution": (
-                "ADA_BRIDGE_VERSION env > .opencode/VERSION file > "
-                "git describe --always --dirty > content hash"
+                "ADA_BRIDGE_VERSION env > opencode/VERSION file > "
+                "git describe --always --dirty (+copy-<hash> when this "
+                "file is untracked in that repo) > content hash"
             ),
         },
         "workspace": str(WORKSPACE),
