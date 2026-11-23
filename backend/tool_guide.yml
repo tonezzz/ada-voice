@@ -843,3 +843,19 @@ wiki_search: >-
   questions; limit= caps hits (default 8). 'via': 'fallback' means the
   dedicated /wiki/search door isn't deployed — coverage is Education +
   report dossiers only, say so if Tony expected News: or Reports: hits.
+host_status: >-
+  THE tool for "is X up / what is X processing / how much disk on X"
+  asks about fleet hosts (kk-mac, tony-omen, idc02, idc03, mn01,
+  tony-dell, tony-macbook, kk-macbook). It queries live telemetry first
+  (ada-nest heartbeat / kk_mac lane probe / nest-mgr page / runner
+  claims) and only then board records — every board claim comes back
+  with an "as of Xh ago" age tag. Answer from `answer` (pre-composed,
+  speakable) or `live` directly. If `conflicts` is non-empty the board
+  said something live telemetry contradicts — say BOTH sides and flag
+  the record as stale; never repeat the stale figure as fact. If
+  `confidence` is board_only, say so — no live telemetry was reachable.
+  Do NOT answer host health from kanban card comms or memory: that is
+  exactly the OPS-1045 confidently-stale failure this tool fixes.
+  For fleet-wide DevNest queue/lane overview (not one named host) use
+  nest_status instead; for any one host's health, disk or workload use
+  this tool.
