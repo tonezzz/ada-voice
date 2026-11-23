@@ -1,0 +1,55 @@
+# SSOT Job: scenario args must be declared-schema clean — cms_write_flow gate fix
+# Card: ada-benchmark-coverage-scenarios-for-kan-152a4f (kanban, ADA-1204).
+# Dispatch 20261123-191400 (attempt 3 — rework of the 2026-11-19 branch).
+
+title: cms_write_flow scenario — args must survive _validate_call_args
+subtitle: >
+  The 2026-11-19 offline-coverage branch (a77e51e) was verified in a
+  dep-stubbed env where realtime_provider.declared_tool_schemas() raises,
+  leaving tool_runner.common._BUILTIN_SCHEMAS = {} and
+  _validate_call_args() inert. Under the real gate venv (google-genai
+  installed) the same scenarios fail: schema validation fires BEFORE the
+  confirm gates and rejects calls the tool layer used to field itself.
+
+planning:
+  goal: |
+    Land the 11-scenario offline coverage (kanban board ops + move/queue
+    gates, devin board/board-down/playbook dispatch, opencode
+    preflight+receipt, sweep, wiki_extension, lane_budget cap/latch, CMS
+    write flow) on current main AND make it green under the real-deps
+    pytest gate that held the previous merge.
+  decisions: |
+    - Cherry-picked a77e51e + b25eaa0 from
+      origin/dispatch/20261119-171510-ada-benchmark-coverage-scenari
+      onto a fresh dispatch branch — the work itself was sound; only the
+      merge-gate env differed.
+    - cms_write_flow step 1: absent summary/domain/fresh_for/confidence
+      now die at the declared-schema layer ("call args rejected:
+      missing required ...") before missing_publish_fields can raise
+      "report meta contract". Fix: pass the four fields present-but-
+      EMPTY — schema shape checks pass (keys present, string type) and
+      the tool-level contract still rejects, deterministically in BOTH
+      schema-active and schema-inert envs.
+    - cms_write_flow step 5: cms_read action=get used the slug= alias,
+      which is not a declared property (schema expected_args:
+      action/key/lang/limit/query, additionalProperties:false) —
+      SchemaError "unknown args 'slug'". Switched to the canonical
+      key=slug arg.
+
+notes:
+  - 'Rule for scenario authors: every tool: step must use args that pass
+    _declared_schemas() — declared arg NAMES (not method-signature
+    aliases), all required keys PRESENT (empty string counts as
+    present), known types, no unknown keys when
+    additionalProperties:false. Tool-level fallbacks (slug= alias,
+    blank-field contract checks) only run when schema validation is
+    off, which is env-dependent — never rely on them in expect:.'
+  - 'Two-layer rejection order: _validate_call_args (declared schema)
+    runs in _execute_gated before confirm gates; missing_publish_fields
+    (report meta contract) runs inside the cms_publish_page gate. Blank
+    values are the deterministic probe for the second layer; absent
+    keys probe the first.'
+  - 'Verification env: uv venv --python 3.12 + backend/requirements.txt
+    minus torch/speechbrain (CI parity) — pytest tests/ -q with the five
+    CI deselects: 1902 passed, 1 skipped; 30/30 offline scenarios;
+    scenario-schema-check 208 files 0 violations; tool-lint clean.'
