@@ -7,10 +7,22 @@ instance: tony
 steps:
   - set: {session_owner_identity: person.tony}
 
-  # Missing report meta is rejected before a pending request can even
+  # Blank report meta is rejected before a pending request can even
   # register — fix the call, don't ask for approval on a bad write.
+  # Blank (not absent) fields on purpose: absent required args die at
+  # the declared-schema layer ("call args rejected") when schemas load,
+  # but reach the tool as "report meta contract" in stub-schema envs —
+  # present-but-empty passes schema shape checks and always lands on
+  # missing_publish_fields, so the expectation holds in both.
   - tool: cms_publish_page
-    args: {slug: bench-report, title: "Bench Report", content: "# hi"}
+    args:
+      slug: bench-report
+      title: "Bench Report"
+      content: "# hi"
+      summary: ""
+      domain: ""
+      fresh_for: ""
+      confidence: ""
     expect: {error_contains: "report meta contract"}
 
   # Full contract + no confirmed — the request registers and the
@@ -58,9 +70,10 @@ steps:
         - '"slug": "bench-report"'
         - '"stored_verified": true'
 
-  # The page is really readable back.
+  # The page is really readable back. key= is the declared arg — the
+  # slug= alias only survives when schema validation is off.
   - tool: cms_read
-    args: {action: get, slug: bench-report}
+    args: {action: get, key: bench-report}
     expect:
       output_contains: ['Bench Report', 'offline coverage body']
 
