@@ -1,0 +1,29 @@
+name: gesture-controls-honest-contract
+# Card rebuild-gesture-controls-using-yolo (2026-11-20): the ada-ha side
+# of the ada-pi gesture rebuild. With the desk companion unreachable the
+# tool must answer honestly (ok:false + unreachable) rather than
+# inventing a state, and a mutating op without confirmation must hit the
+# needs_confirm gate BEFORE any HTTP is attempted.
+env:
+  ADA_PI_URL: http://127.0.0.1:9
+steps:
+  - tool: gesture_controls
+    args: {op: status}
+    expect:
+      output_contains:
+        - '"ok": false'
+        - 'unreachable'
+  - tool: gesture_controls
+    args: {op: disable}
+    expect:
+      output_contains:
+        - '"needs_confirm": true'
+        - 'NOT EXECUTED'
+      output_not_contains:
+        - 'unreachable'
+  - tool: gesture_controls
+    args: {op: disable, confirmed: true}
+    expect:
+      output_contains:
+        - '"ok": false'
+        - 'unreachable'

@@ -1,0 +1,21 @@
+# gesture_controls — live acceptance: a gesture-control question must
+# route to the gesture_controls tool (the ada-pi desk companion's
+# /api/gestures), and the reply must describe the real state — enabled,
+# disabled, or honestly unreachable — never a guessed "probably on".
+name: gesture-controls-status
+tier: smoke
+transport: text
+turns:
+  - user: "Ada, are gesture controls enabled on the desk companion?"
+    expect:
+      calls_any: ["gesture_controls"]
+      response_nonempty: true
+      response_contains_any:
+        - "gesture"
+        - "companion"
+        - "enabled"
+        - "disabled"
+        - "unreachable"
+        - "ท่าทาง"
+      timeout_s: 60
+      settle_s: 8

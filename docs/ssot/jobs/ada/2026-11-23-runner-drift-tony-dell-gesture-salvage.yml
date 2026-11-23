@@ -1,0 +1,47 @@
+# SSOT Job: runner-agent drift resolved on tony-dell + gesture-controls salvage verified.
+# Card: rebuild-gesture-controls-using-yolo-190356 (kanban, OPS-0683).
+# Dispatch 20261123-220744-deploy-the-updated-runner-agen, runner tony-omen.
+# Attempt 2 — prior attempt (20261123-195341 on idc03) exited 1 in ~2min.
+
+title: >-
+  runner-agent redeployed to tony-dell (sha-verified) and the verified
+  gesture-controls commit salvaged onto current main
+subtitle: >-
+  Two-part dispatch spec: (1) deploy chaba repo scripts/board/runner-agent.py
+  to tony-dell:~/.local/bin to clear the drift defers that were starving
+  every host's claim loop; (2) land the desk-companion gesture-controls
+  work (already built + verified on tony-dell branch
+  dispatch/20261120-215246-* @5307864b, never pushed/merged).
+
+planning:
+  goal: |
+    Clear runner-agent drift on tony-dell and get the gesture-controls
+    deliverable merge-ready on a dispatch branch.
+  decisions: |
+    - runner-agent: the drift was already cleared before this run —
+      tony-dell ~/.local/bin/runner-agent mtime 2026-11-23 19:10 already
+      matched the chaba repo blob (git hash-object babd0eaa…, sha1sum
+      8d09af14…). Re-ran the canonical deploy anyway (scp repo copy +
+      install -m 0755) and re-verified byte-identical; fleet spot-check
+      showed idc02/idc03/mn01 also clean (tony-macbook ssh refused).
+    - gestures: fetched 5307864b directly from tony-dell's ada-voice
+      checkout over ssh (branch was never pushed) and cherry-picked onto
+      origin/main fcb38ee. Two conflicts: backend/tool_runner/__init__.py
+      resolved to HEAD — the dyn_spec.run confirmed/confirm_token fix it
+      carried is already upstream; docs/ssot/ssot.tool-surface.yml
+      count_cap comment merged (cap stays 115, lint-clean at 73 declared).
+
+verification:
+  - 'pytest tests/test_gesture_controls.py tests/test_frontend_contract.py: 33 passed'
+  - 'pytest tests/ -x -q (deploy gate): 1927 passed, 4 skipped, 31 subtests — 3m03s'
+  - 'python3 scripts/tool-lint.py: clean (73 declared, cap 115)'
+  - 'python3 scripts/scenario-schema-check.py: 209 files, 0 violations'
+  - 'runner-agent sha1sum/git-blob identical repo<->tony-dell after deploy'
+  - 'Endpoints confirmed in tree: GET/PATCH /api/gestures, /ws/gesture, gesture_service.start/stop in lifespan, GestureService._run() iterates pose_service.results()'
+
+notes:
+  - 'Live-surface verification (real /ws/gesture stream, kiosk panels on
+    the desk companion) still requires the normal merge -> deploy-ada.sh
+    flow on idc03; this dispatch lands the verified code only.'
+  - 'cherry-pick message still mentions the tool_runner fix; that hunk
+    was already upstream so the landed diff is gesture-files only.'
