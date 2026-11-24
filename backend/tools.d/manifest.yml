@@ -172,3 +172,12 @@ tools:
     secondary_allowed: false
     timeout_s: 180
     instances: [ada-dev]
+  # "what can you do" verb — consumer half of chaba's
+  # docs/kb/ada-tools-verb-contract.md; answers from the vendored
+  # generated snapshot (backend/generated/ada-tools-commands.json,
+  # deploy-refreshed copy in backend/data/), never parses decls live.
+  ada_capabilities:
+    module: ada_capabilities
+    policy: read
+    secondary_allowed: true
+    timeout_s: 5

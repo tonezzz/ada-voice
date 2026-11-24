@@ -1,0 +1,72 @@
+# SSOT Job: Ada "what can you do" verb — consumer half of the tools
+# command-reference contract. Card: ada-capability-verb-wiring (chaba
+# kanban). Producer contract: chaba docs/kb/ada-tools-verb-contract.md;
+# producer script: chaba scripts/ada/tools-commands-catalog.py.
+
+title: ada_capabilities tool — snapshot-backed capability answers
+subtitle: >-
+  "What can you do" / "can you X" / "how does tool Y work" now answers
+  from a generated catalog snapshot vendored into ada-voice — one cached
+  file read, deterministic template, never a live declaration parse.
+
+planning:
+  goal: |
+    Implement the consumer half of docs/kb/ada-tools-verb-contract.md:
+    vendor the generated JSON, answer capability asks deterministically,
+    and gate deploys on catalog freshness.
+  scope: |
+    Delivered:
+      - backend/tools.d/ada_capabilities.py — tools.d drop-in
+        (policy=read, secondary_allowed=true, timeout_s=5). Loads
+        backend/data/ada-tools-snapshot.json (deploy-refreshed,
+        gitignored) else backend/generated/ada-tools-commands.json
+        (vendored, committed), cached per file mtime. Summary mode groups
+        canonical tools into ~9 deterministic buckets; topic= mode does
+        exact-name / retired-name (merged_into honesty) / family /
+        keyword detail. ok:false on missing/corrupt snapshot or schema
+        major != 1 — never fabricates.
+      - backend/generated/ada-tools-commands.json — vendored snapshot,
+        regenerated from this worktree's declarations via the chaba
+        catalog script (patched copy; 79 rows / 76 unique names).
+      - backend/tools.d/manifest.yml — ada_capabilities row.
+      - backend/tool_guide.yml — error-path usage entry.
+      - backend/realtime_provider.py — one routing line in
+        DEFAULT_ADA_INSTRUCTIONS (capability asks -> ada_capabilities).
+      - tests/test_ada_capabilities.py — 8 fixture-snapshot tests
+        (summary groups, detail, retired-name honesty, family, keyword,
+        miss, schema-bump refusal, missing file).
+      - tests/scenarios-live/ada_capabilities.yaml — smoke scenario so
+        the tool is scenario-covered (no coverage_debt entry).
+      - scripts/deploy-ada.sh — new gate 3c: chaba
+        tools-commands-catalog.py --check (ADA_VOICE_REPO=$REPO) hard-fails
+        the deploy on declaration/snapshot drift, then copies the fresh
+        JSON to backend/data/ada-tools-snapshot.json.
+
+findings:
+  - The producer emits tools[] rows for every tools.d module
+    DECLARATION, including non-manifest implementation seats (wp_post.py,
+    cpt_post.py, place_report.py, wp_chat_page.py behind manifest `wp`).
+    The consumer filters alias keys out of the capability surface —
+    absorbed names are back-compat routing, never capabilities
+    (contract rule enforced client-side).
+  - Group matcher is ordered first-match on name substrings; unmatched
+    tools land in "other tools". New tools appear there until a matcher
+    is added — honest, never hidden.
+
+decisions:
+  - Snapshot lives at backend/generated/ (committed vendor) + runtime
+    override backend/data/ (gitignored, deploy-copied) — the deploy
+    checkout stays clean while live answers always use the freshest
+    catalog the chaba checkout has.
+  - The --check gate is a HARD stop: after this merges, the next deploy
+    requires chaba docs/kb/ada-tools-commands.* regenerated + committed
+    first (one command: python3 scripts/ada/tools-commands-catalog.py
+    in the chaba checkout). Verified: --check currently reports STALE
+    against this worktree — expected until that regen lands.
+
+verify: |
+  python3 -m pytest tests/test_ada_capabilities.py -x -q   # 8 passed
+  python3 scripts/tool-lint.py                            # clean, 72 declared
+  Live: python3 scripts/scenario-live.py \
+    tests/scenarios-live/ada_capabilities.yaml \
+    --url ws://127.0.0.1:<port>/ws --api-key "$ADA_API_KEY" -v

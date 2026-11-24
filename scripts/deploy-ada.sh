@@ -15,7 +15,11 @@
 #         override. Catches inverted rebase resolutions (the 2026-10-08
 #         ada_track_device incident).
 #      b. python3 scripts/tool-lint.py          — tool contract check
-#      c. .venv/bin/python -m pytest tests/ -x -q — unit tests
+#      c. chaba tools-commands-catalog.py --check — declaration edits that
+#         forgot the snapshot regen fail loudly; the fresh JSON is copied
+#         to backend/data/ada-tools-snapshot.json (gitignored runtime
+#         override the ada_capabilities tool prefers)
+#      d. .venv/bin/python -m pytest tests/ -x -q — unit tests
 #   4. drain grace — wait for live /ws sessions to close (ADA_DRAIN_S)
 #   5. restart the ada services and verify each is active
 #
@@ -165,7 +169,29 @@ fi
 log "gate: tool-lint"
 python3 scripts/tool-lint.py || die "tool-lint failed — deploy aborted before restart"
 
-# --- 3c. unit tests -------------------------------------------------------
+# --- 3c. tools-catalog drift gate + snapshot refresh ---------------------
+# Consumer half of chaba's docs/kb/ada-tools-verb-contract.md (card
+# ada-capability-verb-wiring): --check regenerates the catalog in memory
+# and diffs it against chaba's committed outputs, so a declaration edit
+# that forgot the regen fails the deploy. On pass, the fresh JSON lands in
+# backend/data/ (gitignored) — ada_capabilities prefers it over the
+# vendored backend/generated/ copy, which ships with the code it describes.
+CHABA_REPO="${CHABA_REPO:-$HOME/CascadeProjects/chaba}"
+CATALOG="$CHABA_REPO/scripts/ada/tools-commands-catalog.py"
+SNAP_JSON="$CHABA_REPO/docs/kb/ada-tools-commands.json"
+if [[ -f "$CATALOG" && -f "$SNAP_JSON" ]]; then
+    log "gate: tools-commands-catalog --check (chaba $CHABA_REPO)"
+    (cd "$CHABA_REPO" && ADA_VOICE_REPO="$REPO" \
+        python3 scripts/ada/tools-commands-catalog.py --check) \
+        || die "tools-commands-catalog --check failed — tool declarations drifted from the generated snapshot; regenerate docs/kb/ada-tools-commands.* in chaba and redeploy"
+    mkdir -p backend/data
+    cp "$SNAP_JSON" backend/data/ada-tools-snapshot.json
+    log "tools snapshot refreshed -> backend/data/ada-tools-snapshot.json"
+else
+    log "chaba catalog not found at $CHABA_REPO — keeping vendored snapshot"
+fi
+
+# --- 3d. unit tests -------------------------------------------------------
 log "gate: pytest tests/ -x -q"
 [[ -x .venv/bin/python ]] || die ".venv/bin/python missing — cannot run tests, deploy aborted"
 # interpreter sanity — a symlink-loop or gutted venv passes -x but dies at

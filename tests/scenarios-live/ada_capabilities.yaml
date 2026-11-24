@@ -1,0 +1,26 @@
+# ada_capabilities — "what can you do" must route to the snapshot-backed
+# tool (card ada-capability-verb-wiring, consumer half of chaba's
+# docs/kb/ada-tools-verb-contract.md). The answer comes from the vendored
+# generated catalog, not from Ada's memory of the tool list.
+#
+# Run on any lane:
+#   python3 scripts/scenario-live.py \
+#     tests/scenarios-live/ada_capabilities.yaml \
+#     --url ws://127.0.0.1:8003/ws --api-key "$ADA_API_KEY" -v
+name: ada_capabilities
+tier: smoke
+transport: text
+turns:
+  - user: "Ada, what can you do? Give me the full list of your capabilities."
+    expect:
+      calls_any: [ada_capabilities]
+      result_contains_any: ['"ok": true']
+      response_nonempty: true
+      timeout_s: 60
+      settle_s: 8
+  - user: "Tell me about the kanban tool — what is it for?"
+    expect:
+      calls_any: [ada_capabilities]
+      response_nonempty: true
+      timeout_s: 60
+      settle_s: 8

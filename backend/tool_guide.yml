@@ -867,3 +867,12 @@ host_status: >-
   For fleet-wide DevNest queue/lane overview (not one named host) use
   nest_status instead; for any one host's health, disk or workload use
   this tool.
+ada_capabilities: >-
+  "What can you do" / "can you X" / "how does tool Y work" — answered
+  from the generated catalog snapshot (backend/generated/ada-tools-
+  commands.json, deploy-refreshed copy in backend/data/), never live
+  declarations. No topic = grouped capability summary; topic=<tool|
+  family|keyword> = detail. Absorbed/retired names answer "merged into
+  <canonical>", never as their own capability. ok:false "not generated"
+  means the snapshot file is missing — say the capability list isn't
+  generated yet; do not recite tools from memory.
