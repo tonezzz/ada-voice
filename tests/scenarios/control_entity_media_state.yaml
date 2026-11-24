@@ -1,0 +1,108 @@
+name: control-entity-media-state
+instance: tony
+# phantom-state card f67d35 (2026-11-24): the media_player state verbs
+# (turn_on/turn_off/media_play/media_pause/media_stop) returned ok
+# while HA state never moved — HA 200s the service call on a dead or
+# queue-less player and the echo read as success. Same phantom-ok
+# class the volume verbs caught 2026-10-09; state_set verification now
+# polls the entity state after the call and a state that never lands
+# in the verb's target set fails loudly.
+#
+# Under test:
+#   1) media_play paused -> playing verifies ok.
+#   2) media_play on a player that stays paused fails 'stayed'.
+#   3) media_pause playing -> paused verifies ok.
+#   4) media_stop playing -> idle verifies ok.
+#   5) turn_on off -> idle inside the longer wake window verifies ok.
+#   6) turn_off playing -> off verifies ok.
+#   7) turn_off that lands 'idle' (still on) fails — strict target set.
+#   8) media_play on an 'unknown'-state player is inconclusive, ok.
+ha_entities:
+  - {entity_id: media_player.cast_play, state: paused, available: true,
+     name: Cast Play}
+  - {entity_id: media_player.cast_swallow, state: paused, available: true,
+     name: Cast Swallow}
+  - {entity_id: media_player.cast_pause, state: playing, available: true,
+     name: Cast Pause}
+  - {entity_id: media_player.cast_stop, state: playing, available: true,
+     name: Cast Stop}
+  - {entity_id: media_player.box_wake, state: "off", available: true,
+     name: TV Box}
+  - {entity_id: media_player.cast_off, state: playing, available: true,
+     name: Cast Off}
+  - {entity_id: media_player.cast_idleoff, state: playing, available: true,
+     name: Cast Idle Off}
+  - {entity_id: media_player.cast_unknown, state: "unknown",
+     available: true, name: Cast Unknown}
+ha_states_seq:
+  # get_state reads are consumed in call order per entity; the last
+  # entry repeats. Each entity is driven once: precheck read, then the
+  # verify polls.
+  media_player.cast_play:
+    - {state: paused}
+    - {state: playing}
+  media_player.cast_swallow:
+    - {state: paused}
+    - {state: paused}
+  media_player.cast_pause:
+    - {state: playing}
+    - {state: paused}
+  media_player.cast_stop:
+    - {state: playing}
+    - {state: idle}
+  media_player.box_wake:
+    # turn_on polls up to 12x1.0s — wake lands on the second poll.
+    - {state: "off"}
+    - {state: "off"}
+    - {state: idle}
+  media_player.cast_off:
+    - {state: playing}
+    - {state: "off"}
+  media_player.cast_idleoff:
+    # turn_off lands 'idle' — the device is still on, not off.
+    - {state: playing}
+    - {state: idle}
+    - {state: idle}
+  media_player.cast_unknown:
+    - {state: "unknown"}
+steps:
+  - tool: control_entity
+    args: {entity_id: media_player.cast_play, action: media_play}
+    expect:
+      no_error: true
+      output_contains: ["verify", "playing"]
+  - tool: control_entity
+    args: {entity_id: media_player.cast_swallow, action: media_play}
+    expect:
+      error_contains: "stayed 'paused'"
+      output_contains: ["verify", "do NOT claim"]
+  - tool: control_entity
+    args: {entity_id: media_player.cast_pause, action: media_pause}
+    expect:
+      no_error: true
+      output_contains: ["verify", "paused"]
+  - tool: control_entity
+    args: {entity_id: media_player.cast_stop, action: media_stop}
+    expect:
+      no_error: true
+      output_contains: ["verify", "idle"]
+  - tool: control_entity
+    args: {entity_id: media_player.box_wake, action: turn_on}
+    expect:
+      no_error: true
+      output_contains: ["verify", "idle"]
+  - tool: control_entity
+    args: {entity_id: media_player.cast_off, action: turn_off}
+    expect:
+      no_error: true
+      output_contains: ["verify", "off"]
+  - tool: control_entity
+    args: {entity_id: media_player.cast_idleoff, action: turn_off}
+    expect:
+      error_contains: "stayed 'idle'"
+      output_contains: ["verify"]
+  - tool: control_entity
+    args: {entity_id: media_player.cast_unknown, action: media_play}
+    expect:
+      no_error: true
+      output_not_contains: ["verify"]

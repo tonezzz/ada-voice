@@ -3126,11 +3126,13 @@ class HaMergeAliasTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out, {"pressed": True, "ok": True})
         self.ha_client.press_button.assert_awaited_once_with(
             "button.gate_my_position")
-        # media_player.* -> control_media_player
+        # media_player.* -> control_media_player (turn_on now carries a
+        # state_set verify block — the entity reads 'on' throughout)
         out = await self.runner.execute(
             "control_media_player",
             {"entity_id": "media_player.tony_tv", "action": "turn_on"})
-        self.assertEqual(out, {"ok": True})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["verify"]["ok"], True)
         self.ha_client.control_media_player.assert_awaited_once_with(
             "media_player.tony_tv", "turn_on", None)
 
@@ -3371,7 +3373,144 @@ class ControlEntityVerifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("still 'opening'", out["error"])
 
     async def test_unverified_verbs_pass_through(self):
-        # State verbs carry no adjustable attr — no verify block.
+        # Momentary verbs carry no post-state — a button press has no
+        # verify block. Every media_player and cover verb verifies now
+        # (phantom-state card f67d35).
+        self.ha_client.entities.return_value.append(
+            {"entity_id": "button.restart_ada", "state": "unknown",
+             "available": True, "name": "Restart Ada"})
+        self.ha_client.press_button.return_value = {"pressed": True}
+        out = await self.runner.execute(
+            "control_entity",
+            {"entity_id": "button.restart_ada", "action": "press"})
+        self.assertTrue(out["ok"])
+        self.assertNotIn("verify", out)
+
+    # -- media_player state verbs (phantom-state card f67d35, 2026-11-24)
+    # HA 200s turn_on/turn_off/media_play/media_pause/media_stop on a
+    # dead or queue-less player and the state never moves — the same
+    # phantom-ok class the volume verbs already caught. state_set polls
+    # until the state lands in the verb's target set.
+
+    async def test_media_play_lands_playing(self):
+        async def actuate(entity_id, action, source):
+            self._mp["state"] = "playing"
+            return {"ok": True}
+        self.ha_client.control_media_player.side_effect = actuate
+        out = await self._mp_call("media_play")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["verify"]["ok"], True)
+        self.assertEqual(out["verify"]["before_state"], "paused")
+        self.assertEqual(out["verify"]["state"], "playing")
+        self.assertIn("playing", out["verify"]["targets"])
+
+    async def test_media_play_swallowed_fails(self):
+        # The phantom: HA ok'd media_play, the paused player never moved.
+        out = await self._mp_call("media_play")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["verify"]["state"], "paused")
+        self.assertIn("stayed 'paused'", out["error"])
+        self.assertIn("do NOT claim", out["error"])
+
+    async def test_media_play_buffering_counts_as_landed(self):
+        async def actuate(entity_id, action, source):
+            self._mp["state"] = "buffering"
+            return {"ok": True}
+        self.ha_client.control_media_player.side_effect = actuate
+        out = await self._mp_call("media_play")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["verify"]["state"], "buffering")
+
+    async def test_media_pause_lands_paused(self):
+        self._mp["state"] = "playing"
+
+        async def actuate(entity_id, action, source):
+            self._mp["state"] = "paused"
+            return {"ok": True}
+        self.ha_client.control_media_player.side_effect = actuate
+        out = await self._mp_call("media_pause")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["verify"]["state"], "paused")
+
+    async def test_media_pause_still_playing_fails(self):
+        self._mp["state"] = "playing"
+        out = await self._mp_call("media_pause")
+        self.assertFalse(out["ok"])
+        self.assertIn("stayed 'playing'", out["error"])
+
+    async def test_media_stop_leaves_playing_ok(self):
+        self._mp["state"] = "playing"
+
+        async def actuate(entity_id, action, source):
+            self._mp["state"] = "idle"
+            return {"ok": True}
+        self.ha_client.control_media_player.side_effect = actuate
+        out = await self._mp_call("media_stop")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["verify"]["state"], "idle")
+
+    async def test_media_stop_still_playing_fails(self):
+        self._mp["state"] = "playing"
+        out = await self._mp_call("media_stop")
+        self.assertFalse(out["ok"])
+        self.assertIn("stayed 'playing'", out["error"])
+
+    async def test_turn_on_wakes_lagging_state_ok(self):
+        # Device wake lags: the first polls still read 'off', the
+        # entity reaches 'idle' inside the longer turn_on window.
+        self._mp["state"] = "off"
+        reads = {"n": 0}
+        base = self.ha_client.get_state.side_effect
+
+        def gs(entity_id):
+            reads["n"] += 1
+            if reads["n"] >= 4:
+                self._mp["state"] = "idle"
+            return base(entity_id)
+        self.ha_client.get_state.side_effect = gs
+
+        async def actuate(entity_id, action, source):
+            return {"ok": True}
+        self.ha_client.control_media_player.side_effect = actuate
+        out = await self._mp_call("turn_on")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["verify"]["state"], "idle")
+
+    async def test_turn_on_stuck_off_fails(self):
+        self._mp["state"] = "off"
+        out = await self._mp_call("turn_on")
+        self.assertFalse(out["ok"])
+        self.assertIn("stayed 'off'", out["error"])
+
+    async def test_turn_off_lands_off(self):
+        self._mp["state"] = "playing"
+
+        async def actuate(entity_id, action, source):
+            self._mp["state"] = "off"
+            return {"ok": True}
+        self.ha_client.control_media_player.side_effect = actuate
+        out = await self._mp_call("turn_off")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["verify"]["state"], "off")
+
+    async def test_turn_off_idle_is_phantom(self):
+        # 'idle' means the device is still on — a cast that cannot
+        # power off must not narrate as turned off.
+        self._mp["state"] = "playing"
+
+        async def actuate(entity_id, action, source):
+            self._mp["state"] = "idle"
+            return {"ok": True}
+        self.ha_client.control_media_player.side_effect = actuate
+        out = await self._mp_call("turn_off")
+        self.assertFalse(out["ok"])
+        self.assertIn("stayed 'idle'", out["error"])
+
+    async def test_state_verb_unknown_state_is_inconclusive(self):
+        # HA reporting 'unknown' cannot confirm or deny — the call
+        # stays ok and carries no verify block (never a false fail).
+        self.ha_client.get_state.side_effect = (
+            lambda eid: {"entity_id": eid, "state": "unknown"})
         out = await self._mp_call("media_play")
         self.assertTrue(out["ok"])
         self.assertNotIn("verify", out)

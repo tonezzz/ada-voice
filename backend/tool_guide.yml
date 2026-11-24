@@ -42,12 +42,14 @@ control_entity: >-
   typo'd/ghost entity_id returns ok:false with a close_matches list;
   retry with one of those, never claim it ran. on/off calls verify the
   post-call state actually reached on|off ('stayed on' = the device
-  ignored it). Adjustable verbs (volume_*, volume_mute, select_source,
-  cover open/close/stop) verify the state delta after the call — ok:false
-  with a verify block means the device ignored it (a paused/off cast
-  player swallows volume calls silently); say it did not respond instead
-  of claiming it changed. Absorbs control_cover, press_button,
-  control_media_player.
+  ignored it). Adjustable verbs (volume_*, volume_mute, select_source)
+  and the media_player state verbs (turn_on/turn_off/media_play/
+  media_pause/media_stop) plus cover open/close/stop verify the state
+  after the call — ok:false with a verify block means the device
+  ignored it (a paused/off cast player swallows media calls silently,
+  and 'idle' after turn_off means it is still on); say it did not
+  respond instead of claiming it changed. Absorbs control_cover,
+  press_button, control_media_player.
 
 home_search: >-
   kind='device' searches controllable devices by name/entity_id — the
