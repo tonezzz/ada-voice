@@ -1,0 +1,63 @@
+# ada_consult post-deploy smoke (card ada-expert-consult-tool): three
+# explicit consult requests — easy / ambiguous / hard — must each fire
+# ada_consult and return ok on the ada-dev lane. tier: manual — requires
+# the ada-dev deploy carrying LITELLM_KEY_CONSULT + the ADA_CONSULT_*
+# env contract (.env.example); until the key is minted every call refuses
+# 'gateway and dedicated key are not configured' by design, which is
+# exactly what this scenario surfaces as a failure. Prod lanes never
+# declare the tool (manifest instances: [ada-dev]) so needs_tools skips
+# them; voice sessions refuse (text lanes only).
+#
+# Run on ada-dev:
+#   python3 scripts/scenario-live.py \
+#     tests/scenarios-live/ada_consult_smoke.yaml \
+#     --url ws://127.0.0.1:8003/ws --api-key "$ADA_API_KEY" -v
+#
+# Post-run verify by hand (not expressible in expect): ops events
+# consult_completed x3 with model/tokens/est-cost/latency, and the
+# LiteLLM spend ledger attributing the calls to LITELLM_KEY_CONSULT.
+# The hard turn stays on the default consult-flash alias — consult-pro/
+# consult-claude refuse until their ADA_CONSULT_{PRO,CLAUDE}_* rate-card
+# env vars are set; add a pro-alias turn once they are.
+name: ada_consult_smoke
+tier: manual
+needs_tools: [ada_consult]
+turns:
+  # easy — bounded factual-advisory question with self-contained context
+  - user: >-
+      Ask the expert for a second opinion: a home server with 32 GB RAM
+      runs Postgres, a Python API, and a few cron jobs, and it swaps
+      occasionally under load. What is the single highest-impact fix?
+    expect:
+      calls_any: [ada_consult]
+      result_contains_any: ['"ok": true', '"answer"']
+      response_nonempty: true
+      timeout_s: 180
+      settle_s: 10
+  # ambiguous — thin context; the expert should say what is missing
+  # rather than invent specifics (the consult prompt instructs exactly
+  # this), and Ada should relay that honestly.
+  - user: >-
+      Consult the expert on this: should we migrate the database?
+      I don't have the specifics written down — you pick what context
+      to send.
+    expect:
+      calls_any: [ada_consult]
+      result_contains_any: ['"ok": true', '"answer"']
+      response_nonempty: true
+      timeout_s: 180
+      settle_s: 10
+  # hard — multi-constraint reasoning the orchestrator would normally
+  # answer alone; consult must still return a bounded structured answer.
+  - user: >-
+      Ask the expert: a CI pipeline must pick between a 4-core/16 GB
+      runner at $0.004/min and an 8-core/32 GB runner at $0.009/min for
+      a job that takes 12 min on the small runner and is CPU-bound but
+      scales near-linearly to 8 cores. Which is cheaper per run, and by
+      how much?
+    expect:
+      calls_any: [ada_consult]
+      result_contains_any: ['"ok": true', '"answer"']
+      response_nonempty: true
+      timeout_s: 180
+      settle_s: 10

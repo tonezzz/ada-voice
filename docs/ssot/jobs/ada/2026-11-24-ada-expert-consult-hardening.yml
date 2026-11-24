@@ -1,0 +1,42 @@
+# SSOT Job: ada expert-consult tool — post-merge hardening (guide + smoke)
+
+date: 2026-11-24
+title: >
+  ada_consult error-path guide + manual smoke scenario — closes the
+  last in-worktree gaps; live smoke still awaits key + deploy
+domain: ada
+job: ada-expert-consult-hardening
+cards: [ada-expert-consult-tool]
+refs: [ADA-1084]
+host: tony-dell (dispatch worktree dispatch-wt-20261124-194308)
+summary: >
+  Second devin dispatch on the same card. Attempt 1 (idc02) verified
+  the already-merged implementation (ada-voice#12 squash e6c83ebe93ad
+  + chaba#180 aliases 8efa20072747), re-ran gates green, and documented
+  the env contract in .env.example. This run audited the merged tree
+  again (channel gating, cost-rate lookup order, manifest instances,
+  lazy-schema surface — all spec-correct) and closed the two remaining
+  repo-side gaps: ada_consult had no backend/tool_guide.yml entry, so
+  every pre-key refusal reached the model with no narration guidance;
+  and the card's 3-call live smoke had no runnable artifact. Both are
+  now in the tree.
+
+changes:
+  - "backend/tool_guide.yml: ada_consult entry — text-lanes-only + ada-dev soak scope, curated-context rule, allowlisted aliases, and explicit 'key not minted => expert line not live, do not retry/improvise' guidance (attached via _usage_hint on every refusal)"
+  - "tests/scenarios-live/ada_consult_smoke.yaml (tier: manual, needs_tools: [ada_consult]): easy/ambiguous/hard consult turns asserting calls_any + ok result — run on ada-dev post-deploy; needs_tools skips lanes where the tool is undeclared"
+  - "docs/ssot/ssot.tool-surface.yml: removed ada_consult from coverage_debt — the smoke scenario is its scenario reference (tool-lint warns on covered-debt entries)"
+
+audit_notes:
+  - "channel gate verified end-to-end: execute(channel=...) sets _CALLER_CHANNEL only for relay/text sessions; voice PWA passes no ?channel= so current_channel is None and consult refuses — matches TEXT LANES ONLY"
+  - "cost-rate lookup order is safe: _estimate_max_call_cost runs on the alias name BEFORE _gateway_model remap, and _RAW_TO_CLASS has no consult-* keys so the alias passes through to LiteLLM unchanged — post-call _estimate_cost still resolves rates"
+  - "consult-pro/consult-claude intentionally refuse until ADA_CONSULT_{PRO,CLAUDE}_{INPUT,OUTPUT}_USD_PER_MILLION are set — fail-closed by design"
+
+still_blocked:
+  - "LITELLM_KEY_CONSULT minting at the provider (Tony) — card requests answered: $5/30d cap, $0.10/call ceiling"
+  - "ada-dev deploy/restart on idc03 with LITELLM_KEY_CONSULT + ADA_CONSULT_* env (deploy-ada.sh gates)"
+  - "live smoke: python3 scripts/scenario-live.py tests/scenarios-live/ada_consult_smoke.yaml --url ws://127.0.0.1:8003/ws --api-key \"$ADA_API_KEY\" -v on ada-dev, then ops events + LiteLLM spend ledger check"
+  - "micro-bench consult-vs-direct on the messy/ambiguous fixtures — needs the live gateway; fixtures live outside this repo (chaba-side ADA-1088 bench)"
+
+gates:
+  tool_lint: "clean (69 warnings, none new; coverage 65 scenario-covered / 29 debt)"
+  scenario_schema: "211 files, 0 violations"
