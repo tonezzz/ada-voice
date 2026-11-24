@@ -120,6 +120,11 @@ class ToolRunner(
                 or self.session_caller_ha_person
                 or self.session_caller_name)
 
+    @property
+    def current_channel(self) -> str | None:
+        """The channel for this in-flight provider tool call."""
+        return _CALLER_CHANNEL.get()
+
     def _current_speaker(self) -> str | None:
         """Session-scoped identified speaker — the ContextVar set by
         execute() wins (a session with NO identified speaker passes None,
@@ -254,7 +259,8 @@ class ToolRunner(
                       speaker: Any = _IDENTITY_UNSET,
                       speaker_session: Any = _IDENTITY_UNSET,
                       owner: Any = _IDENTITY_UNSET,
-                      session: Any = _IDENTITY_UNSET) -> Any:
+                      session: Any = _IDENTITY_UNSET,
+                      channel: Any = _IDENTITY_UNSET) -> Any:
         # Retired names from the tool consolidation resolve to their
         # canonical action= tool first — the alias table is the contract,
         # phonetic normalization below is just typo repair. The alias's
@@ -318,6 +324,10 @@ class ToolRunner(
             _CALLER_SESSION.set(session)
             if session is not _IDENTITY_UNSET else None
         )
+        _channel_token = (
+            _CALLER_CHANNEL.set(channel)
+            if channel is not _IDENTITY_UNSET else None
+        )
         try:
             return await self._execute_gated(
                 name, call_args, ident, method=method, dyn_spec=dyn_spec,
@@ -341,6 +351,8 @@ class ToolRunner(
                 _CALLER_OWNER.reset(_owner_token)
             if _sess_token is not None:
                 _CALLER_SESSION.reset(_sess_token)
+            if _channel_token is not None:
+                _CALLER_CHANNEL.reset(_channel_token)
 
     @property
     def _dynamic_tools(self) -> tools_loader.ToolRegistry:

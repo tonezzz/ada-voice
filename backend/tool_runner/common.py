@@ -311,6 +311,11 @@ _CALLER_VERIFIED_AFFIRM: contextvars.ContextVar = contextvars.ContextVar(
 _CALLER_SESSION: contextvars.ContextVar = contextvars.ContextVar(
     "ada_caller_session", default=None)
 
+# Realtime provider channel is scoped per tool call; a shared runner may
+# serve both voice and text sessions concurrently.
+_CALLER_CHANNEL: contextvars.ContextVar = contextvars.ContextVar(
+    "ada_caller_channel", default=None)
+
 # Session -> originating chat binding for relay channels (line/telegram).
 # pwa_server binds ?chat_id= at ws connect and unbinds at teardown;
 # chat_send reads it through the per-call session contextvar so a tool

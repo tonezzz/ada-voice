@@ -348,19 +348,25 @@ def cache_put(namespace: str, key: str, value: Any, ttl_s: float) -> None:
 # ---------------------------------------------------------------- generate
 
 def rest_client(api_key: str | None = None,
-                extra_headers: dict | None = None) -> Any:
+                extra_headers: dict | None = None,
+                *, gateway_api_key: str | None = None) -> Any:
     """genai client for REST side-calls (decision checks, polish, devteam,
     doc checks, vision verify). When ADA_GEMINI_REST_BASE_URL is set the
     call rides the LiteLLM gateway /v1beta route — ordered paid→free→OR
     chains + spend logging — authenticated by ADA_GEMINI_REST_API_KEY (a
-    LiteLLM virtual key), not the raw Google key. The Live ws session in
-    realtime_provider never uses this: ws stays direct to Google.
+    LiteLLM virtual key), not the raw Google key. `gateway_api_key` is an
+    explicit virtual-key override for isolated lanes. The Live ws session
+    in realtime_provider never uses this: ws stays direct to Google.
     """
     from google import genai
     base = os.environ.get("ADA_GEMINI_REST_BASE_URL", "").strip()
+    if gateway_api_key and not base:
+        raise RuntimeError(
+            "gateway_api_key requires ADA_GEMINI_REST_BASE_URL")
     if base:
         from google.genai import types
-        key = os.environ.get("ADA_GEMINI_REST_API_KEY") or api_key
+        key = (gateway_api_key or
+               os.environ.get("ADA_GEMINI_REST_API_KEY") or api_key)
         return genai.Client(
             api_key=key,
             http_options=types.HttpOptions(

@@ -1,5 +1,6 @@
 import asyncio
 import collections
+import os
 import tempfile
 import textwrap
 import unittest
@@ -103,6 +104,17 @@ class LoadTest(unittest.TestCase):
         reg = tools_loader.load(self.td.dir)
         self.assertEqual(len(reg.declarations()), 1)
         self.assertEqual(reg.declarations({"ada_x"}), [])
+
+    def test_instance_scoped_tool_is_not_loaded_on_other_lanes(self):
+        self.td.write(
+            "ada_x", GOOD_TOOL.replace("%NAME%", "ada_x"),
+            {"ada_x": {"module": "ada_x", "instances": ["ada-dev"]}})
+        with patch.dict(os.environ, {"ADA_INSTANCE_ID": "ada-ha-tony"}):
+            prod_reg = tools_loader.load(self.td.dir)
+        with patch.dict(os.environ, {"ADA_INSTANCE_ID": "ada-dev"}):
+            dev_reg = tools_loader.load(self.td.dir)
+        self.assertNotIn("ada_x", prod_reg.tools)
+        self.assertIn("ada_x", dev_reg.tools)
 
     def test_no_manifest_empty(self):
         reg = tools_loader.load(self.td.dir)

@@ -531,7 +531,8 @@ class OpenRouterTextProvider(RealtimeProvider):
                             speaker=self.current_speaker_ha_person,
                             speaker_session=self.speaker_session,
                             owner=owner,
-                            session=self.session_id)
+                            session=self.session_id,
+                            channel=self.channel)
                         result = normalize_tool_result(
                             out if isinstance(out, dict)
                             else {"ok": True, "output": out})
