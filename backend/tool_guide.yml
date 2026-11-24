@@ -819,6 +819,22 @@ ada_opencode_dispatch: >-
   dispatch: kanban status/read reports the runner verdict — report the
   outcome, never describe an unverified run as done.
 
+ada_consult: >-
+  Read-only second opinion from a stronger model — Ada asks, the
+  expert answers, Ada narrates; it is advice, never execution authority
+  and never a substitute for her own confirm gates. Text lanes only
+  (voice refuses by design — a multi-second consult cannot hold a Live
+  turn) and ada-dev only during the v1 soak; prod lanes do not declare
+  it. Pass a bounded question + curated context (context_class='curated'
+  — private transcripts and secrets are refused, and that refusal is
+  final: do not rephrase around it). consult_model picks an allowlisted
+  alias: consult-flash default, consult-pro/consult-claude for hard
+  cases (their rate card must be configured or they refuse — that is
+  intentional, not a retry cue). Until LITELLM_KEY_CONSULT is minted
+  every call refuses 'gateway and dedicated key are not configured' —
+  tell the user the expert line is not live yet; do not retry or
+  improvise an answer as if the consult ran.
+
 wiki_read: >-
   Reads ONE wiki page by exact title — get titles from wiki_search or a
   lesson/report mention, never guess. Education:* and PrivateNews:* are
