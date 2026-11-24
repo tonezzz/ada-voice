@@ -174,3 +174,9 @@ tools:
     policy: read
     secondary_allowed: true
     timeout_s: 15
+  ada_consult:
+    module: ada_consult
+    policy: read
+    secondary_allowed: false
+    timeout_s: 180
+    instances: [ada-dev]
