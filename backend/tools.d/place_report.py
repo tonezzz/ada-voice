@@ -1,4 +1,10 @@
-"""place_report — turn a Google Maps link (or a place name) into a public
+"""place_report — absorbed into `wp` action='place'
+(tools.d/wp.py, card ada-tool-consolidation-merge-overlapping-615ba9).
+This module stays as the implementation seat — it is NOT manifest-
+declared; the wp tool dispatches here and the place_report name lives
+on as a tool_runner._ALIASES row. Original docstring:
+
+turn a Google Maps link (or a place name) into a public
 CMS report page and hand back the link to send in chat.
 
 The kk lane sees members paste maps.app.goo.gl / google.com/maps links in

@@ -1,0 +1,79 @@
+# SSOT Job: WP write-tool consolidation — canonical `wp` tool with
+# action= dispatcher; four overlapping boards-WordPress writers absorbed as
+# aliases. Card: ada-tool-consolidation-merge-overlapping-615ba9
+# (chaba kanban, ref ADA-1203). Dispatch 20261124-143127, runner
+# tony-macbook. Prior attempts (2-4) all exited on provider rate-limits
+# with zero code changes; this is the first run that landed the diff.
+
+title: Ada tool consolidation — merge overlapping CMS write surfaces
+subtitle: >-
+  The card spec named cms_publish_page / cms_edit / wp_post / cpt_post /
+  place_report as "overlapping CMS write surfaces". The audit found the
+  real overlap was only on the WordPress side: four tools.d writers
+  (wp_post, cpt_post, place_report, wp_chat_page) all talk to
+  boards.surf-thailand.com REST via backend/wp_client.py, and place_report
+  had been moved CMS->WP on 2026-10-14 (81e2760) creating the overlap.
+  cms_publish_page / cms_edit write to the MDDB miniapp CMS
+  (ada-cms-pages -> surf-thailand.com static lane) — a different sink —
+  so they stay declared.
+
+planning:
+  goal: |
+    One canonical write tool per sink. For the boards-WordPress sink,
+    expose a single `wp` tool with action=post|record|place|chat_page and
+    keep the four old names working as aliases (LLM-visible schema stays
+    stable for transcripts/history).
+  scope: |
+    Delivered:
+      - backend/tools.d/wp.py — new dispatcher module. tools.d drop-in
+        whose DECLARATION name is `wp`; async run(runner, **args) reads
+        action and delegates via _load_impl to the retained sibling
+        modules (wp_post.py, cpt_post.py, place_report.py,
+        wp_chat_page.py), which stay in the tree as implementation seats.
+      - backend/tools.d/manifest.yml — the four absorbed entries replaced
+        by one `wp` entry (module: wp, policy: read,
+        secondary_allowed: true, timeout_s: 60).
+      - backend/tool_runner/common.py — _ALIASES rows
+        wp_post|cpt_post|place_report|wp_chat_page -> wp plus
+        _ALIAS_ARG_DEFAULTS injecting the matching action= so old calls
+        resolve unchanged.
+      - docs/ssot/ssot.tool-surface.yml — new `wp` family
+        (merge_card: this card, canonical: wp, scenario:
+        tool_merge_wp, absorbed: the four names); place_report and
+        cpt_post removed from coverage_debt.
+      - scripts/scenario-live.py — LEGACY_TOOLS mirror +
+        LEGACY_ARG_DEFAULTS updated so scenario tooling sees the same
+        alias map.
+      - backend/tool_guide.yml — three separate entries merged into one
+        `wp` guide entry covering all four actions (stale place_report
+        text fixed).
+      - tests/scenarios-live/wp_post.yaml + wp_chat_page.yaml —
+        calls_any expectations updated old name -> wp.
+      - tests/scenarios-live/tool_merge_wp.yaml — NEW family regression
+        scenario (required by the tool-lint family contract).
+      - tests/test_wp_tool.py — NEW unit test for the dispatcher;
+        stubs _load_impl via monkeypatch.
+    Explicitly NOT done:
+      - cms_publish_page / cms_edit untouched — different sink (MDDB CMS),
+        correctly out of scope.
+      - No deploy/restart; deploy-ada.sh on idc03 is the only path.
+      - No live /ws scenario smoke — deferred to post-deploy cadence per
+        the scenario-live convention.
+  success_criteria:
+    - 'python3 scripts/tool-lint.py clean: 70 declared (38 builtin + 32
+      tools.d), 96 aliases, 64 scenario-covered'
+    - 'alias calls keep working: wp_post/cpt_post/place_report/wp_chat_page
+      resolve to wp with the right action= default injected'
+    - 'uv run pytest tests/ green (deploy gate)'
+
+notes:
+  - 'Design choice: dispatcher delegates to retained impl modules rather
+    than inlining four bodies — keeps the per-action arg schemas and
+    error handling untouched and makes future per-action fixes local to
+    the seat module.'
+  - 'Verification env: `uv run --with-requirements backend/requirements.txt
+    --with pytest --with pytest-asyncio` — system python3 lacks
+    pytest/httpx/websockets; the worktree ships no .venv.'
+  - 'Test fixture gotcha: dict.setdefault returns the dict, so
+    `calls.setdefault(...) or result` never yields result — use an
+    explicit local.'

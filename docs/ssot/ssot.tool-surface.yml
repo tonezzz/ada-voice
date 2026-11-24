@@ -383,6 +383,25 @@ families:
   # kanban tool — the design's full board surface (list/read/comment/
   # move/ask/file + owner-gated respond) under Ada's triage authority.
   # The old action names (create/read/respond) map inside the module.
+  # boards-wp family (ada-tool-consolidation-merge-overlapping-615ba9,
+  # 2026-11-24): the four boards-WordPress writers shared ONE backend
+  # door — wp_client -> boards.surf-thailand.com REST — and differed
+  # only in WP post type, so they collapse into wp(action=...). The
+  # audit found NO overlap with cms_publish_page/cms_edit: those write
+  # the MDDB miniapp CMS (ada-cms-pages -> surf-thailand.com static
+  # lane), a different sink — they stay declared. place_report moved
+  # CMS->WP on 2026-10-14 (commit 81e2760), which is what made the WP
+  # side the real overlap. Implementation seats stay in tools.d/ as
+  # non-manifest modules; wp.py dispatches action= to them.
+  wp:
+    merge_card: ada-tool-consolidation-merge-overlapping-615ba9
+    canonical: wp                 # post/record/place/chat_page -> action= (record keeps kind=)
+    scenario: tool_merge_wp
+    absorbed:
+      - wp_post                   # -> action='post' (free-form member post)
+      - cpt_post                  # -> action='record' (kind=expense|contact|reminder|asset)
+      - place_report              # -> action='place' (maps-link report page)
+      - wp_chat_page              # -> action='chat_page' (member webchat page)
   kanban:
     merge_card: ada-kanban-access
     canonical: kanban              # list/read/comment/move/ask/file/respond -> action=
@@ -426,8 +445,6 @@ coverage_debt:
   - press_button
   - tasks_move
   - yt_cast_status
-  - place_report
-  - cpt_post
   - weather_station
   - ada_sweep
   - ada_lesson

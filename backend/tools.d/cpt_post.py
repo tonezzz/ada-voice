@@ -1,4 +1,10 @@
-"""cpt_post — save a structured record to the right boards WordPress
+"""cpt_post — absorbed into `wp` action='record'
+(tools.d/wp.py, card ada-tool-consolidation-merge-overlapping-615ba9).
+This module stays as the implementation seat — it is NOT manifest-
+declared; the wp tool dispatches here and the cpt_post name lives on as
+a tool_runner._ALIASES row. Original docstring:
+
+save a structured record to the right boards WordPress
 custom post type instead of a free-form wp_post.
 
 LINE "save this" asks classify to a record kind (card

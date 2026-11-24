@@ -1,4 +1,10 @@
-"""wp_post — publish a LINE chat message as a post on the boards
+"""wp_post — absorbed into `wp` action='post'
+(tools.d/wp.py, card ada-tool-consolidation-merge-overlapping-615ba9).
+This module stays as the implementation seat — it is NOT manifest-
+declared; the wp tool dispatches here and the wp_post name lives on as
+a tool_runner._ALIASES row. Original docstring:
+
+publish a LINE chat message as a post on the boards
 WordPress site and hand back the link to send in chat.
 
 The kk lane members chat in LINE ("post to my site: ..." or a photo with
