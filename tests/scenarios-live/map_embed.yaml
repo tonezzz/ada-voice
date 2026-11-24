@@ -1,0 +1,14 @@
+name: map-embed
+tier: smoke
+turns:
+  # Map builder (chaba card map-embed-tool, 2026-10-27). The ask is a
+  # real two-stop static map; the contract under test is that the tool
+  # is declared, dispatches, and returns a snippet the model relays —
+  # ok:true with an OSM image when no key is set, ok:true with a Google
+  # image when it is, never a narrated map that wasn't built.
+  - user: "Use map_embed to build a static map pinned on Cape Town and Stellenbosch, then give me the open_url link."
+    expect:
+      calls_any: ["map_embed"]
+      response_nonempty: true
+      timeout_s: 60
+      settle_s: 2

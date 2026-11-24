@@ -174,3 +174,8 @@ tools:
     policy: read
     secondary_allowed: true
     timeout_s: 15
+  map_embed:
+    module: map_embed
+    policy: read
+    secondary_allowed: true
+    timeout_s: 60
