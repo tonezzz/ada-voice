@@ -867,3 +867,15 @@ host_status: >-
   For fleet-wide DevNest queue/lane overview (not one named host) use
   nest_status instead; for any one host's health, disk or workload use
   this tool.
+ada_capabilities: >-
+  The "what can you do" read path — overview answers list capability
+  groups from the deploy-time tools snapshot; pass topic=<tool|family|
+  group> for detail on one area (e.g. topic="home_search" or
+  topic="home control"). It reports the DECLARED surface from the last
+  deploy snapshot, not live health — quote `answer` (pre-composed,
+  speakable) and the "as of <date>" line; if the snapshot is stale the
+  answer says so, relay that caveat. It never fabricates: ok:false
+  "capability list not generated" means the snapshot file is missing —
+  say the capability list isn't available right now, do not invent
+  tools. Absorbed old names still resolve in topic= (they redirect to
+  the canonical tool) but are never listed as capabilities.
