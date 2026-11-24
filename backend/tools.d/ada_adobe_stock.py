@@ -36,7 +36,7 @@ CAMPAIGN = "AS-2026-11-05-REMOTE-WORK-001"
 _TIMEOUT = 30.0
 _DECISIONS = ("keep", "reject", "revise")
 
-TOOL = {
+DECLARATION = {
     "name": "ada_adobe_stock",
     "description": (
         "Adobe Stock campaign QC — status/decide/repair_info. status "

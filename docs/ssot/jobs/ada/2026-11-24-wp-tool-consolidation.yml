@@ -67,6 +67,16 @@ planning:
     - 'uv run pytest tests/ green (deploy gate)'
 
 notes:
+  - 'Verify pass (dispatch 20261124-151206, tony-dell, attempt 2):
+    re-audited all backend doors — board-api /report is read-only via
+    wiki_search mode=search, /publish has the single devnest_news
+    writer, WP CPTs consolidated. Confirmed cms_publish_page/cms_edit
+    stay per the tools-merge-cms canonical 3-tool design (different
+    sink AND deliberately split writer). tool-lint clean; full suite
+    1974 passed. Side fix: ada_adobe_stock.py declared its schema as
+    TOOL not DECLARATION — unloadable since 2026-11-08; renamed, tool
+    now registers (manifest/guide/coverage_debt already assumed it
+    live).'
   - 'Design choice: dispatcher delegates to retained impl modules rather
     than inlining four bodies — keeps the per-action arg schemas and
     error handling untouched and makes future per-action fixes local to
