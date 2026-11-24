@@ -79,23 +79,15 @@ tools:
     policy: read
     secondary_allowed: true
     timeout_s: 120
-  place_report:
-    module: place_report
-    policy: read
-    secondary_allowed: true
-    timeout_s: 60
-  wp_post:
-    module: wp_post
-    policy: read
-    secondary_allowed: true
-    timeout_s: 60
-  wp_chat_page:
-    module: wp_chat_page
-    policy: read
-    secondary_allowed: true
-    timeout_s: 60
-  cpt_post:
-    module: cpt_post
+  # boards WordPress write surface — card
+  # ada-tool-consolidation-merge-overlapping-615ba9 (2026-11-24): the four
+  # writers (wp_post/cpt_post/place_report/wp_chat_page) shared one
+  # backend door (wp_client -> boards.surf-thailand.com REST) and
+  # collapsed into wp(action=post|record|place|chat_page); the old names
+  # live on as tool_runner._ALIASES rows. Modules stay in tools.d/ as
+  # implementation seats — only `wp` is manifest-declared.
+  wp:
+    module: wp
     policy: read
     secondary_allowed: true
     timeout_s: 60

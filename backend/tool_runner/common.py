@@ -608,6 +608,17 @@ _ALIASES: dict[str, str] = {
     # kanban tool — the design's full board surface under Ada's triage
     # authority (its action names map through inside the module).
     "ada_board_write": "kanban",
+    # boards-wp family — ada-tool-consolidation-merge-overlapping-615ba9
+    # (2026-11-24): the four boards-WordPress writers shared one backend
+    # door (wp_client -> boards.surf-thailand.com REST) and collapse
+    # into wp(action=post|record|place|chat_page). cms_publish_page/
+    # cms_edit stay declared — they write the MDDB miniapp CMS, a
+    # different sink. Arg names map 1:1; only the implied action= rides
+    # in _ALIAS_ARG_DEFAULTS.
+    "wp_post": "wp",
+    "cpt_post": "wp",
+    "place_report": "wp",
+    "wp_chat_page": "wp",
 }
 
 # Args an aliased call carries implicitly — the absorbed name implies the
@@ -726,6 +737,12 @@ _ALIAS_ARG_DEFAULTS: dict[str, dict[str, Any]] = {
     "devin_pending": {"action": "pending"},
     "devin_job_report": {"action": "report"},
     "ada_devteam_review": {"action": "review"},
+    # boards-wp family — each absorbed name implies its wp action=; the
+    # arg spellings already match the merged schema 1:1 (no shim).
+    "wp_post": {"action": "post"},
+    "cpt_post": {"action": "record"},
+    "place_report": {"action": "place"},
+    "wp_chat_page": {"action": "chat_page"},
 }
 
 def _resolve_alias(name: str) -> tuple[str, dict[str, Any]]:

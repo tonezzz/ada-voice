@@ -278,6 +278,11 @@ LEGACY_TOOL_ALIASES: dict[str, str] = {
     "vcast_shortcut": "cast_to_screen",
     # ada-kanban-access (2026-10-08)
     "ada_board_write": "kanban",
+    # boards-wp family — ada-tool-consolidation-merge-overlapping-615ba9
+    "wp_post": "wp",
+    "cpt_post": "wp",
+    "place_report": "wp",
+    "wp_chat_page": "wp",
 }
 
 # Implied args an absorbed name carries into the canonical call
@@ -290,6 +295,11 @@ LEGACY_ARG_DEFAULTS: dict[str, dict] = {
     "vcast_list": {"action": "list"},
     "vcast_status": {"action": "status"},
     "vcast_shortcut": {"action": "shortcut"},
+    # boards-wp family — each absorbed name implies its wp action=
+    "wp_post": {"action": "post"},
+    "cpt_post": {"action": "record"},
+    "place_report": {"action": "place"},
+    "wp_chat_page": {"action": "chat_page"},
     # tools-merge-meta-voice (2026-10-05)
     "ada_set_voice": "ada_persona",
     "ada_outcome": "ada_ops",

@@ -1,4 +1,10 @@
-"""wp_chat_page — create/update a member's private webchat page on the
+"""wp_chat_page — absorbed into `wp` action='chat_page'
+(tools.d/wp.py, card ada-tool-consolidation-merge-overlapping-615ba9).
+This module stays as the implementation seat — it is NOT manifest-
+declared; the wp tool dispatches here and the wp_chat_page name lives
+on as a tool_runner._ALIASES row. Original docstring:
+
+create/update a member's private webchat page on the
 boards WordPress site (card webchat-lane-boards).
 
 The page lives under /chat/ (private status, same as /chat/line/*) and
