@@ -1,0 +1,90 @@
+title: LINE file/doc ingest — relay archive + doc_read tool
+id: 2026-10-13-line-file-doc-ingest
+card: line-file-doc-ingest
+date: 2026-10-13
+status: shipped-chaba-pending-adapi
+summary: |
+  Tony sent Kaewta a PDF trip ticket over LINE and she never saw it —
+  type:file messages had no handler in line_relay.py (dropped silently;
+  _MIME_EXT mapped audio/video only so docs would archive as .bin).
+  This drop adds the full path: relay archives inbound file/video bytes
+  to the durable /relay-img/arch/ hop + journals kind=file + surfaces a
+  '[document received: …]' turn; the doc_read tools.d tool resolves the
+  arch URL back to bytes and extracts fields via the lane gemini pool.
+  Attempt 1 (ada-voice worktree 20261013-100510) left an uncommitted
+  60-line line_relay diff and no tool — this run re-did it as a
+  complete staged drop with in-worktree verification.
+
+deliverables:
+  - file: integrations/ada-voice/backend/line_relay.file-doc-ingest.patch
+    role: relay patch (vs ada-voice main @ 1716db7)
+    detail: |
+      _MIME_EXT += pdf/doc/docx/xls/xlsx/csv/txt; _MEDIA_INBOUND =
+      ("file","video") — every remaining content-fetchable LINE type.
+      handle_event media branch: _fetch_content (api-data.line.me) ->
+      _archive_media -> journal {"dir":"in","kind":<mtype>,"url","name",
+      "mime","size"} -> sess.send_turn("[document received: <name> <mime>
+      <url>] — doc_read can extract its contents…"). octet-stream payloads
+      re-guess mime from fileName so .pdf lands as .pdf. sticker/
+      location/imagemap/template keep the refusal (no fetchable blob).
+  - file: integrations/ada-voice/backend/tools.d/doc_read.py
+    role: ada tool (staged, NOT deployed)
+    detail: |
+      doc_read(path_or_url, prompt?) — resolves /relay-img/arch/ URLs
+      (absolute or host-relative), archive-relative <chat>/<file> names,
+      img-cache nonces, or absolute paths INSIDE the two media roots
+      only (LINE_MEDIA_ARCHIVE_DIR + LINE_IMG_CACHE_DIR — same env names
+      as the relay so both processes agree). Bytes ->
+      gemini_pool.generate inline Part (ADA_DOC_READ_MODEL default
+      gemini-3.5-flash-lite, ADA_DOC_READ_MAX_BYTES default 15 MiB).
+      Returns {ok,text,name,mime,bytes,source,model}.
+  - file: integrations/ada-voice/backend/tools.d/manifest.doc_read.yml
+    role: manifest entry (policy=read, secondary_allowed=true, timeout 60)
+  - file: integrations/ada-voice/backend/tool_guide.doc_read.yml
+    role: model usage guidance
+  - file: integrations/ada-voice/tests/scenarios-live/doc_read.yaml
+    role: coverage scenario (tool-surface lint bars uncovered new tools)
+  - file: integrations/ada-voice/docs/ssot/ssot.tool-surface.count_cap.patch
+    role: count_cap ratchet 111 -> 112 (same-commit rule)
+  - file: docs/ssot/apps/ssot.apps.ada-persons.yml
+    role: profile update
+    detail: |
+      doc_read added to persons.kk.tools.include,
+      bench_profiles.kk-cms-only and kk-parity. Render to
+      ada-kk.env/ada-kk-dev.env via scripts/ada/render-tool-profiles.py
+      AFTER the ada-voice deploy — the allowlist names a tool that must be
+      declared first.
+  - file: tests/ada/test_line_file_doc_ingest.py
+    role: in-worktree verification (14 tests)
+    detail: |
+      doc_read standalone (stubbed backend.gemini_pool + google.genai):
+      arch/nonce/relative/absolute resolution, root confinement + ..
+      traversal refusal, missing-file honest error, empty/oversize
+      guards, inline-part bytes+mime asserted, generate-failure spoken
+      error. Relay: patch applies cleanly to the live ada-voice source,
+      compiles, handle_event simulation (DM file -> archive .pdf +
+      journal + synthetic turn + delivered reply; DM video same path;
+      sticker still refused).
+
+verify:
+  worktree: "pytest tests/ada/ -> 37 passed (14 new); ssot-validate-all 2191 files 0 errors"
+  patch: "git apply --check vs ~/CascadeProjects/ada-voice @ 1716db7 clean; py_compile ok"
+  live: |
+    After install + deploy: send a PDF as a LINE file message to the
+    kk-dev room/DM -> journal kind=file under
+    ~/.local/share/ada/line-media/<chat>/journal-<day>.jsonl, arch URL
+    served 200, persona reacts; ask 'what does that document say' ->
+    doc_read call returns extracted fields.
+
+install_runbook: integrations/ada-voice/README.md — Drop 2 section
+
+gaps_and_notes:
+  - "Doc payloads inline to Gemini — 15 MiB cap; bigger files need a
+    split or page-range feature (not built, no ask yet)."
+  - "docx/xlsx ingest relies on Gemini's document understanding —
+    tables may come back loose; the prompt arg is the steering knob."
+  - "ada-voice checkout + dispatch worktree of attempt 1 still carry the
+    abandoned 60-line diff — discard it when landing this drop (git
+    restore backend/line_relay.py in dispatch-wt-20261013-100510)."
+  - "LINE fileSize isn't asserted by LINE — it's whatever the client
+    declared; journal records it as informational only."

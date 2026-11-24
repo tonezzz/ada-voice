@@ -1,0 +1,77 @@
+# SSOT Job: voice-session churn — context-budget rotate on multi-pass billing
+# Card: ada-voice-session-churn (chaba kanban). Dispatch
+# 20261010-080544-ada-voice-sessions-churn-1-min.
+
+title: Voice sessions churned ~1/min — billed turn input ≠ context-window size
+
+context:
+  symptom: |
+    Browser voice sessions disconnected and re-greeted roughly once a
+    minute; each new session appeared to forget the live conversation.
+    Production journal (ada-ha-tony, idc03): every session ended with a
+    'usage summary' line (only emitted by GeminiLiveProvider.close())
+    followed by 'provider stream ended: 1000 None', then a reconnect
+    logged resumed=False and a fresh session prime.
+
+  root_cause: |
+    The context-budget guard (card ada-context-budget, commit d614648)
+    scheduled _context_rotate_when_idle() whenever a turn's
+    prompt_token_count exceeded ADA_CONTEXT_TURN_BUDGET (45000).
+    prompt_token_count is the turn's TOTAL billed input across all
+    generation passes — a tool_call batch containing a blocking call
+    (server ids these fc_*, will_continue unset) makes the model
+    re-generate with responses appended and re-bills the whole window.
+    A healthy ~26k window therefore billed ~51-52k on any blocking-tool
+    turn (usage ledger: routine turns 25-36k, tool turns 51-61k,
+    occasional 77k). Every such turn tripped the guard: the rotate
+    cleared resumption_handle and close()d the provider, the reconnect
+    ran resumed=False, and the cold session prime re-greeted with
+    amnesia. The ws never dropped — this was self-inflicted provider
+    churn. Context-window compression (trigger ~32k) was already keeping
+    real window occupancy ~25-30k the whole time.
+
+changes:
+  - file: backend/realtime_provider.py
+    what: |
+      _record_usage(usage, continuation_passes=0): the budget compare now
+      uses est_window = billed_in / (1 + continuation_passes).
+      events() counts continuation_passes_this_turn — one billed pass per
+      tool_call batch containing a blocking call (fc_* id OR will_continue
+      unset) — reset on turn_complete/interrupt like the other per-turn
+      counters. Rotate still fires on genuine window saturation, and now
+      logs billed_in/est_window/passes to the journal (ops events don't
+      land there).
+  - file: pwa_server.py
+    what: |
+      The provider-reconnect loop now primes non-resumed reconnects with
+      reconnect=(0.0, conversation.recent_context(max_turns=6,
+      max_chars=800)) — the shared ConversationMemory survives the
+      provider swap, so a fresh session resumes the live exchange instead
+      of cold-greeting.
+  - file: backend/memory_ops.py
+    what: |
+      reconnect_directive: gaps <30s get a 'voice link just restarted —
+      same conversation, do not greet, pick up where you left off' note
+      (plus the tail) instead of the RESUME tier's 'greet briefly'.
+      Covers provider-internal swaps and ws flaps; away_tier unchanged.
+  - file: tests/test_context_budget.py
+    what: |
+      test_tool_turn_billing_does_not_rotate: 52k billed over 1 pass and
+      77k billed over 2 passes must not rotate; 160k over 2 passes
+      (est 53k) still rotates once.
+
+verification:
+  - python -m unittest tests.test_context_budget — 12/12 pass
+  - Full unit run: 415 tests, 2 pre-existing tool-audit lint failures
+    (voice_fx description size, yt_cached_list undeclared, coverage debt)
+    unrelated to this change.
+  - Journal after deploy: expect 'provider stream ended' /
+    'provider reconnected (resumed=False)' to drop to go_away-scale
+    frequency, 'context_rotate scheduled' only on real saturation, and
+    'usage summary' cadence per session lifetime rather than per minute.
+
+notes: |
+  Not deployed — dispatch task explicitly forbade push/deploy. Awaiting
+  review + normal deploy via ~/.local/bin/deploy-ada.sh.
+  Related: docs/ssot/jobs/ada/2026-10-08-memory-hit-shape-guard.yml,
+  card ada-context-budget (rotate origin).
