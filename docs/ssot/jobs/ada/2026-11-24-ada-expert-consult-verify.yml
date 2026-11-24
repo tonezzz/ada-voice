@@ -1,0 +1,54 @@
+# SSOT Job: ada expert-consult tool — merge verification + activation checklist
+
+date: 2026-11-24
+title: >
+  ada_consult post-merge verification — code landed, activation blocked
+  on key + deploy
+domain: ada
+job: ada-expert-consult-verify
+cards: [ada-expert-consult-tool]
+refs: [ADA-1084]
+host: idc02 (dispatch worktree dispatch-wt-20261124-190937)
+summary: >
+  Re-dispatch after the Jules EOL reroute. The implementation was
+  already merged earlier today: ada-voice#12 (squash e6c83ebe93ad,
+  "Ada expert-consultation tool") + chaba#180 (consult gateway aliases,
+  8efa20072747). This run verified the merged tree against the card
+  spec, re-ran the gates, and closed the one doc gap (env vars were
+  undocumented). Live smoke remains blocked on two non-code steps:
+  LITELLM_KEY_CONSULT must be minted (Tony credential action, ~$5/30d
+  cap, consult-tier aliases only) and ada-dev must be deployed/restarted
+  with the new env on idc03.
+
+verified:
+  code_landed: >
+    backend/tools.d/ada_consult.py (329 lines) + manifest entry
+    (policy: read, timeout_s: 180, instances: [ada-dev]) +
+    tests/test_ada_consult.py (13 tests) all present on origin/main.
+  spec_coverage:
+    - "dedicated LITELLM_KEY_CONSULT virtual key, no shared-key fallback"
+    - "allowlisted aliases only: consult-flash|consult-pro|consult-claude (raw model names refused); ADA_CONSULT_MODEL env override"
+    - "text lanes only: refuses when current_channel is unset (voice); channel=chat|web|telegram|line pass"
+    - "ada-dev soak gate: manifest instances + ADA_INSTANCE_ID=ada-dev double-gate — prod lanes cannot run it even if declared"
+    - "bounds: ADA_CONSULT_MAX_{USD,TOKENS,WALL_S,QUESTION_CHARS,CONTEXT_CHARS}; max_tokens floor 2048 (ADA-1088 reasoning-token truncation gotcha)"
+    - "fail-closed cost gate: refuses unless per-model USD/MTok rates are configured (ADA_CONSULT_{FLASH,PRO,CLAUDE}_{INPUT,OUTPUT}_USD_PER_MILLION) AND the pre-call estimate fits ADA_CONSULT_MAX_USD"
+    - "context boundary: context_class must be 'curated', memory_write_guard.scan on question+context, is_transcript_shaped refusal, untrusted-context prompt header"
+    - "ops events consult_requested/completed/failed with model, tokens, est cost, latency; question logged as sha256 only (no content leak)"
+    - "no memory write-back at v1"
+  gates:
+    tool_lint: "clean (69 warnings, none new)"
+    pytest: "1971 passed, 4 skipped, 31 subtests (idc02 dispatch venv)"
+
+gaps_closed_this_run:
+  - ".env.example had no consult section — added the full env contract (key, model alias, caps, rate card, guard summary) so the ada-dev env file can be set without reading source"
+
+still_blocked:
+  - "LITELLM_KEY_CONSULT minting at the provider (Tony) — until then every consult refuses with 'gateway and dedicated key are not configured' (by design)"
+  - "ada-dev deploy/restart on idc03 with LITELLM_KEY_CONSULT + ADA_CONSULT_* env — deploy-ada.sh gates, drain, then live smoke"
+  - "live smoke: 3 consult calls (easy/ambiguous/hard) on ada-dev text lane + ops events + LiteLLM spend ledger verification"
+  - "bench: consult-on-hard-cases vs direct on the 4 messy/ambiguous micro-bench fixtures — needs the live gateway"
+
+notes:
+  - "consult-pro/consult-claude refuse until their rate-card env vars are set — intentional fail-closed, not a bug"
+  - "mode=text sessions with no channel param also refuse (channel unset) — conservative; revisit if PWA text turns land there"
+  - "v2 (nest/memory precedent lookup) untouched — separate card scope"
