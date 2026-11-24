@@ -1,0 +1,65 @@
+# SSOT Job: control_entity media_player state-verb phantom-ok fix
+# Card: fix-phantom-state-in-media-control-f67d35 (kanban, ref MED-0493).
+# Dispatch 20261124-075941. Owner answer on card: "ada-voice — media tool
+# must verify media_player state after the call, on idc03".
+
+title: control_entity — media_player state verbs verify post-call state (state_set)
+subtitle: |
+  Card comms (2026-10-26): "the media_player call reports success but HA
+  state does not change (or lags)". The 2026-10-09 verify pass covered
+  the adjustable verbs (volume_*, select_source) and 2026-10-14 added
+  ghost-entity + on/off state_target — but the five media_player STATE
+  verbs still passed through _control_verified untouched: HA accepts
+  media_player/turn_on|turn_off|media_play|media_pause|media_stop on a
+  dead or queue-less player (200 + unchanged state) and the result was
+  a bare ok echo. Same phantom-ok class as the volume bug, one verb
+  family over.
+
+planning:
+  goal: |
+    Every media_player actuation verb verifies the post-call entity
+    state; a swallowed call returns ok:false with a verify block and a
+    do-NOT-claim error instead of narrating as done.
+  decisions: |
+    - New verify kind 'state_set' in _CONTROL_VERIFY/_control_verify:
+      the polled entity state must land in spec['targets'] — a set,
+      unlike state_target's single 'target' (media players report
+      different awake/off spellings per integration). First poll that
+      reads a target state returns ok:true early (idempotent calls on
+      an already-satisfied player pass trivially). Poll window closes
+      -> ok:false 'stayed <state>' naming the expected set.
+    - 'unknown' is inconclusive, never a fail — HA saying it cannot
+      tell matches the existing contract (missing attr / dead read
+      never flips a call). Only a concrete non-target state is the
+      phantom.
+    - Per-spec polls/poll_s overrides: turn_on gets 12x1.0s (~11s) —
+      device wake legitimately outlives the default 4x0.7s window and
+      'buffering'/'idle' count as landed. turn_off 8x0.8s, media_play
+      8x0.8s (stream start lags), media_pause/media_stop 6x0.7s.
+    - Target sets: turn_on {on,idle,playing,paused,buffering} —
+      standby/unavailable/off/unknown are not 'on'. turn_off STRICT
+      {off,standby} — 'idle' means the device is still on, so a cast
+      that cannot power off reports the honest failure instead of a
+      phantom 'off'. media_play {playing,buffering}. media_pause
+      {paused,idle}. media_stop {idle,off,standby,paused} — anything
+      not still playing.
+    - No fail-fast/dead-break inside the poll loop for state_set —
+      the before-state legitimately sits in the not-yet set (paused
+      before media_play, off before turn_on) and HA state lags; early
+      exits would false-fail real transitions.
+    - tool_guide.yml control_entity entry updated: state verbs listed
+      alongside the adjustable verbs; 'idle' after turn_off called out
+      as still-on.
+
+meta: |
+  Verify: tests/test_tool_runner.py 292 OK (pytest) — ControlEntityVerifyTests
+  gained 12 state-verb cases (land/fail per verb, buffering counts,
+  lagging turn_on wake, strict turn_off->idle phantom, unknown-state
+  inconclusive); test_unverified_verbs_pass_through retargeted to
+  button press (every media_player/cover verb now verifies);
+  HaMergeAliasTests turn_on alias assertion updated for the verify
+  block. tests/test_scenarios.py 32/32 OK incl. new
+  control_entity_media_state.yaml (8 steps: land+swallow per verb,
+  lagging wake, strict idle-off, unknown inconclusive).
+  tests/test_home_assistant.py + test_command_lane.py 51 OK;
+  scripts/tool-lint.py clean.

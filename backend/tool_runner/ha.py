@@ -183,6 +183,10 @@ class HaMixin:
     # for casts). The adjustable verbs below carry the attribute or
     # state the call must move; the entity is read before and polled
     # after, and a zero delta fails loudly with the numbers attached.
+    # The media_player state verbs get the same treatment via
+    # 'state_set': the post-call state must land in the target set —
+    # turn_off that leaves the player 'idle' or media_play that leaves
+    # it 'paused' is the same phantom-ok as a swallowed volume call.
     # verify.ok=None means HA could not say and never fails the call.
     _CONTROL_DEAD_STATES = frozenset({"off", "standby", "unavailable"})
     _CONTROL_VERIFY = {
@@ -196,6 +200,33 @@ class HaMixin:
             {"kind": "delta", "attr": "is_volume_muted"},
         ("media_player", "select_source"):
             {"kind": "attr_target", "attr": "source"},
+        # State verbs (phantom-state card f67d35, 2026-11-24): HA 200s
+        # media_player/turn_on|turn_off|media_play|media_pause|
+        # media_stop on a dead or queue-less player and the state never
+        # moves — before this the result was a bare ok echo. Poll
+        # windows run past the 4x0.7s default where the transition
+        # legitimately lags: device wake (turn_on) and stream start
+        # (media_play) take seconds, and 'buffering' counts as landed.
+        # turn_off stays strict ({off, standby}) — 'idle' means the
+        # device is still on, so a cast that can't power off reports
+        # the honest failure instead of a phantom 'off'.
+        ("media_player", "turn_on"):
+            {"kind": "state_set", "polls": 12, "poll_s": 1.0,
+             "targets": frozenset(
+                 {"on", "idle", "playing", "paused", "buffering"})},
+        ("media_player", "turn_off"):
+            {"kind": "state_set", "polls": 8, "poll_s": 0.8,
+             "targets": frozenset({"off", "standby"})},
+        ("media_player", "media_play"):
+            {"kind": "state_set", "polls": 8, "poll_s": 0.8,
+             "targets": frozenset({"playing", "buffering"})},
+        ("media_player", "media_pause"):
+            {"kind": "state_set", "polls": 6, "poll_s": 0.7,
+             "targets": frozenset({"paused", "idle"})},
+        ("media_player", "media_stop"):
+            {"kind": "state_set", "polls": 6, "poll_s": 0.7,
+             "targets": frozenset(
+                 {"idle", "off", "standby", "paused"})},
         ("cover", "open"):
             {"kind": "target", "attr": "current_position", "dir": 1,
              "states": frozenset({"opening", "open"}),
@@ -348,14 +379,20 @@ class HaMixin:
         state must reach a goal state or the position attr must move the
         right way (cover open/close). state_target: the entity state must
         equal spec['target'] (on/off — a switch that stays 'on' after
-        turn_off swallowed the call). leave: the state must exit a set
-        (cover stop — still-moving after stop is a loud failure)."""
+        turn_off swallowed the call). state_set: the entity state must
+        land in spec['targets'] (media_player state verbs — a play that
+        leaves the player 'paused' or an off that leaves it 'idle' is
+        the same swallowed call). leave: the state must exit a set
+        (cover stop — still-moving after stop is a loud failure).
+        spec may override polls/poll_s where the transition lags."""
         out: dict[str, Any] = {"ok": None, "action": action}
         attr = spec.get("attr")
         if attr:
             out["attr"] = attr
         if spec.get("target") is not None:
             out["target"] = spec["target"]
+        if spec.get("targets") is not None:
+            out["targets"] = sorted(spec["targets"])
         if before is None:
             return out
         out["before_state"] = before["state"]
@@ -364,9 +401,12 @@ class HaMixin:
             out["before"] = b_val
         kind = spec["kind"]
         last_state = None
-        for attempt in range(self._CONTROL_VERIFY_POLLS):
+        polls = int(spec.get("polls") or self._CONTROL_VERIFY_POLLS)
+        interval = float(
+            spec.get("poll_s") or self._CONTROL_VERIFY_INTERVAL_S)
+        for attempt in range(polls):
             if attempt:
-                await asyncio.sleep(self._CONTROL_VERIFY_INTERVAL_S)
+                await asyncio.sleep(interval)
             after = await self._control_state_read(entity_id)
             if after is None:
                 continue
@@ -410,6 +450,10 @@ class HaMixin:
                 if last_state == spec["target"]:
                     out["ok"] = True
                     return out
+            elif kind == "state_set":
+                if last_state in spec["targets"]:
+                    out["ok"] = True
+                    return out
             elif kind == "leave":
                 if last_state not in spec["states"]:
                     out["ok"] = True
@@ -427,6 +471,13 @@ class HaMixin:
                     entity_id, spec, out, expected)
         elif kind == "state_target":
             if last_state is not None:
+                return self._control_verify_fail(
+                    entity_id, spec, out, expected)
+        elif kind == "state_set":
+            # 'unknown' is HA saying it cannot tell — inconclusive,
+            # never a fail (same contract as a missing attr / dead
+            # read). A concrete non-target state is the phantom.
+            if last_state is not None and last_state != "unknown":
                 return self._control_verify_fail(
                     entity_id, spec, out, expected)
         elif kind == "leave":
@@ -468,6 +519,14 @@ class HaMixin:
                 f"stayed '{state}' instead of '{spec['target']}' — the "
                 "call was swallowed (dead/unavailable device); do NOT "
                 "claim it changed.")
+        elif kind == "state_set":
+            want = "', '".join(sorted(spec["targets"]))
+            out["error"] = (
+                f"HA accepted {action} on {entity_id} but the state "
+                f"stayed '{state}' — expected one of '{want}'. The "
+                "call was swallowed (dead/unavailable device, or "
+                "nothing loaded to play/pause/stop); do NOT claim it "
+                "changed.")
         elif kind == "leave":
             out["error"] = (
                 f"HA accepted {action} on {entity_id} but it is still "
