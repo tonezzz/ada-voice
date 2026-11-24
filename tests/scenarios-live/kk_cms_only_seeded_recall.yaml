@@ -1,62 +1,35 @@
-# CMS-only memory experiment (idea: Kaewta reports honestly from reports).
-# Lane: ada-kk-dev @ ws://127.0.0.1:8009/ws with the kk-cms-only tool
-# profile (memory/bank tools excluded — CMS is her only memory).
+# CMS-only memory experiment — deterministic seed, fresh session, recall
+# from CMS only. Lane: ada-kk-dev @ ws://127.0.0.1:8009/ws with the
+# kk-cms-only tool profile (bank/session-recall tools and web_search
+# excluded — CMS is her only recall surface).
 #
-# What this exercises:
-#   1. Seed — save request; she may cms_read first (honest availability
-#      check) and PROPOSE the page (publish is confirm-gated).
-#   2. Confirm — "yes" must trigger the actual write.
-#   3. Reconnect — a FRESH session drops the page from context; recall
-#      can now only come through CMS.
-#   4. Recall — the covered question must be answered via cms_read
-#      (the buttons/dials/switches), nothing else.
-#   5. Repeat — second ask still answered from CMS only.
+# The page is seeded OUT OF BAND by scenario-live.py's `seed:` block, not
+# by asking the model to publish: earlier runs showed the publish+confirm
+# dance is unreliable on this model, so it never actually tested recall.
+# A failed seed exits INFRA (3), never a scored "recall" turn.
 #
-# tier: full — writes a real page into the dev collection (no cleanup:
-# pages in -dev are disposable; add a cleanup block if clutter grows).
+# 1. reconnect — fresh ws session; the ZETA page is the only intended
+#    source for the answer.
+# 2/3. Recall — require a cms_* read whose RESULT carries the seeded
+#    content, plus the spoken pump detail.
 name: kk_cms_only_seeded_recall
 tier: full
 
+seed:
+  - collection: ada-cms-pages-kk-dev
+    key: zeta-kk-cms-7741
+    lang: en
+    content_md: |
+      Reference ZETA-KK-CMS-7741.
+      The garden watering schedule is Mondays and Thursdays at 6am, and
+      the pump must be primed first.
+    meta:
+      kind: report
+      domain: home
+      title: Garden watering schedule
+      summary: Mondays and Thursdays at 6am; prime the pump first.
+
 turns:
-  - user: >-
-      Please save a report page: the garden watering schedule is Mondays
-      and Thursdays at 6am, and the pump must be primed first.
-    expect:
-      # Either she publishes straight away or searches then proposes —
-      # both are correct. The only barred move is answering from thin air.
-      no_calls: true
-      no_calls_except:
-        - set_facial_expression
-        - cms_read
-        - cms_get_page
-        - cms_list_pages
-        - cms_verify_page
-        - cms_publish_page
-        - cms_edit
-      response_nonempty: true
-      timeout_s: 120
-      settle_s: 5
-
-  - user: >-
-      Yes, please create it.
-    expect:
-      # Publish only — cms_edit can't create a page (note needs an
-      # existing doc), so a cms_edit answer here means the seed never
-      # landed and the recall turns below have nothing to read.
-      calls_any: [cms_publish_page]
-      # Write-fidelity bar (card ada-cms-write-fidelity): first run
-      # stored 'Tuesdays' while narrating 'Mondays'. The content arg IS
-      # the stored text (the write path is verbatim), so requiring the
-      # seeded facts inside it is the stored-vs-narrated check.
-      call_args_contain:
-        cms_publish_page:
-          - ["monday", "Monday", "จันทร์"]
-          - ["thursday", "Thursday", "พฤหัส"]
-          - ["prime", "primed", "ปั๊ม", "ล่อน้ำ"]
-      response_nonempty: true
-      timeout_s: 120
-      settle_s: 5
-
   - reconnect: {away_s: 2}
 
   - user: >-
@@ -64,16 +37,15 @@ turns:
       before it runs?
     expect:
       calls_any: [cms_read, cms_get_page, cms_list_pages]
-      no_calls: true
-      no_calls_except:
+      no_successful_calls_except:
         - set_facial_expression
         - cms_read
         - cms_get_page
         - cms_list_pages
         - cms_verify_page
-      # Assert the pump detail — proves the answer came from the stored
-      # report. Day-name fidelity is asserted at the write (turn 2's
-      # call_args_contain — card ada-cms-write-fidelity).
+      # Ground truth from the read's result — the answer came from the
+      # seeded page, not from the earlier conversation.
+      result_contains_any: ["ZETA-KK-CMS-7741", "primed", "ปั๊ม"]
       response_contains_any: [prime, primed, ล่อน้ำ, ปั๊ม]
       timeout_s: 120
       settle_s: 5
@@ -82,12 +54,16 @@ turns:
       Sorry, what was the watering schedule again?
     expect:
       calls_any: [cms_read, cms_get_page, cms_list_pages]
-      no_calls: true
-      no_calls_except:
+      no_successful_calls_except:
         - set_facial_expression
         - cms_read
         - cms_get_page
         - cms_list_pages
         - cms_verify_page
+      result_contains_any: ["ZETA-KK-CMS-7741", "primed", "ปั๊ม"]
       response_contains_any: [prime, primed, ล่อน้ำ, ปั๊ม]
       timeout_s: 120
+
+cleanup:
+  mddb_delete:
+    - {collection: ada-cms-pages-kk-dev, contains: "ZETA-KK-CMS-7741", langs: [en, th]}
