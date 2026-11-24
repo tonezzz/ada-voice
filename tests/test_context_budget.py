@@ -12,10 +12,17 @@ tokens exceed the budget, clearing the resumption handle so the new
 session starts with a clean window.
 """
 import importlib.util
+import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+# Direct `python tests/test_context_budget.py` / `python -m unittest`
+# bypasses tests/conftest.py — pin the ledger off here too or the
+# t-ctx session rows land in the real data/usage.jsonl (they did:
+# ~4.4M fake in-tokens, one batch per day, until 2026-11-09).
+os.environ["ADA_USAGE_LOG"] = "off"
 
 from backend.realtime_provider import (
     GeminiLiveProvider,

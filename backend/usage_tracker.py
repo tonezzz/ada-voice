@@ -143,7 +143,16 @@ class UsageLedger:
         self._by_day: dict[str, dict[str, Any]] = {}
         self._since = datetime.now(timezone.utc).isoformat()
         self._loaded = False
-        raw = os.environ.get("ADA_USAGE_LOG", "data/usage.jsonl")
+        raw = os.environ.get("ADA_USAGE_LOG")
+        if raw is None:
+            # Implicit default persists only for lane-identified
+            # processes. Tests run outside pytest's conftest (direct
+            # `python tests/test_x.py`, `python -m unittest`) and ad-hoc
+            # shells carry no ADA_INSTANCE_ID — their rows are
+            # unattributable pollution in the shared ledger (the t-ctx
+            # incident: ~4.4M fake in-tokens across 96 daily runs).
+            # An explicit ADA_USAGE_LOG= value always wins.
+            raw = "data/usage.jsonl" if _default_lane() else "off"
         self._path: str | None = (
             None if str(raw).strip().lower() in ("", "off", "none") else str(raw)
         )

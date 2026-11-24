@@ -1,0 +1,128 @@
+# SSOT Job: live voice burn re-check — t-ctx recurrence fix + prompt-caching verdict
+
+date: 2026-11-24
+title: Live voice token burn — re-measure, close the t-ctx write hole, caching verdict
+domain: ada
+job: live-voice-burn-recheck
+cards: [live-voice-burn-context-replay]
+refs: [ADA-0631]
+host: tony-omen (dispatch worktree) — evidence re-measured on idc03
+  ~/CascadeProjects/ada-voice/data/usage.jsonl (78,557 rows, through
+  2026-11-23)
+summary: >
+  Re-measured the card's 2026-10-14 findings against live usage.jsonl.
+  The ada-dev whale has collapsed (28.7M in on dig day -> residual
+  0-5.5M/day bursts of short Live scenario sessions). TEST-POLLUTION
+  recurred after the conftest fix: a non-pytest runner wrote t-ctx rows
+  daily 2026-10-17..11-09 (~4.36M fake in-tokens) because conftest only
+  covers pytest. Closed the hole at the ledger: the implicit default
+  path now persists only for lane-identified processes, plus an env pin
+  in the polluting test module. Prompt-caching verdict: NOT
+  implementable on the Live API (no cached_content in LiveConnectConfig,
+  google-genai 2.23.0; upstream issue googleapis/python-genai#2102; zero
+  `cached` tokens in 5 weeks of ledger rows) and NOT reachable through
+  the LiteLLM gateway on the REST lane (/v1beta/cachedContents -> 404,
+  probed live). REST text-mode calls already get Gemini implicit
+  caching free (>=4096-token prefix; our ~19-25K static qualifies).
+
+remeasured_metrics:
+  note: >
+    usage.jsonl on idc03, rows since 2026-10-14. Day totals (turns /
+    in-tokens): 10-14 1915/41.6M (dig day), 10-16 59/1.46M, 10-17
+    417/9.68M, 10-18..10-31 ~5/0.19M each (all t-ctx pollution), 11-01
+    195/4.41M, 11-07 123/3.26M, 11-08 225/5.66M, 11-09 166/4.34M,
+    11-10 125/3.01M, 11-15 93/2.05M, 11-16 93/2.09M, 11-22 112/2.56M,
+    11-23 653/15.76M (lane=tony — real voice usage, ~30 sessions x
+    ~20-28 turns).
+  ada_dev_residual: >
+    lane=dev rows: 11-07 3.07M, 11-08 5.47M, 11-09 4.15M, 11-10 3.01M,
+    11-15 2.05M, 11-16 2.09M, 11-17 0.39M, 11-18 0.47M, 11-22 2.56M —
+    vs 28.7M on the dig day. Attribution: ~42 distinct sessions/day of
+    5-9 turns each (~0.10-0.27M in), spread across all UTC hours —
+    automated scenario/probe cadence, not business-hours human use.
+    tests/scenarios-live transport census: 44 smoke-tier scenarios run
+    transport:text (hourly smoke, no Live session); 3 smoke scenarios
+    legitimately stay live (ada_opencode_control, gs_capture_eval,
+    speech_stall_voiceback — audio/VAD under test); 153 full-tier
+    scenarios remain transport:live and run on the weekly
+    ada-scenario-* timers + benchmarks + dispatch runs. That residual
+    Live-session churn is the remaining whale driver.
+  cached_tokens: >
+    ZERO rows with cached>0 in the entire ledger since 2026-10-15 —
+    implicit caching is not reporting hits on Live sessions.
+
+test_pollution:
+  recurrence_evidence: >
+    t-ctx rows resumed the day after the 10-14 conftest fix and ran
+    daily through 2026-11-09: exactly 5 rows/day at ~08:20 UTC
+    (30000+78365+80000+1234+56 = 189,655 in — test_context_budget.py's
+    five _record_usage calls verbatim), lane="" (no ADA_INSTANCE_ID).
+    Writer bypassed pytest (conftest sets ADA_USAGE_LOG=off); consistent
+    with `python tests/test_context_budget.py` /
+    `python -m unittest` style execution. Stopped after 11-09 (writer
+    gone), but the hole remained open for any non-pytest invocation.
+  fix: >
+    backend/usage_tracker.py — UsageLedger.__init__ now resolves the
+    implicit default (ADA_USAGE_LOG unset) to data/usage.jsonl ONLY
+    when _default_lane() yields a lane (ADA_INSTANCE_ID set and valid).
+    Unset env + no lane -> _path=None (in-memory aggregation still
+    works; nothing persists). Explicit ADA_USAGE_LOG=<path|off|"">
+    and configure() are unchanged — lane_budget fixtures and service
+    envs unaffected. Prod safety: every service env sets
+    ADA_INSTANCE_ID (ada_instance_id() hard-fails without it), so all
+    real writers keep persisting.
+    tests/test_context_budget.py — os.environ["ADA_USAGE_LOG"]="off"
+    pinned at module top before the backend import, covering direct /
+    unittest execution of the known polluter.
+    tests/test_usage_tracker_gate.py — new: no-lane -> no file,
+    lane -> default path, explicit env wins (off/""/custom path).
+  verification: >
+    env -u ADA_USAGE_LOG -u ADA_INSTANCE_ID PYTHONPATH=. venv-python
+    tests/test_context_budget.py in an empty cwd -> 11 tests OK, zero
+    files created (previously wrote 5 rows). pytest tests/ -x -q:
+    1927 passed, 7 skipped.
+
+prompt_caching_verdict:
+  live_api: >
+    NOT SUPPORTED. types.LiveConnectConfig (google-genai 2.23.0, the
+    deployed pin range >=1.0,<3.0) has no cached_content field —
+    upstream feature request googleapis/python-genai#2102 open.
+    session_resumption + context_window_compression (already enabled,
+    32k/24k trigger/target) are the Live-side levers and are in place.
+  rest_text_lane: >
+    Implicit caching is automatic and free on Gemini 2.5+/3.x for
+    prefixes >=2048/4096 tokens — the text-mode system_instruction +
+    lane tool decls (~19-25K static) qualify, so repeated prefixes are
+    already discounted upstream; nothing to implement. Explicit
+    cachedContent is NOT reachable: the LiteLLM gateway
+    (ADA_GEMINI_REST_BASE_URL=http://100.102.134.91:4000) answers 404
+    on POST /v1beta/cachedContents (probed 2026-11-24 with the ada-dev
+    virtual key — endpoint absent, litellm issue #29258 class); native
+    /v1beta cachedContents CRUD + cached_content passthrough would be
+    gateway work in the chaba repo, not ada-voice.
+  implication: >
+    Tony's 2026-10-27 answer ("implement prompt-caching") cannot be
+    implemented literally on either transport today. The burn reduction
+    that IS available already shipped: bench/scenario traffic moved off
+    Live onto the REST text lane (BEN-0573, smoke 44/47 text), Live
+    sessions got resumption + compression + rotation + tool budgets.
+    Residual lever, if wanted: flip more full-tier scenarios to
+    transport:text where audio isn't under test, or add the
+    cachedContents route to the LiteLLM gateway (chaba-side card).
+
+residual_levers:
+  - "ada-dev Live scenario churn (~42 short sessions/day): audit which
+    weekly/bench suites still need transport:live; flip text-safe ones"
+  - "expression-call-batching (ADA-0601) and session-churn cards already
+    cover the per-turn replay floor on real voice lanes"
+  - "if explicit caching is wanted on the REST lane: chaba-side
+    LiteLLM cachedContents route, then ada-voice caches.create per lane"
+
+verify:
+  - "ssh idc03 'python3 - <<EOF ...' aggregate usage.jsonl by day/lane;
+    expect zero non-10-hex session_ids and zero t-ctx rows after deploy"
+  - "pytest tests/test_usage_tracker_gate.py tests/test_context_budget.py
+    tests/test_lane_budget.py -x -q"
+  - "direct-run repro: env -u ADA_USAGE_LOG -u ADA_INSTANCE_ID
+    PYTHONPATH=. .venv/bin/python tests/test_context_budget.py in empty
+    cwd -> no data/usage.jsonl appears"
