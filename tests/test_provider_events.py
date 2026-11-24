@@ -293,6 +293,28 @@ class ProviderEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.payload["turn_complete"])
         self.assertEqual(session.payload["turns"].parts[0].text, "Give a short greeting")
 
+    async def test_context_prime_appends_without_a_billed_turn(self) -> None:
+        # ADA_PRIME_AS_CONTEXT path (card live-voice-burn-context-replay):
+        # the session prime must land as turn_complete=False context so it
+        # doesn't re-bill the ~19k static prefix for a greeting turn.
+        class TextSession:
+            async def send_client_content(self, **kwargs):
+                self.payload = kwargs
+
+        provider = GeminiLiveProvider()
+        session = TextSession()
+        provider._session = session
+        await provider.send_context_prime("(system) prime context")
+        self.assertFalse(session.payload["turn_complete"])
+        self.assertEqual(
+            session.payload["turns"].parts[0].text, "(system) prime context")
+
+    async def test_context_prime_requires_connection(self) -> None:
+        provider = GeminiLiveProvider()
+        provider._session = None
+        with self.assertRaises(RuntimeError):
+            await provider.send_context_prime("(system) prime context")
+
 
 class UserConfirmedGateTests(unittest.TestCase):
     """_user_confirmed must treat affirmative words inside a longer write

@@ -3156,6 +3156,15 @@ class RealtimeProvider(abc.ABC):
     @abc.abstractmethod
     async def send_text_turn(self, text: str) -> None: ...
 
+    async def send_context_prime(self, text: str) -> None:
+        """Session-start context injection (card live-voice-burn-context-
+        replay). Default keeps the billed-turn prime; providers that can
+        append context without triggering a response override this — a
+        prime turn re-bills the whole ~19k-token static prefix for one
+        greeting, while turn_complete=False lands the same text in
+        context and lets the user's first turn carry it."""
+        await self.send_text_turn(text)
+
     @abc.abstractmethod
     def events(self) -> AsyncIterator[ProviderEvent]: ...
 
@@ -5311,6 +5320,17 @@ class GeminiLiveProvider(RealtimeProvider):
                 ),
                 turn_complete=True,
             )
+
+    async def send_context_prime(self, text: str) -> None:
+        """Prime as silent context (turn_complete=False) — the Live API
+        has no prompt caching, so a prime TURN bills the entire static
+        prefix (~19k tokens) plus a greeting for context the next user
+        turn would carry anyway (card live-voice-burn-context-replay).
+        Trade-off: no proactive greeting — the prime's 'Greet…' directive
+        lands in context and is honored on the user's first turn."""
+        if self._session is None:
+            raise RuntimeError("provider is not connected")
+        await self._send_context_note(text)
 
     async def send_image_turn(self, image: bytes, mime: str,
                               caption: str = "") -> None:

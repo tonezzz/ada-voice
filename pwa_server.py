@@ -1082,7 +1082,18 @@ async def _prime_session(
         )
         if text:
             t0 = time.monotonic()
-            await provider.send_text_turn(text)
+            # ADA_PRIME_AS_CONTEXT=1 injects the prime as silent context
+            # (turn_complete=False) instead of a billed turn — the Live
+            # API has no prompt caching, so the turn form re-bills the
+            # ~19k-token static prefix just to elicit the greeting
+            # (card live-voice-burn-context-replay). Trade-off: no
+            # proactive greeting; the prime's greet directive lands in
+            # context for the user's first turn.
+            if os.environ.get("ADA_PRIME_AS_CONTEXT", "0").lower() in (
+                    "1", "true", "yes", "on"):
+                await provider.send_context_prime(text)
+            else:
+                await provider.send_text_turn(text)
             logger.info("session=%s prime injected (%d chars, %.1fs)",
                         provider.session_id, len(text), time.monotonic() - t0)
     except Exception as exc:

@@ -1,0 +1,156 @@
+# SSOT Job: live voice token burn — static-prefix anatomy + prime-turn lever
+# Card: live-voice-burn-context-replay (kanban, ref ADA-0631).
+# Dispatch 20261124-080026, runner idc02, repo ada-voice.
+# Sibling job (same card, tony-omen attempt merged 2026-11-24 08:08):
+# docs/ssot/jobs/ada/2026-11-24-live-voice-burn-recheck.yml — re-measured
+# usage.jsonl on idc03 (78.5k rows), closed the t-ctx write hole at the
+# ledger (lane-identity gate), and returned the prompt-caching verdict.
+# This file covers what that run did not: the static-prefix anatomy behind
+# "context replay dominates" and the one code lever that reduces billed
+# turns per session.
+
+title: Live voice burn — ~19.3K-token static prefix re-billed every turn; prime-as-context lever
+subtitle: >-
+  Companion to 2026-11-24-live-voice-burn-recheck.yml. The 2026-10-14
+  overnight dig (usage.jsonl + journald) showed 310 sessions / ~45.7M in
+  / ~300K out with ~85% TEXT input. This job quantifies the prefix that
+  dominates it and ships an opt-in fix for the per-connect prime turn.
+
+planning:
+  goal: |
+    Address the live-voice token burn where context replay dominates
+    input tokens and ada-dev accounts for ~63% of fleet in-tokens,
+    verified against the recorded token metrics; fix TEST-POLLUTION
+    (t-ctx rows in the real usage.jsonl).
+  recorded_metrics: |
+    From the card note (2026-10-14 overnight dig, usage.jsonl +
+    journald, 24h): 310 sessions, ~45.7M in / ~300K out; ~85% of input
+    is TEXT modality; median session 40s / 89K in-tokens; reconnect
+    churn re-primes ~16K text each connect; ada-dev 1381 turns /
+    28.7M in (~63%); TEST-POLLUTION t-ctx 4.7M.
+    Re-measure (sibling job, idc03 ledger through 2026-11-23): dig day
+    10-14 = 41.6M in; lane=dev residual collapsed to 0-5.5M/day bursts
+    of ~42 short automated sessions; t-ctx rows recurred 10-17..11-09
+    (~4.36M) via a non-pytest runner until the ledger lane gate.
+  prefix_anatomy: |
+    Measured end-to-end via GeminiLiveProvider._session_config() in
+    this worktree (tiktoken cl100k_base as proxy — Gemini's tokenizer
+    differs slightly):
+      - system_instruction: 36,001 chars -> ~8,060 tokens. Composed of
+        DEFAULT_ADA_INSTRUCTIONS (6,999 chars after the 2026-11-23
+        ada-prompt-slim 50% cut) + identity/face/channel/camera/usage
+        paragraphs + a ~28K-char HA/memory/tool-usage prose block +
+        CALENDAR/CMS/DEVIN/OPENCODE/DOC/DRIVE/HABIT/VMS/TRAFFIC
+        instruction constants.
+      - tool declarations: 72 decls (37 builtin + camera + 34 tools.d)
+        after _apply_lazy_schemas -> ~11,271 tokens.
+      - TOTAL static prefix: ~19.3K tokens — consistent with the "~19k
+        baseline" comment (realtime_provider.py) and the dig's "~16K
+        re-prime" (lanes with ADA_EXCLUDED_TOOLS/INCLUDED_TOOLS ship
+        fewer decls; text_only strips speech config).
+      - _session_context_tail adds ~0.3-1K (agenda/tasks/proposals
+        snapshot) per session on top.
+  billing_model: |
+    Live API prompt_token_count is the WHOLE session context per turn —
+    system_instruction + tools + accumulated history + new input. The
+    prefix is re-billed EVERY TURN, not just at connect, and there is
+    no caching to discount it (verdict below). Sanity checks against
+    the recorded metrics:
+      - Median session 89K in / ~4-5 turns = ~19K prefix + growing
+        history per turn. Consistent.
+      - ada-dev dig day: 28.7M / 1381 turns = 20.8K in/turn — the same
+        prefix + history; the whale was traffic VOLUME on a
+        prefix-billed architecture (bench/dev lane: scenario-live real
+        /ws sessions, post-deploy live verifies, devin voice dispatch,
+        PWA dev), not a bigger per-session prefix.
+      - ~85% TEXT input: the prefix and text history dominate; audio
+        input is ~25 tok/sec — speech is the small share.
+  prompt_caching_verdict: |
+    "Implement prompt-caching" (Tony's 2026-10-27 board answer) is NOT
+    implementable on either transport today — confirmed independently
+    by the sibling job's live probes and these sources:
+      - Live API: types.LiveConnectConfig has no cached_content
+        (google-genai; upstream googleapis/python-genai#2102 open);
+        Google staff confirm neither explicit nor implicit caching for
+        gemini-3.x-live — system_instruction + tool decls bill at the
+        standard text rate every turn; model card lists "Context
+        caching: Not supported"; cachedContentTokenCount is always 0
+        (zero `cached` rows in 5 weeks of ledger).
+      - REST text lane: implicit caching IS already automatic/free for
+        >=~4K-token prefixes (the ~19-25K static qualifies); explicit
+        cachedContents 404s on the LiteLLM gateway (chaba-side work).
+    Implication: only (a) shrink the prefix, (b) reduce billed TURNS,
+    (c) reduce session count move the needle on Live lanes.
+
+  changes: |
+    Shipped in this dispatch (complementary to the sibling run's
+    ledger gate — different files, no overlap):
+      - backend/realtime_provider.py: RealtimeProvider.send_context_prime
+        (default -> send_text_turn) + GeminiLiveProvider override that
+        appends the prime via _send_context_note (turn_complete=False) —
+        the context lands in session state with NO billed response turn.
+      - pwa_server.py _prime_session: ADA_PRIME_AS_CONTEXT=1 routes the
+        session prime through send_context_prime. Default OFF — opt-in
+        per lane after live verification. Text lanes are unaffected
+        (OpenRouterTextProvider inherits the default; its
+        _is_context_turn already treats "(system)" primes as free
+        context).
+      - tests/test_provider_events.py: turn_complete=False assertion +
+        not-connected guard for send_context_prime.
+      - tests/__init__.py: env pins (ADA_INSTANCE_ID=test,
+        GEMINI_API_KEY=x, ADA_USAGE_LOG=off) for unittest-style runs —
+        env-determinism parity with conftest; the ledger lane gate
+        (sibling run) is the primary pollution fix, this is belt.
+      - .env.example: documents ADA_PRIME_AS_CONTEXT.
+
+    Landed earlier (context, not this diff):
+      - Sibling run (origin/main): usage_tracker lane-identity gate +
+        test_context_budget env pin + test_usage_tracker_gate.py.
+      - 9cb5d0c conftest ADA_USAGE_LOG=off (pytest path, 2026-10-14).
+      - f8d8c9a ada-prompt-slim: DEFAULT_ADA_INSTRUCTIONS 14,016 ->
+        7,004 chars (~1.7K tokens/turn saved fleet-wide).
+      - 932550d lazy tool schemas; expression-call batching (OPS-0509);
+        context_window_compression 32k/24k.
+
+  levers_ranked: |
+    1. ADA_PRIME_AS_CONTEXT=1 (shipped, opt-in): the session prime is a
+       full billed turn (~19K in + greeting out) whose only job is
+       context injection. As turn_complete=False the same text rides
+       the user's first turn — saves ~19K input + greeting output PER
+       FRESH SESSION/CONNECT. At dig rates (310 sessions/24h) that is
+       ~5.9M in-tokens (~13% of fleet in). Trade-off: no proactive
+       greeting on connect; the prime's "Greet and address them as X"
+       directive is honored on the user's first turn. Context sends can
+       rarely be dropped by the API (notify_or_defer comment); degraded
+       behavior is graceful — system_instruction + agenda tail remain.
+       Verify on ada-dev before fleet rollout: prime lands in context,
+       first user turn greets with identity, usage.jsonl shows one
+       fewer `in` row per session.
+    2. Prefix diet: ~19.3K = instructions(~8K) + decls(~11.3K). The
+       ~28K-char tool-usage prose in self.instructions duplicates decl
+       descriptions — a careful slim (ada-prompt-slim process) is the
+       next big cut but risks tool-selection accuracy; belongs to the
+       tool-consolidation program.
+    3. Scenario transport (sibling run's residual lever): 153
+       full-tier scenarios still transport:live — flip text-safe ones
+       to transport:text (env/timer config, not code).
+    4. Bench hygiene: batch scenario sessions or tag bench sessions
+       (?bench=1 -> session_id prefix) for cleaner future attribution.
+
+meta: |
+  Verification (this worktree, ad-hoc venv /tmp/ada-measure-venv):
+    - Prefix measured end-to-end via _session_config(): system_instruction
+      36,001 chars / ~8,060 tok (cl100k_base proxy) + 72 decls ~11,271
+      tok = ~19.3K static tokens, consistent with recorded ~16-19K
+      re-prime figures.
+    - Reconciliation: ada-dev 28.7M/1381 = 20.8K in/turn = ~19K prefix +
+      history — matches the billing model.
+    - pytest: focused files (provider_events incl. 2 new tests,
+      context_budget, lane_budget, usage_tracker_gate) all pass;
+      full suite 1920 passed with only pre-existing missing-dep
+      failures in relay-endpoint tests (real starlette absent in the
+      ad-hoc venv — all 42 pass once installed; unrelated env gap).
+    - unittest pollution check: `python -m unittest
+      tests.test_context_budget` -> 11 tests OK, no data/usage.jsonl.
+  Not done: deploy/restart (deploy-ada.sh on idc03 is the only path);
+  ADA_PRIME_AS_CONTEXT stays OFF until a live verify on ada-dev.
