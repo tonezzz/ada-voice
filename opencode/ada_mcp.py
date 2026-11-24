@@ -274,6 +274,23 @@ def _card_action(card: dict[str, Any]) -> dict[str, Any]:
     return action if isinstance(action, dict) else {}
 
 
+def _is_manual_action(card: dict[str, Any]) -> bool:
+    """Human-only card — never runner-dispatchable.
+
+    Same predicate as the queue sweep's `manual_only` leg: an explicit
+    action.type == manual, or a runner verdict reporting that the type is
+    unknown (which is how a manual card surfaces in the queue projection).
+    Read-only: no card mutation, no gate side effects.
+    """
+    if str(_card_action(card).get("type") or "").lower() == "manual":
+        return True
+    blocked = card.get("blocked")
+    if isinstance(blocked, dict):
+        return any("unknown type 'manual'" in str(v).lower()
+                   for v in blocked.values())
+    return False
+
+
 def _request_open(request: Any) -> bool:
     """Non-dict request rows count as open (conservative)."""
     if not isinstance(request, dict):
@@ -1709,7 +1726,13 @@ def _pick_cards(strategy: str, days: int, limit: int) -> list[dict[str, Any]]:
         col = card.get("column") or "backlog"
         if strategy == "queue":
             if _card_action(card).get("status") == "queued":
-                scored.append((card, "queued for dispatch", (0,)))
+                if _is_manual_action(card):
+                    # ADA-0189: still selectable for context/planning, but
+                    # never advertise a manual card as runner work.
+                    scored.append((card, "human-only (manual action) "
+                                        "— not runner-dispatchable", (0,)))
+                else:
+                    scored.append((card, "queued for dispatch", (0,)))
         elif strategy == "stale":
             if col == "doing" and age >= days:
                 scored.append((card, f"doing, idle {age}d", (age,)))
@@ -1740,7 +1763,8 @@ def ada_card_pick(strategy: str = "sweep", limit: int = 3, days: int = 7) -> str
     sweep      — stalest actionable card (doing first, then backlog)
     high-value — priority high>medium>low, ties by oldest updated
     stale      — doing cards idle >= `days` (default 7)
-    queue      — cards with action.status == queued, board order
+    queue      — cards with action.status == queued, board order;
+                manual-action cards are labelled human-only, not dispatched
 
     Candidates carry a selection_token usable with ada_plan/ada_preflight.
     """
@@ -1760,6 +1784,11 @@ def ada_card_pick(strategy: str = "sweep", limit: int = 3, days: int = 7) -> str
                 token = secrets.token_urlsafe(12)
                 pick["selection_token"] = token
                 PENDING_NEXT_SELECTIONS[ref] = (token, time.monotonic() + 900)
+            # Machine-readable companion to the human-only `why` label;
+            # non-manual picks keep their previous response shape.
+            if strategy == "queue" and _is_manual_action(card):
+                pick["human_only"] = True
+                pick["dispatchable"] = False
             pick["card"] = _safe_card(card)
         return json.dumps({
             "ok": True,

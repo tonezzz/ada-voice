@@ -134,6 +134,111 @@ def test_card_pick_validates_strategy_and_mints_tokens(ada_mcp, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# queue picks: manual cards are human-only, never dispatchable (ADA-0189)
+# --------------------------------------------------------------------------
+
+def _manual_queued(ref="ADA-0991", **extra):
+    card = _card("m1", ref, "human-only queued item",
+                 action={"status": "queued", "type": "manual"})
+    card.update(extra)
+    return card
+
+
+def test_card_pick_queue_marks_manual_card_human_only(ada_mcp, monkeypatch):
+    monkeypatch.setattr(ada_mcp, "_board_cards",
+                        lambda: [_manual_queued()])
+    doc = json.loads(_tool(ada_mcp, "ada_card_pick")(strategy="queue"))
+    assert doc["ok"] is True
+    assert doc["mutations_performed"] == []
+    assert len(doc["picks"]) == 1
+    pick = doc["picks"][0]
+    assert "human-only" in pick["why"]
+    assert "not runner-dispatchable" in pick["why"]
+    assert "queued for dispatch" not in pick["why"]
+    assert pick["human_only"] is True
+    assert pick["dispatchable"] is False
+    # still selectable for context/planning: token is issued and bound
+    assert pick["selection_token"]
+    assert ada_mcp.PENDING_NEXT_SELECTIONS["ada-0991"][0] == \
+        pick["selection_token"]
+
+
+def test_card_pick_queue_keeps_non_manual_card_unchanged(ada_mcp, monkeypatch):
+    normal = _card("n1", "ADA-0992", "dispatchable queued work",
+                   action={"status": "queued", "type": "dispatch"})
+    monkeypatch.setattr(ada_mcp, "_board_cards", lambda: [normal])
+    doc = json.loads(_tool(ada_mcp, "ada_card_pick")(strategy="queue"))
+    assert doc["ok"] is True
+    pick = doc["picks"][0]
+    assert pick["why"] == "queued for dispatch"
+    assert "human_only" not in pick
+    assert "dispatchable" not in pick
+    assert pick["selection_token"]
+    assert ada_mcp.PENDING_NEXT_SELECTIONS["ada-0992"][0] == \
+        pick["selection_token"]
+
+
+def test_card_pick_queue_mixed_keeps_board_order_and_both_tokens(
+        ada_mcp, monkeypatch):
+    normal = _card("n1", "ADA-0992", "dispatchable queued work",
+                   action={"status": "queued", "type": "dispatch"})
+    monkeypatch.setattr(ada_mcp, "_board_cards",
+                        lambda: [_manual_queued(), normal])
+    doc = json.loads(_tool(ada_mcp, "ada_card_pick")(strategy="queue"))
+    assert [p["card"]["id"] for p in doc["picks"]] == ["m1", "n1"]
+    manual_pick, normal_pick = doc["picks"]
+    assert manual_pick["human_only"] is True
+    assert manual_pick["dispatchable"] is False
+    assert "queued for dispatch" not in manual_pick["why"]
+    assert normal_pick["why"] == "queued for dispatch"
+    assert "human_only" not in normal_pick
+    assert manual_pick["selection_token"] != normal_pick["selection_token"]
+    assert len(ada_mcp.PENDING_NEXT_SELECTIONS) == 2
+
+
+def test_card_pick_queue_detects_manual_from_runner_verdict(
+        ada_mcp, monkeypatch):
+    # A queued card whose runner reported "unknown type 'manual'" is the
+    # same human-only case as an explicit action.type == manual.
+    card = _card("m2", "ADA-0993", "manual surfaced by runner",
+                 action={"status": "queued"},
+                 blocked={"idc03": "unknown type 'manual'"})
+    monkeypatch.setattr(ada_mcp, "_board_cards", lambda: [card])
+    doc = json.loads(_tool(ada_mcp, "ada_card_pick")(strategy="queue"))
+    pick = doc["picks"][0]
+    assert "human-only" in pick["why"]
+    assert pick["dispatchable"] is False
+
+
+def test_manual_pick_keeps_selection_token_and_confirmation_gates(
+        ada_mcp, monkeypatch):
+    manual = _manual_queued()
+    monkeypatch.setattr(ada_mcp, "_board_cards", lambda: [manual])
+    doc = json.loads(_tool(ada_mcp, "ada_card_pick")(strategy="queue"))
+    token = doc["picks"][0]["selection_token"]
+
+    wrong = json.loads(_tool(ada_mcp, "ada_plan")(
+        "ADA-0991", selection_confirmation="ADA-0992",
+        selection_token=token))
+    assert wrong["ok"] is False
+    assert wrong["error"] == "selection_confirmation_required"
+
+    wrong_token = json.loads(_tool(ada_mcp, "ada_plan")(
+        "ADA-0991", selection_confirmation="ADA-0991",
+        selection_token="not-the-issued-token"))
+    assert wrong_token["ok"] is False
+    assert wrong_token["error"] == "selection_token_required"
+
+    # A correctly confirmed + tokenised pick still opens for context/planning.
+    monkeypatch.setattr(ada_mcp, "find_card", lambda ref: manual)
+    ok = json.loads(_tool(ada_mcp, "ada_plan")(
+        "ADA-0991", selection_confirmation="ADA-0991",
+        selection_token=token))
+    assert ok["ok"] is True
+    assert ada_mcp.PENDING_NEXT_SELECTIONS == {}
+
+
+# --------------------------------------------------------------------------
 # gated tools: confirmation + token envelopes
 # --------------------------------------------------------------------------
 
