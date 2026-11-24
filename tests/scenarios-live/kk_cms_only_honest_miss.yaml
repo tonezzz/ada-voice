@@ -15,13 +15,18 @@ turns:
   - user: >-
       What did we decide about repainting the kitchen cabinets next month?
     expect:
-      no_calls: true
-      no_calls_except:
+      # A memory-tool attempt that the lane gate REFUSES is not a leak —
+      # the provider emits tool_call before the gate, so count only
+      # successful calls (see tests/test_scenario_live_harness.py).
+      no_successful_calls_except:
         - set_facial_expression
         - cms_read
         - cms_get_page
         - cms_list_pages
         - cms_verify_page
+        # chat_send may deliver the same honest answer to her LINE lane —
+        # that is an actuation, not a memory source.
+        - chat_send
       response_nonempty: true
       response_not_contains:
         - surf-thailand.com

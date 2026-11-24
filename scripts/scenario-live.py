@@ -12,12 +12,30 @@ Usage:
   --url defaults to $ADA_LIVE_URL or ws://127.0.0.1:8002/ws
   --api-key defaults to $ADA_API_KEY (matched against ADA_API_KEYS server-side)
 
+Top-level `seed:` writes fixtures into MDDB before any turn or preflight:
+
+  seed:
+    - {collection: ada-cms-pages-kk-dev, key: "zeta-kk-cms-7741",
+       lang: en, content_md: "...", meta: {kind: report}}
+      # collection/key/lang/content_md required; meta optional.
+
+  Each document is written via /v1/add then verified via /v1/search — a
+  failed seed exits INFRA (3), never a scored turn. Use this when the
+  behaviour under test is recall, not the model's ability to author/write
+  a page. `cleanup.mddb_delete` removes the same fixtures afterwards.
+
 Turn expectations (all optional, all must pass):
   calls_any: [tool, ...]       at least one of these tools was invoked
   calls: [tool, ...]           all of these tools were invoked
   no_calls: true               no tools were invoked
   no_calls: [tool, ...]        blacklist — these tools must NOT be invoked
   no_calls_except: [tool, ...] no_calls:true, but these tools don't count (e.g. set_facial_expression)
+  no_successful_calls_except: [tool, ...]
+                               like no_calls_except, but a call whose result
+                               was refused by the lane gate ("not available
+                               on this lane") does NOT count — the provider
+                               emits tool_call BEFORE the gate, so a denied
+                               attempt is a passing lane guard, not a leak
   max_calls: N                 fail if more than N tool_call events fired this turn
   result_contains: [s, ...]    each substring appears in some tool_result
                      (or tool_result_full under ADA_TRACE_FULL=1 — the
@@ -413,6 +431,21 @@ def _expand_tokens(obj: Any) -> Any:
 def check_turn(events: list[dict], expect: dict) -> list[str]:
     failures: list[str] = []
     calls = [e for e in events if e.get("type") == "tool_call"]
+    # The lane gate refuses an undeclared call AFTER the tool_call event is
+    # emitted (realtime_provider.py:5528 vs :5604). Correlate results by id
+    # so no_successful_calls_except can tell a refused attempt from a real
+    # one. no_calls/nocalls_except deliberately keep the old semantics —
+    # gate scenarios assert that a denied attempt still shows up.
+    denied_ids = {
+        str(r.get("id")) for r in events
+        if r.get("type") in ("tool_result", "tool_result_full")
+        and r.get("id")
+        and any(m in json.dumps(r.get("result") or {}, default=str).lower()
+                for m in ("not available on this lane", "lane_excluded"))
+    }
+    ok_calls = [c for c in calls
+                if not (c.get("id") and str(c["id"]) in denied_ids)]
+    ok_names = {c.get("name") for c in ok_calls}
     # tool_result_full rides beside tool_result when the provider runs
     # ADA_TRACE_FULL=1 (card ada-trace-full-result) — same {name, result}
     # shape but the complete payload, so result_* assertions check
@@ -445,6 +478,14 @@ def check_turn(events: list[dict], expect: dict) -> list[str]:
         unexpected = sorted(names - exempt)
         if unexpected:
             failures.append(f"no_calls: got {unexpected} (exempt: {sorted(exempt)})")
+    nsce = expect.get("no_successful_calls_except")
+    if nsce is not None:
+        exempt = set(_expand_families(nsce))
+        unexpected = sorted(ok_names - exempt)
+        if unexpected:
+            failures.append(
+                f"no_successful_calls_except: got {unexpected} "
+                f"(exempt: {sorted(exempt)})")
     max_calls = expect.get("max_calls")
     if max_calls is not None and len(calls) > int(max_calls):
         failures.append(
@@ -1529,6 +1570,65 @@ def _voice_file_for(value: str) -> Path:
     return Path.home() / ".config" / "ada" / f"voice-{v}.json"
 
 
+def seed_payload(item: dict) -> dict:
+    """Build the /v1/add body for one seed document.
+
+    MDDB stores meta values as []string — a scalar like `kind: report`
+    is a 400, so normalize every value to a one-item list here.
+    """
+    meta: dict[str, list[str]] = {}
+    for key, value in (item.get("meta") or {}).items():
+        vals = value if isinstance(value, (list, tuple)) else [value]
+        meta[str(key)] = [str(v) for v in vals]
+    return {
+        "collection": item.get("collection"),
+        "key": item.get("key"),
+        "lang": item.get("lang") or "en",
+        "content_md": item.get("content_md") or item.get("content") or "",
+        "meta": meta,
+    }
+
+
+def seed_verified(docs: list[dict], key: str, lang: str) -> bool:
+    """A seed counts only if /v1/search returns the exact (key, lang)."""
+    return any(d.get("key") == key and d.get("lang") == lang for d in docs)
+
+
+def run_seed(spec: dict, mddb_url: str, verbose: bool) -> list[str]:
+    """Write and verify the scenario's seed documents before any turn."""
+    import urllib.request
+
+    def post(path: str, payload: dict) -> Any:
+        req = urllib.request.Request(
+            f"{mddb_url}{path}",
+            data=json.dumps(payload).encode(),
+            headers={"content-type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+
+    fails: list[str] = []
+    for item in spec.get("seed") or []:
+        body = seed_payload(item)
+        if not body["collection"] or not body["key"]:
+            fails.append(f"seed: collection/key required: {item}")
+            continue
+        try:
+            post("/add", body)
+            docs = post("/search", {"collection": body["collection"],
+                                    "query": body["key"],
+                                    "limit": 10})
+            if not seed_verified(docs or [], body["key"], body["lang"]):
+                fails.append(f"seed: {body['collection']}/{body['key']} "
+                             f"({body['lang']}) not readable after add")
+            elif verbose:
+                print(f"  seed: {body['collection']}/{body['key']} "
+                      f"({body['lang']}) ok")
+        except Exception as exc:
+            fails.append(f"seed: {body['collection']}/{body['key']}: {exc}")
+    return fails
+
+
 def run_cleanup(spec: dict, mddb_url: str, verbose: bool) -> None:
     """Best-effort post-run cleanup — deletes test docs from MDDB."""
     import urllib.request
@@ -1697,6 +1797,17 @@ async def main() -> int:
 
     turns = spec.get("turns") or []
     print(f"scenario: {spec.get('name') or args.scenario.stem} -> {url.split('?')[0]}")
+
+    # Out-of-band fixtures first: a missing seed must be INFRA, never a
+    # model failure hidden inside a "recall" turn.
+    mddb_url = (os.environ.get("MDDB_BASE_URL")
+                or "http://127.0.0.1:11023/v1").rstrip("/")
+    seed_fails = run_seed(spec, mddb_url, args.verbose)
+    if seed_fails:
+        for f in seed_fails:
+            print(f"  {f}")
+        print("INFRA: seed failed — scenario not run")
+        return 3
 
     # Failure taxonomy gates — run before connecting so environment and
     # unimplemented-feature cases never produce misleading FAILs.
