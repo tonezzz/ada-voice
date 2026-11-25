@@ -97,6 +97,8 @@ class MetaMixin:
         if action == "usage":
             return await self.ada_usage_summary(
                 source=str(source or "all"), reset=bool(reset))
+        if action == "budget":
+            return tool_budget.status()
         if action == "health":
             return await self._ops_mddb_health(collection)
         if action == "report":
@@ -110,7 +112,7 @@ class MetaMixin:
                 "it is not available on this call path")}
         raise ValueError(
             f"invalid ada_ops action {action!r}: expected "
-            "outcome|usage|health|check|research|report|acl_explain")
+            "outcome|usage|budget|health|check|research|report|acl_explain")
 
     def _ops_acl_explain(
             self, identity: str | None, entity_id: str | None,

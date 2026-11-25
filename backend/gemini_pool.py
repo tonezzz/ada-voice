@@ -391,6 +391,47 @@ def _gateway_model(model: str) -> str:
     return model
 
 
+def _record_usage(resp: Any, tool: str, session_id: str = "") -> None:
+    """Append one aux call's token usage to the shared ledger under its
+    tool= label — the per-tool daily spend scan (tool_budget) and the
+    lane monthly ceiling (lane_budget) both read this file. Never
+    raises: metering must not break a paid call."""
+    try:
+        usage = getattr(resp, "usage_metadata", None)
+        if usage is None:
+            return
+        in_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+        out_tokens = int(
+            getattr(usage, "candidates_token_count", None)
+            or getattr(usage, "response_token_count", 0)
+            or 0)
+        in_mod: dict[str, int] = {}
+        out_mod: dict[str, int] = {}
+        for detail in getattr(usage, "prompt_tokens_details", None) or []:
+            mod = str(getattr(getattr(detail, "modality", None),
+                              "value", "unknown") or "unknown").lower()
+            in_mod[mod] = in_mod.get(mod, 0) + int(
+                getattr(detail, "token_count", 0) or 0)
+        for detail in (
+                getattr(usage, "candidates_tokens_details", None)
+                or getattr(usage, "response_tokens_details", None)
+                or []):
+            mod = str(getattr(getattr(detail, "modality", None),
+                              "value", "unknown") or "unknown").lower()
+            out_mod[mod] = out_mod.get(mod, 0) + int(
+                getattr(detail, "token_count", 0) or 0)
+        from backend.usage_tracker import usage_ledger
+        usage_ledger.record(
+            "gemini_aux", session_id=session_id or None,
+            input_tokens=in_tokens, output_tokens=out_tokens,
+            input_by_modality=in_mod, output_by_modality=out_mod,
+            cached_tokens=int(
+                getattr(usage, "cached_content_token_count", 0) or 0),
+            tool=tool)
+    except Exception as exc:
+        logger.debug("gemini aux usage metering skipped: %s", exc)
+
+
 async def generate(model: str, contents: Any, config: Any = None,
                    client: Any = None, timeout: float | None = None,
                    tool: str = "", mddb: Any = None,
@@ -403,11 +444,30 @@ async def generate(model: str, contents: Any, config: Any = None,
     key is drained. `client` short-circuits the pool entirely (test
     injection — engine constructors keep passing their fake through).
     Emits one throttled ops event per call when mddb is provided.
+
+    Spend guardrails (card ada-spend-guardrails-per-tool-daily-caps):
+    tool_budget.check_key(tool) runs before the first key attempt — an
+    over-cap label raises ToolBudgetExceeded instead of burning a paid
+    call. On success the response's usage_metadata is appended to the
+    usage ledger under the same tool label, so per-tool daily spend is
+    metered for every aux call, not just the ones that self-report.
     """
     model = _gateway_model(model)
+    spend_key = tool or "gemini_aux"
     if client is not None:
         return await client.aio.models.generate_content(
             model=model, contents=contents, config=config)
+    try:
+        from backend import tool_budget
+        tool_budget.check_key(spend_key)
+    except Exception as exc:
+        # Fail-closed on caps (ToolBudgetExceeded propagates), fail-open
+        # on gate bugs — a broken budget check must not break calls.
+        if type(exc).__name__ != "ToolBudgetExceeded":
+            logger.warning("tool_budget pre-flight failed (%s) — "
+                           "allowing call", exc)
+        else:
+            raise
     from google import genai
     keys = configured_keys()
     if not keys:
@@ -436,8 +496,11 @@ async def generate(model: str, contents: Any, config: Any = None,
             ).aio.models.generate_content(
                 model=model, contents=contents, config=config)
             if timeout:
-                return await asyncio.wait_for(call, timeout=timeout)
-            return await call
+                resp = await asyncio.wait_for(call, timeout=timeout)
+            else:
+                resp = await call
+            _record_usage(resp, spend_key, session_id)
+            return resp
         except Exception as exc:
             if not is_quota_error(exc):
                 raise

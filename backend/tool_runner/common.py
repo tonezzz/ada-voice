@@ -29,6 +29,7 @@ from backend import devin_dispatch as devin_dispatch_mod
 from backend import tools_loader
 from backend import doc_archive_client
 from backend import summary_rollups
+from backend import tool_budget
 from backend.calendar_providers import CalendarService
 from backend.decision_check import DecisionCheckEngine
 from backend.event_recorder import HaEventRecorder

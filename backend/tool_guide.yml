@@ -328,7 +328,10 @@ ada_ops: >-
   — updates the doc's confidence; get key= from ada_memory_search or a
   check result first; bank-gated write. 'usage' token/cost report
   (source=all|live|posture|clutter; reset=true zeroes counters — only
-  when asked). 'health' memory-db health (collection= narrows). 'check'
+  when asked). 'budget' per-tool daily spend readout — today's est USD
+  per tool, configured daily caps, and remaining budget (UTC day;
+  caps via ADA_TOOL_DAILY_CAP_<TOOL> or manifest daily_cap_usd).
+  'health' memory-db health (collection= narrows). 'check'
   verifies a product/listing against stored criteria + live web
   (product=, url=, mode=quick|deep) — background ~30-60s. 'research'
   multi-round web research (topic=, depth=standard|deep) — background

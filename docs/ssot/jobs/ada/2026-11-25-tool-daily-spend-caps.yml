@@ -1,0 +1,94 @@
+# SSOT Job: per-tool daily spend caps + budget readout
+# Card: ada-spend-guardrails-per-tool-daily-caps-a376c3 (kanban).
+# Dispatch 20261125-152510-implement-per-tool-daily-spend.
+
+title: per-tool daily spend caps + ada_ops action='budget' readout
+subtitle: one ledger scan, two enforcement surfaces — runner gate for
+  flat-cost tools, gemini_pool pre-flight for every aux token call
+
+planning:
+  goal: |
+    Strict per-tool daily USD limits to stop runaway tool costs, plus
+    a clear status readout of remaining daily budgets. Builds on the
+    existing usage ledger (backend/usage_tracker.py -> ADA_USAGE_LOG)
+    and the lane monthly ceiling (backend/lane_budget.py) — this is the
+    per-tool daily layer that was missing.
+  decisions: |
+    - NEW backend/tool_budget.py owns caps, the day scan, the denial
+      shape and the readout. Day boundary is UTC (same ts[:10] slice
+      the ledger's by_day bucketing uses, so caps and ada_ops
+      action='usage' agree).
+    - Spend key = rec['tool'] falling back to rec['source'] for older
+      rows. usage_tracker.record() gained a tool= param (defaults to
+      source — every existing caller keeps working). gemini_pool now
+      records every successful aux generate_content call's
+      usage_metadata under source='gemini_aux' + its tool= label —
+      aux spend (web_search, cms_edit, doc_read, render_image/check,
+      summaries, rollups) is finally metered at all.
+    - Enforcement surface 1: ToolRunner._execute_gated calls
+      tool_budget.check(name) right after the storm breaker — an
+      over-cap tool short-circuits with {ok:false,
+      error_type:'ToolBudgetExceeded'} before gates or the method run.
+      Covers flat-cost tools (ada_render_video's Veo est_cost_usd rows
+      carry no usage_metadata).
+    - Enforcement surface 2: gemini_pool.generate calls
+      tool_budget.check_key(tool) before the first key attempt —
+      over-cap raises ToolBudgetExceeded (fail-closed on caps,
+      fail-open on gate bugs). Covers every token-metered side call.
+    - Cap resolution order: ADA_TOOL_DAILY_CAP_<KEY> env (canonical
+      env also covers alias labels) > tools.d manifest daily_cap_usd >
+      ADA_TOOL_DAILY_CAP_DEFAULT_USD catch-all. 0/unset = uncapped.
+      tools_loader.DynamicTool gained daily_cap_usd; manifest ships
+      ada_render_video: 5.0, ada_render_image: 2.0 (env-overridable).
+    - Alias map _SPEND_KEYS resolves generate() labels to canonical
+      tools both ways: cap declared on 'ada_render_image' covers
+      'render_image'+'render_check' spend; runner gate on the
+      canonical name sees the same set.
+    - Readout: ada_ops action='budget' -> tool_budget.status() —
+      spend_by_tool for today + capped{cap,spent,remaining,keys} +
+      default cap. Added to the provider decl enum, tool_guide, the
+      ops_read secondary-turn carve-out (open read like 'usage'), the
+      DEFAULT_ADA_INSTRUCTIONS usage hint, and conversation_health
+      (.tool_budget).
+    - entry_cost_usd is token-derived ONLY — the flat 'cost' field
+      (Veo per-render estimates) is added on top in the day scan,
+      matching _report's est_cost_usd = token + flat.
+  consequences: |
+    - lane_budget.month_spend_usd sums ALL ledger rows in the billing
+      month — gemini_aux rows now count toward the lane monthly ceiling
+      (previously invisible). Correct accounting, but a lane near its
+      ADA_LANE_MONTHLY_BUDGET_USD may trip sooner; that is the intended
+      direction (conservative overcount trips early).
+    - Caps require ADA_USAGE_LOG enabled (default on for
+      lane-identified processes; 'off' in tests). With the ledger off,
+      spend scans as 0 and caps never trip — metering and enforcement
+      share the same switch.
+    - posture/clutter verifiers and the Live session are NOT under
+      per-tool caps (own call paths, no generate() gate); Live keeps
+      the lane monthly ceiling, posture is cents/day at most. They do
+      appear in spend_by_tool and accept env caps for the readout.
+    - ToolBudgetExceeded inside a tools.d run() is caught by the
+      generic tool-failure wrapper and returned as
+      {ok:false,error_type:'ToolBudgetExceeded'} — same shape the
+      runner gate emits.
+
+verification:
+  tests: tests/test_tool_budget.py — 18 tests: day scan (tool/source
+    keys, alias aggregation, UTC day boundary), cap resolution
+    (env > canonical env > manifest > default), enforcement
+    (check/check_key/runner gate short-circuit + under-cap pass),
+    readout (ada_ops action='budget' + status() shape), metering
+    (_record_usage row shape, generate() pre-flight raise).
+  commands: |
+    .venv/bin/python -m pytest tests/test_tool_budget.py -x -q
+    .venv/bin/python -m pytest tests/test_lane_budget.py \
+      tests/test_gemini_pool.py tests/test_tool_runner.py \
+      tests/test_tools_loader.py tests/test_usage_tracker_gate.py \
+      tests/test_tool_usage_report.py -x -q   # 379 passed
+    python3 scripts/tool-lint.py             # clean
+  manual: |
+    ADA_USAGE_LOG=data/usage.jsonl \
+    ADA_TOOL_DAILY_CAP_WEB_SEARCH=0.01 \
+      -> ada_ops action='budget' shows web_search capped/remaining;
+         a web_search call over cap returns the ToolBudgetExceeded
+         denial instead of running.

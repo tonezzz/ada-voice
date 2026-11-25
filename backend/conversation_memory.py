@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from backend import gemini_pool, lane_budget
+from backend import gemini_pool, lane_budget, tool_budget
 from backend.mddb_client import MddbClient
 
 logger = logging.getLogger("voice.conversation")
@@ -119,6 +119,7 @@ def conversation_health() -> dict[str, Any]:
         ),
         "gemini": gemini_pool.status(),
         "lane_budget": lane_budget.status(),
+        "tool_budget": tool_budget.status(),
         "errors": {
             k: v for k, v in _health.items() if v is not None
         },
