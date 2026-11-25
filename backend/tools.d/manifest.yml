@@ -39,6 +39,7 @@ tools:
     policy: read
     secondary_allowed: false
     timeout_s: 120
+    daily_cap_usd: 2.0
   ada_adobe_stock:
     module: ada_adobe_stock
     policy: read
@@ -49,6 +50,7 @@ tools:
     policy: read
     secondary_allowed: false
     timeout_s: 220
+    daily_cap_usd: 5.0
   ada_look:
     module: eye
     policy: read

@@ -389,6 +389,12 @@ class ToolRunner(
         synth = self._storm_check(name)
         if synth is not None:
             return synth
+        # Per-tool daily spend cap (card ada-spend-guardrails): an
+        # over-cap tool short-circuits like the storm breaker — the
+        # model gets an actionable error, gates and method never run.
+        budget_hit = tool_budget.check(name)
+        if budget_hit is not None:
+            return budget_hit
         # Lazy-schema validation (card ada-lazy-tool-schemas): cold tools
         # ship name+blurb+empty params on the wire, so args are checked
         # against the real declaration HERE — before any gate can mint a
@@ -449,10 +455,12 @@ class ToolRunner(
                     call_args.get("status") or call_args.get("safety")))
             # ada_ops absorbed five meta tools (tools-merge-meta-voice) with
             # mixed postures — the name carries ada_outcome's blocked seat,
-            # but action='usage' was an open read and 'research' was never
-            # secondary-blocked, so those stay reachable on a guest turn.
+            # but action='usage'/'budget' were open reads and 'research'
+            # was never secondary-blocked, so those stay reachable on a
+            # guest turn.
             ops_read = (
-                name == "ada_ops" and action in ("usage", "research"))
+                name == "ada_ops"
+                and action in ("usage", "budget", "research"))
             # tools-merge-tasks-status carve-outs: tasks action='list' is
             # the absorbed tasks_list (a free read) and a plain chat_send
             # (no photo=/doc= flow) was never secondary-blocked — only the

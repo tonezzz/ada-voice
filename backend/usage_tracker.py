@@ -214,15 +214,21 @@ class UsageLedger:
                cached_tokens: int = 0, tool_use_tokens: int = 0,
                lane: str | None = None,
                est_cost_usd: float | None = None,
+               tool: str | None = None,
                detail: dict[str, Any] | None = None) -> None:
         """Append one usage row. est_cost_usd is for calls billed
         flat (per-render/per-second APIs like Veo that never return
         usage_metadata) — it lands in est_cost_usd beside the
         token-derived estimate; detail rides the jsonl row only
-        (audit trail — snapshot() never aggregates it)."""
+        (audit trail — snapshot() never aggregates it). tool is the
+        per-tool spend-cap key (tool_budget.py) — it defaults to
+        source so older callers keep working."""
         rec = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "source": str(source),
+            # Per-tool daily-cap key (backend/tool_budget.py); absent on
+            # pre-tag rows, which fall back to source there.
+            "tool": str(tool) if tool else str(source),
             "session_id": session_id,
             # Lane tag for per-lane budget enforcement (lane_budget.py);
             # older rows simply lack the field.
