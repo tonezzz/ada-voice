@@ -5,15 +5,21 @@
 #
 # The page is seeded OUT OF BAND by scenario-live.py's `seed:` block, not
 # by asking the model to publish: earlier runs showed the publish+confirm
-# dance is unreliable on this model, so it never actually tested recall.
-# A failed seed exits INFRA (3), never a scored "recall" turn.
+# dance is unreliable on this model. `seed_evict:` removes old pages on the
+# same topic first — the October `garden-watering-schedule` page was being
+# read instead of the seed and produced a "Tuesday" answer.
 #
-# 1. reconnect — fresh ws session; the ZETA page is the only intended
-#    source for the answer.
-# 2/3. Recall — require a cms_* read whose RESULT carries the seeded
-#    content, plus the spoken pump detail.
+# Assertions reflect what is actually claimed:
+#   - FIRST recall must read CMS and carry the seeded content in the result.
+#   - REPEAT ask may use retained session context; it must still be correct
+#     (pump + Monday/Thursday, never Tuesday). It is not a second tool test.
 name: kk_cms_only_seeded_recall
 tier: full
+
+seed_evict:
+  - {collection: ada-cms-pages-kk-dev, key: garden-watering-schedule, langs: [en, th]}
+  - {collection: ada-cms-pages-kk-dev, key: watering-schedule, langs: [en, th]}
+  - {collection: ada-cms-pages-kk-dev, key: zeta-kk-cms-7741, langs: [en, th]}
 
 seed:
   - collection: ada-cms-pages-kk-dev
@@ -36,6 +42,7 @@ turns:
       When is the garden watering scheduled, and what do I need to do
       before it runs?
     expect:
+      # Proof this answer came from CMS, not context.
       calls_any: [cms_read, cms_get_page, cms_list_pages]
       no_successful_calls_except:
         - set_facial_expression
@@ -43,25 +50,32 @@ turns:
         - cms_get_page
         - cms_list_pages
         - cms_verify_page
-      # Ground truth from the read's result — the answer came from the
-      # seeded page, not from the earlier conversation.
       result_contains_any: ["ZETA-KK-CMS-7741", "primed", "ปั๊ม"]
-      response_contains_any: [prime, primed, ล่อน้ำ, ปั๊ม]
+      response_contains_all_any:
+        - ["prime", "primed", "ปั๊ม", "ล่อน้ำ"]
+        - ["monday", "จันทร์"]
+        - ["thursday", "พฤหัส"]
+      response_not_contains: ["tuesday", "อังคาร"]
       timeout_s: 120
       settle_s: 5
 
   - user: >-
       Sorry, what was the watering schedule again?
     expect:
-      calls_any: [cms_read, cms_get_page, cms_list_pages]
+      # A repeat in the SAME session may use retained context — do not
+      # require a second cms_read. Still catch the known day-name slip.
       no_successful_calls_except:
         - set_facial_expression
         - cms_read
         - cms_get_page
         - cms_list_pages
         - cms_verify_page
-      result_contains_any: ["ZETA-KK-CMS-7741", "primed", "ปั๊ม"]
-      response_contains_any: [prime, primed, ล่อน้ำ, ปั๊ม]
+      response_contains_all_any:
+        - ["prime", "primed", "ปั๊ม", "ล่อน้ำ"]
+        - ["monday", "จันทร์"]
+        - ["thursday", "พฤหัส"]
+      response_not_contains: ["tuesday", "อังคาร"]
+      response_nonempty: true
       timeout_s: 120
 
 cleanup:

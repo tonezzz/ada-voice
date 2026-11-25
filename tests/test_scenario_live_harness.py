@@ -72,6 +72,23 @@ def test_seed_payload_defaults() -> None:
     assert norm["meta"] == {"kind": ["report"], "tags": ["a", "b"]}
 
 
+def test_response_contains_all_any() -> None:
+    events = [
+        {"type": "assistant_transcript_delta",
+         "text": "รดน้ำวันจันทร์และพฤหัส ต้องล่อน้ำปั๊มก่อน"},
+    ]
+    assert sl.check_turn(events, {
+        "response_contains_all_any": [
+            ["ปั๊ม", "pump"], ["จันทร์", "Monday"], ["พฤหัส", "Thursday"],
+        ],
+        "response_not_contains": ["อังคาร", "Tuesday"],
+    }) == []
+    fails = sl.check_turn(events, {
+        "response_contains_all_any": [["อังคาร", "Tuesday"]],
+    })
+    assert any("response_contains_all_any" in f for f in fails)
+
+
 def test_seed_verified_requires_exact_key_and_lang() -> None:
     docs = [{"key": "zeta-kk-cms-7741", "lang": "en"},
             {"key": "zeta-kk-cms-7741", "lang": "th"}]
