@@ -636,6 +636,18 @@ class OpenRouterTextProvider(RealtimeProvider):
         return _gen()
 
     async def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
         if self._pending and not self._pending.done():
             self._pending.cancel()
+        # Persist parity with GeminiLiveProvider.close(): without this,
+        # text-mode sessions (?mode=text, ADA_TEXT_ONLY_CALLERS,
+        # telegram/tg/line/chat/web channels) wrote transcripts + the
+        # session-end marker but never produced kind=session-summary MDDB
+        # docs, reports/*.json, or extract candidates/actions — starving
+        # memory-distill/consolidate/merge-proposals
+        # (card ada-voice-text-mode-sessions-never-call-e007bd). Fire and
+        # forget like the Live path so teardown isn't blocked on MDDB.
+        if self.conversation is not None:
+            _ = asyncio.create_task(self.conversation.persist())
