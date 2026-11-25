@@ -566,8 +566,17 @@ kanban: >-
   (column=, limit= filters) for finding card ids and open requests;
   'read' one card full detail (id=) or the report-linked card
   (report=<slug>). 'comment' posts text= on id= (prefix '[opinion]' for
-  report takes — the durable record of a report opinion). 'file' creates
-  a backlog card (title=, note=, priority=). 'ask' raises a board
+  report takes — the durable record of a report opinion). 'draft'
+  turns a dictated request (request=, the verbatim voice transcript)
+  into a validated card spec — title, spec, verify/done_when, tags,
+  priority, suggested card_action dispatch envelope — with NO board
+  write; show Tony the draft, then on his yes 'file' it. 'file'
+  creates a card (title=, note=, spec=, verify=/done_when=, tags=,
+  card_action= dispatch envelope, priority=, column= backlog default,
+  optional caller id=); every field is validated against the board
+  card schema and malformed envelopes are refused. file queue=true
+  arms dispatch rails on creation — Tony's yes required
+  (confirmed=true or confirm_token). 'ask' raises a board
   request to Tony (id=, ask=). 'respond' answers a card's open request
   (id= + request_id= + answer=, owner-only — the board logs it under
   'tony'). 'move' (id= + column=) follows Ada's authority: backlog→doing
