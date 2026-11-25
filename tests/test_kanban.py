@@ -410,6 +410,169 @@ class FileTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.posts("/card"))
 
 
+class DraftTest(unittest.IsolatedAsyncioTestCase):
+    """action='draft' — dictated request -> validated card spec, no
+    board write (the voice-request -> card-spec path)."""
+
+    REQUEST = ("Ada, in the ada-voice repo add a tool that turns what I "
+               "dictate into a proper kanban card spec. Done when a "
+               "recorded voice request files a correctly formatted card "
+               "JSON in the board queue.")
+
+    async def test_draft_builds_dispatch_spec(self):
+        with patch.object(board.httpx, "AsyncClient",
+                          side_effect=AssertionError("no http expected")):
+            out = await board.run(_runner(), action="draft",
+                                  request=self.REQUEST)
+        self.assertTrue(out["ok"], out)
+        d = out["draft"]
+        self.assertEqual(d["column"], "backlog")
+        self.assertEqual(d["priority"], "medium")
+        self.assertIn("ada-voice", d["title"].lower() + d["spec"].lower())
+        self.assertTrue(d["spec"].startswith("Goal: "))
+        self.assertTrue(d["verify"])
+        self.assertEqual(d["tags"], ["voice-draft"])
+        # repo named in the request -> suggested dispatch envelope
+        self.assertEqual(d["action"],
+                         {"type": "dispatch", "repo": "ada-voice"})
+        self.assertNotIn("from", d)  # board-owned, never caller-set
+
+    async def test_draft_requires_request(self):
+        out = await board.run(_runner(), action="draft", request="  ")
+        self.assertFalse(out["ok"])
+        self.assertIn("request", out["error"])
+
+    async def test_draft_without_repo_flags_missing_envelope(self):
+        out = await board.run(_runner(), action="draft",
+                              request="tidy up the garage shelf")
+        self.assertTrue(out["ok"], out)
+        self.assertNotIn("action", out["draft"])
+        self.assertTrue(any("card_action" in m
+                            for m in out.get("missing") or []))
+
+    async def test_draft_honors_explicit_fields(self):
+        out = await board.run(
+            _runner(), action="draft", request=self.REQUEST,
+            title="Voice card spec tool", priority="high",
+            verify="pytest tests/test_kanban.py -k draft is green",
+            card_action={"type": "dispatch", "repo": "chaba",
+                         "executor": "devin"})
+        self.assertTrue(out["ok"], out)
+        d = out["draft"]
+        self.assertEqual(d["title"], "Voice card spec tool")
+        self.assertEqual(d["priority"], "high")
+        self.assertEqual(d["verify"],
+                         "pytest tests/test_kanban.py -k draft is green")
+        self.assertEqual(d["action"]["repo"], "chaba")
+        self.assertNotIn("missing", out)
+
+    async def test_draft_rejects_bad_envelope(self):
+        out = await board.run(
+            _runner(), action="draft", request=self.REQUEST,
+            card_action={"type": "dispatch", "repo": "ada-voice",
+                         "status": "queued"})
+        self.assertFalse(out["ok"])
+        self.assertIn("card_action.status", out["error"])
+
+
+class FileSpecTest(unittest.IsolatedAsyncioTestCase):
+    """action='file' with the full card-spec fields — spec/verify/
+    done_when/tags/card_action validated against the board schema."""
+
+    def _routes(self, cards=None):
+        return {"/card": FakeResp(200, {"ok": True,
+                                        "message": "card v1 created"}),
+                "/cards": FakeResp(200, {"cards": cards or [
+                    {"id": "v1", "title": "spec card",
+                     "column": "backlog"}]})}
+
+    async def test_file_posts_full_spec_body(self):
+        client = FakeClient(self._routes())
+        with patch.object(board.httpx, "AsyncClient", return_value=client):
+            out = await board.run(
+                _runner(), action="file", title="spec card",
+                spec="Goal: ship the draft flow\nVerify: pytest green",
+                verify="integration test passes",
+                tags=["voice-draft", "kanban"],
+                card_action={"type": "dispatch", "repo": "ada-voice",
+                             "executor": "devin"},
+                priority="low")
+        self.assertTrue(out["ok"], out)
+        body = client.posts("/card")[0]["json"]
+        self.assertEqual(body["spec"],
+                         "Goal: ship the draft flow\nVerify: pytest green")
+        self.assertEqual(body["verify"], "integration test passes")
+        self.assertEqual(body["tags"], ["voice-draft", "kanban"])
+        self.assertEqual(body["action"],
+                         {"type": "dispatch", "repo": "ada-voice",
+                          "executor": "devin"})
+        self.assertEqual(body["column"], "backlog")
+        self.assertEqual(body["priority"], "low")
+        self.assertEqual(body["from"], "ada")
+
+    async def test_file_done_when_alias_maps_to_verify(self):
+        client = FakeClient(self._routes())
+        with patch.object(board.httpx, "AsyncClient", return_value=client):
+            out = await board.run(_runner(), action="file",
+                                  title="spec card",
+                                  done_when="the card JSON validates")
+        self.assertTrue(out["ok"], out)
+        body = client.posts("/card")[0]["json"]
+        self.assertEqual(body["verify"], "the card JSON validates")
+        self.assertNotIn("done_when", body)
+
+    async def test_file_rejects_unknown_action_key(self):
+        with patch.object(board.httpx, "AsyncClient",
+                          side_effect=AssertionError("no http expected")):
+            out = await board.run(
+                _runner(), action="file", title="x",
+                card_action={"type": "dispatch", "repo": "ada-voice",
+                             "bogus_field": 1})
+        self.assertFalse(out["ok"])
+        self.assertIn("bogus_field", out["error"])
+
+    async def test_file_dispatch_requires_repo(self):
+        with patch.object(board.httpx, "AsyncClient",
+                          side_effect=AssertionError("no http expected")):
+            out = await board.run(
+                _runner(), action="file", title="x",
+                card_action={"type": "dispatch"})
+        self.assertFalse(out["ok"])
+        self.assertIn("repo", out["error"])
+
+    async def test_file_rejects_bad_column_and_tags(self):
+        with patch.object(board.httpx, "AsyncClient",
+                          side_effect=AssertionError("no http expected")):
+            out = await board.run(_runner(), action="file", title="x",
+                                  column="inbox")
+            self.assertFalse(out["ok"])
+            self.assertIn("column", out["error"])
+            out = await board.run(_runner(), action="file", title="x",
+                                  tags="not-a-list")
+            self.assertFalse(out["ok"])
+            self.assertIn("tags", out["error"])
+
+    async def test_file_queue_needs_confirm(self):
+        """queue=true arms dispatch rails — Tony's yes via the standard
+        confirm gate; unconfirmed writes nothing."""
+        client = FakeClient(self._routes())
+        with patch.object(board.httpx, "AsyncClient", return_value=client):
+            out = await board.run(_runner(), action="file",
+                                  title="spec card", queue=True)
+        self.assertFalse(out["ok"])
+        self.assertTrue(out.get("needs_confirm"))
+        self.assertFalse(client.posts("/card"))
+
+    async def test_file_queue_confirmed_posts_queue_flag(self):
+        client = FakeClient(self._routes())
+        with patch.object(board.httpx, "AsyncClient", return_value=client):
+            out = await board.run(_runner(), action="file",
+                                  title="spec card", queue=True,
+                                  confirmed=True)
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(client.posts("/card")[0]["json"]["queue"])
+
+
 class AskTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_ask_posts_request_as_ada(self):

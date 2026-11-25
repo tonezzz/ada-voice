@@ -60,8 +60,9 @@ DECLARATION = {
     "name": "kanban",
     "description": (
         "Kanban board — action='next'|'next_choice'|'list'|'read'|"
-        "'comment'|'move'|'queue'|'ask'|'file'|'respond'. next/next_choice are "
-        "read-only menus; moves need triage authority or Tony's confirm."
+        "'comment'|'move'|'queue'|'ask'|'file'|'draft'|'respond'. "
+        "draft shapes a dictated request into a card spec (no write); "
+        "file lands it. Moves need triage authority or Tony's confirm."
     ),
     "parameters": {
         "type": "object",
@@ -74,7 +75,9 @@ DECLARATION = {
                                "'comment', 'move', 'queue' (arm a card's "
                                "dispatch rails — T3; gated cards need "
                                "Tony's yes), 'ask', 'file' "
-                               "('create' accepted), 'respond'.",
+                               "('create' accepted), 'draft' (dictated "
+                               "request -> validated card spec, no "
+                               "write), 'respond'.",
             },
             "choice": {
                 "type": "string",
@@ -87,7 +90,9 @@ DECLARATION = {
             },
             "id": {
                 "type": "string",
-                "description": "Card id, e.g. 'mha-log-noise'.",
+                "description": "Card id, e.g. 'mha-log-noise'. "
+                               "action=file: optional caller-chosen id "
+                               "(slug-safe) instead of the server's.",
             },
             "column": {
                 "type": "string",
@@ -138,6 +143,57 @@ DECLARATION = {
             "note": {
                 "type": "string",
                 "description": "One-line card note (action=file).",
+            },
+            "request": {
+                "type": "string",
+                "description": "action=draft only: the dictated request "
+                               "verbatim — the voice-to-text transcript "
+                               "the card spec is drafted from.",
+            },
+            "spec": {
+                "type": "string",
+                "description": "action=file/draft: the card's spec body "
+                               "— goal, surface/host, sequence, hard "
+                               "limits, verify steps (dispatch-brief "
+                               "shape). Draft fills a goal-first "
+                               "template when omitted.",
+            },
+            "verify": {
+                "type": "string",
+                "description": "action=file/draft: the checkable "
+                               "done-condition written to the card's "
+                               "verify field.",
+            },
+            "done_when": {
+                "type": "string",
+                "description": "action=file/draft: alias for verify= — "
+                               "the done-condition in plain words.",
+            },
+            "tags": {
+                "type": "array",
+                # genai rejects union-typed items — declare object-free
+                # string list; runtime coerces non-str entries.
+                "items": {"type": "string"},
+                "description": "action=file/draft: card tags "
+                               "(max 10).",
+            },
+            "card_action": {
+                "type": "object",
+                "description": "action=file/draft: the card's dispatch "
+                               "envelope written to action= — e.g. "
+                               "{type:'dispatch', repo:'ada-voice', "
+                               "executor:'devin'}. Keys are validated "
+                               "against the board's action schema; "
+                               "board-owned fields (status/runner/"
+                               "task_id) are refused.",
+            },
+            "queue": {
+                "type": "boolean",
+                "description": "action=file only: arm the card's "
+                               "dispatch rails on creation (queue:true "
+                               "on POST /card). Tony's yes required — "
+                               "replay with confirmed=true or a "
+                               "confirm_token after he confirms.",
             },
             "priority": {
                 "type": "string",
@@ -198,7 +254,29 @@ _COMMS_KEEP = 10         # full-card read keeps the last N comms lines
 _COMM_TEXT_MAX = 240
 _DEFAULT_COLUMNS = ("lab", "backlog", "doing", "review", "done")
 _PRODSEC_TAG = re.compile(r"(?i)prod|security|infra|deploy")
-_SECONDARY_OK = {"list", "read"}        # design §6: Tony-tier writes
+_SECONDARY_OK = {"list", "read", "draft"}  # design §6: Tony-tier writes
+
+# ---- card-write schema (voice draft -> file) --------------------------
+# Mirror of the Chaba board card contract: board-api POST /card accepts
+# these top-level fields (everything else — comms/requests/claim/action.
+# status — is board-owned and never caller-settable). The action
+# sub-dict mirrors board-api ACTION_KEYS (kept in sync with
+# opencode/ada_mcp.py _ENVELOPE_ACTION_KEYS); the runner re-validates
+# the envelope at claim, so drift fails closed.
+_CARD_SPEC_MAX = 8000
+_CARD_FIELD_MAX = {"spec": _CARD_SPEC_MAX, "brief": 2000,
+                   "verify": 2000, "metric": 500, "report": 200,
+                   "note": _TEXT_MAX, "text": _TEXT_MAX}
+_CARD_ACTION_KEYS = frozenset({
+    "type", "repo", "host", "labels", "button", "model", "executor",
+    "agent_profile", "profile", "target_host", "artifact", "task_class",
+    "prompt", "expect", "lane", "subject_host", "llm_key_alias",
+    "lane_envelope", "nlm_notebook", "nlm_source_file",
+    "nlm_source_text", "nlm_source_url",
+})
+# Repos board-api's dispatch whitelist is known to accept — used only to
+# SUGGEST card_action.repo from dictated text, never to gate the write.
+_KNOWN_REPOS = ("chaba", "ada-voice", "sunsynk-card")
 # absorb ada_board_write's action vocabulary (the alias passes the old
 # names through untouched)
 _ACTION_SYNONYMS = {"create": "file", "new": "file"}
@@ -677,44 +755,227 @@ def _filed_card_id(data: dict[str, Any] | None) -> str | None:
     return m.group(1) if m else None
 
 
-async def _file(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
+def _detect_repo(text: str) -> str | None:
+    """First known dispatch-whitelist repo named in the dictated text —
+    a suggestion for card_action.repo, nothing more."""
+    low = text.lower()
+    for repo in _KNOWN_REPOS:
+        if re.search(rf"(?<![a-z0-9-]){re.escape(repo)}(?![a-z0-9-])",
+                     low):
+            return repo
+    return None
+
+
+def _title_from_request(text: str) -> str:
+    """Draft title: the request's first sentence/line, word-boundary
+    trimmed to the card-title cap."""
+    first = re.split(r"(?<=[.!?])\s+|\n", text.strip(), maxsplit=1)[0]
+    first = " ".join(first.split())
+    if len(first) > _TITLE_MAX:
+        cut = first[:_TITLE_MAX].rsplit(" ", 1)[0] or first[:_TITLE_MAX]
+        first = cut.rstrip(" ,;:-")
+    return first[:_TITLE_MAX] or "Voice-drafted card"
+
+
+def _card_action_envelope(raw: Any
+                          ) -> tuple[dict[str, Any] | None,
+                                     str | None]:
+    """Validate the caller's dispatch envelope against the board's
+    action-key schema. Returns (envelope, error)."""
+    if raw in (None, ""):
+        return None, None
+    if not isinstance(raw, dict):
+        return None, ("card_action must be an object, e.g. "
+                      "{type:'dispatch', repo:'ada-voice'}")
+    env: dict[str, Any] = {}
+    for k, v in raw.items():
+        key = str(k)
+        if key not in _CARD_ACTION_KEYS:
+            return None, (f"card_action.{key} is not a board action "
+                          f"field — allowed: "
+                          f"{', '.join(sorted(_CARD_ACTION_KEYS))}")
+        env[key] = v
+    if str(env.get("type") or "") == "dispatch" and not str(
+            env.get("repo") or "").strip():
+        return None, ("card_action.type='dispatch' requires "
+                      "card_action.repo (board-api dispatch whitelist: "
+                      + ", ".join(_KNOWN_REPOS) + ")")
+    return env, None
+
+
+def _build_card_body(args: dict[str, Any]
+                     ) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Assemble + validate the POST /card body from tool args.
+    Returns (body, errors, notes) — errors refuse the write, notes are
+    advisory (alias wins, coerced values)."""
+    errors: list[str] = []
+    notes: list[str] = []
+    body: dict[str, Any] = {"from": "ada"}
+    title = str(args.get("title") or "").strip()
+    if not title:
+        errors.append("a card title is required")
+    else:
+        body["title"] = title[:_TITLE_MAX * 2]
+    cid = str(args.get("id") or "").strip()
+    if cid:
+        if _CARD_ID.match(cid):
+            body["id"] = cid
+        else:
+            errors.append("id must be slug-safe "
+                          "([a-z0-9._-], <=81 chars)")
+    for field, cap in _CARD_FIELD_MAX.items():
+        val = str(args.get(field) or "").strip()
+        if val:
+            body[field] = val[:cap]
+    done_when = str(args.get("done_when") or "").strip()
+    if done_when:
+        if body.get("verify"):
+            notes.append("done_when ignored — verify= already set")
+        else:
+            body["verify"] = done_when[:_CARD_FIELD_MAX["verify"]]
+    note = str(args.get("note") or "").strip()
+    if note:
+        body["note"] = note[:_TEXT_MAX]
+        body.setdefault("text", note[:_TEXT_MAX])
+    tags = args.get("tags")
+    if isinstance(tags, (list, tuple)) and tags:
+        body["tags"] = [str(t).strip()[:40] for t in tags
+                        if str(t).strip()][:10]
+    elif tags not in (None, ""):
+        errors.append("tags must be a list of strings")
+    col = str(args.get("column") or "").strip().lower()
+    if col:
+        if col in _DEFAULT_COLUMNS:
+            body["column"] = col
+        else:
+            errors.append(f"column {col!r} is not a board column — "
+                          "standard columns: "
+                          + ", ".join(_DEFAULT_COLUMNS))
+    else:
+        body["column"] = "backlog"
+    pri = str(args.get("priority") or "").strip().lower()
+    if pri:
+        if pri not in ("high", "medium", "low"):
+            errors.append("priority must be high|medium|low")
+        else:
+            body["priority"] = pri
+    env, env_err = _card_action_envelope(args.get("card_action"))
+    if env_err:
+        errors.append(env_err)
+    elif env:
+        body["action"] = env
+    if args.get("queue"):
+        body["queue"] = True
+    return body, errors, notes
+
+
+async def _draft(args: dict[str, Any]) -> dict[str, Any]:
+    """action=draft request=<dictated text> — turn a voice request into
+    a validated card spec for Tony's review. No board write: the model
+    shows him the draft, and on his yes calls action='file' with the
+    same fields (queue=true only after an explicit yes — the confirm
+    gate). Template is dispatch-brief shaped (goal / spec / limits /
+    verify) so the filed card is dispatch-quality, not a vague note."""
+    request = str(args.get("request") or "").strip()
+    if not request:
+        return {"ok": False,
+                "error": "request text is required — pass the dictated "
+                         "request verbatim (the voice transcript)"}
+    merged = dict(args)
+    merged["title"] = str(args.get("title") or "").strip() \
+        or _title_from_request(request)
+    merged["spec"] = str(args.get("spec") or "").strip() or (
+        f"Goal: {request}\n\n"
+        "Drafted from a dictated voice request — confirm the goal, "
+        "surface, host, sequence, hard limits, and verify steps with "
+        "Tony before this is dispatched.")
+    if not str(args.get("verify") or args.get("done_when") or ""
+               ).strip():
+        merged["done_when"] = (
+            "the verify steps in spec pass and the evidence is posted "
+            "to the card")
+    if not str(args.get("priority") or "").strip():
+        merged["priority"] = "medium"
+    if not str(args.get("column") or "").strip():
+        merged["column"] = "backlog"
+    if args.get("tags") in (None, ""):
+        merged["tags"] = ["voice-draft"]
+    repo = _detect_repo(request)
+    if args.get("card_action") in (None, "") and repo:
+        merged["card_action"] = {"type": "dispatch", "repo": repo}
+    body, errors, notes = _build_card_body(merged)
+    body.pop("from", None)
+    out: dict[str, Any] = {
+        "ok": not errors,
+        "request": request[:200],
+        "draft": body,
+        "provenance": "dictated voice request — confirm with Tony "
+                      "before filing",
+    }
+    if notes:
+        out["notes"] = notes
+    if errors:
+        out["error"] = "; ".join(errors)
+        return out
+    missing: list[str] = []
+    if not body.get("verify"):
+        missing.append("verify/done_when — the checkable done-condition")
+    if "action" not in body:
+        missing.append(
+            "card_action — the dispatch envelope "
+            "{type:'dispatch', repo, executor, ...} if this is "
+            "dispatchable work; omit for a plain backlog card")
+    if missing:
+        out["missing"] = missing
+    out["next_safe_action"] = (
+        "show Tony the draft aloud; on his yes call action='file' with "
+        "these fields (title/spec/verify/card_action/tags/priority). "
+        "Add queue=true only when he wants it armed — that takes the "
+        "confirm gate. Never file silently.")
+    return out
+
+
+async def _file(runner: Any, args: dict[str, Any],
+                confirmed: Any, confirm_token: Any) -> dict[str, Any]:
     """Drop a new card onto the board — the voice-side capture of the
     request lifecycle. The card lands in backlog for triage, comms
     record 'ada'. Verify-after-write (card ada-phantom-card-claims): the
     board IS the record — a 200 that landed nothing would let the
     narration claim a card that silently drops the ask, so the tool
     confirms the card is readable before reporting ok."""
-    title = str(args.get("title") or "").strip()
-    if not title:
-        return {"ok": False, "error": "a card title is required"}
-    body: dict[str, Any] = {"title": title[:_TITLE_MAX * 2],
-                            "from": "ada"}
-    note = str(args.get("note") or "").strip()
-    if note:
-        body["note"] = note[:_TEXT_MAX]
-        body["text"] = note[:_TEXT_MAX]
-    col = str(args.get("column") or "").strip().lower()
-    if col:
-        body["column"] = col
-    pri = str(args.get("priority") or "").strip().lower()
-    if pri:
-        if pri not in ("high", "medium", "low"):
-            return {"ok": False,
-                    "error": "priority must be high|medium|low"}
-        body["priority"] = pri
+    body, errors, notes = _build_card_body(args)
+    if errors:
+        return {"ok": False, "error": "; ".join(errors)}
+    if body.get("queue"):
+        # Arming dispatch rails at creation is Tony's call — same
+        # confirm gate as action='queue' on an existing card.
+        try:
+            runner._require_confirmation(
+                "kanban",
+                {"action": "file", "queue": True,
+                 "title": body.get("title")},
+                confirmed, confirm_token,
+                "NOT EXECUTED — kanban file with queue=true arms the "
+                "card's dispatch rails. Get Tony's explicit yes; or "
+                "file without queue and use action='queue' later.")
+        except PermissionError as exc:
+            return {"ok": False, "needs_confirm": True,
+                    "error": str(exc)}
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
         data, err = await _request(client, "POST", "/card", json=body,
-                                   ctx=ctx)
+                                   ctx=getattr(runner, "context", None))
         if err:
             return {"ok": False, "error": err}
         cid = _filed_card_id(data)
         verified = False
-        vdata, verr = await _request(client, "GET", "/cards", ctx=ctx)
+        vdata, verr = await _request(
+            client, "GET", "/cards",
+            ctx=getattr(runner, "context", None))
         if not verr and vdata is not None:
             cards = _cards_only(vdata.get("cards"))
             found = _resolve_in(cards, cid) if cid else None
             if found is None:
-                want = _slug(title)
+                want = _slug(str(body.get("title") or ""))
                 titled = [c for c in cards
                           if _slug(str(c.get("title") or "")) == want]
                 found = titled[0] if len(titled) == 1 else None
@@ -732,6 +993,8 @@ async def _file(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
         "note": "the card is on the board — triage picks it up from "
                 "there",
     }
+    if notes:
+        out["notes"] = notes
     if cid:
         out["id"] = cid
         out["note"] = (f"card '{cid}' is on the board — say 'on the "
@@ -1042,11 +1305,13 @@ async def run(runner: Any, confirmed: Any = None,
         return await _queue(runner, args, confirmed, confirm_token)
     if action == "ask":
         return await _ask(ctx, args)
+    if action == "draft":
+        return await _draft(args)
     if action == "file":
-        return await _file(ctx, args)
+        return await _file(runner, args, confirmed, confirm_token)
     if action == "respond":
         return await _respond(runner, args)
     return {"ok": False,
             "error": f"unknown action {action!r} — use next, "
                      "next_choice, list, read, comment, move, queue, "
-                     "ask, file, or respond"}
+                     "ask, file, draft, or respond"}

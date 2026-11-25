@@ -1,0 +1,87 @@
+name: kanban-voice-card-draft
+instance: tony
+# Voice request -> well-formed kanban card spec (card
+# ada-tool-voice-request-well-formed-kanba-56ba9f). The request= text is
+# the recorded voice transcript — same words as
+# tests/fixtures/voice-kanban-request.txt, which the dedicated
+# integration test (tests/test_kanban_voice_draft.py) drives end-to-end.
+# draft validates + shapes the spec with no board write; file lands it
+# on FakeBoard; queue=true takes the confirm gate (confirmed: true stands
+# in for Tony's spoken yes) and arms the dispatch rails.
+banks:
+  banks:
+    note:
+      title: Scratch notes
+      scope: instance
+      instances: [tony]
+      mddb_collection: ada-ha-bank-note-{instance}
+      kinds: [note]
+      writable: true
+      write_policy: direct
+      allowed_tools: [ada_remember, ada_forget, ada_outcome]
+      status: active
+  person_policies:
+    person.tony: {full: true}
+board:
+  cards: []
+steps:
+  - set: {session_owner_identity: person.tony}
+
+  # Draft: recorded transcript -> validated card spec, zero board calls.
+  - tool: kanban
+    args:
+      action: draft
+      request: >-
+        Ada, make a card for this. In the ada-voice repo, add a tool
+        that turns what I dictate into a proper kanban card spec
+        instead of a vague note. The card is done when a recorded voice
+        request produces a correctly formatted card JSON in the board
+        queue and the integration test passes. Keep it in the local dev
+        environment, don't push or deploy.
+    expect:
+      no_error: true
+      output_contains:
+        - '"ok": true'
+        - '"voice-draft"'
+        - '"repo": "ada-voice"'
+        - '"backlog"'
+
+  # File: Tony confirmed the draft aloud — the same fields land on the
+  # board, queue=true arms the rails under confirmed=true.
+  - tool: kanban
+    args:
+      action: file
+      title: "Voice request -> kanban card spec tool"
+      spec: >-
+        Goal: add a kanban tool action that converts a dictated voice
+        request into a well-formed card spec. Surface: ada-voice repo,
+        backend/tools.d/kanban.py. Sequence: draft action validates the
+        transcript into {title, spec, verify, tags, card_action}; file
+        posts it to board-api. Hard limits: local dev worktree only, no
+        push/deploy. Verify: recorded voice input generates correctly
+        formatted card JSON in the board queue (integration test green).
+      verify: >-
+        a recorded voice request produces a correctly formatted card
+        JSON in the board queue and the integration test passes
+      tags: [voice-draft, kanban]
+      card_action: {type: dispatch, repo: ada-voice, executor: devin}
+      priority: medium
+      queue: true
+      confirmed: true
+    expect:
+      no_error: true
+      output_contains: ['"ok": true',
+                        '"id": "voice-request-kanban-card-spec-tool"']
+
+  # The card on the board IS the deliverable: spec/verify/envelope all
+  # present, action.status queued — "in the board queue".
+  - audit: board
+    expect:
+      output_contains:
+        - '"Goal: add a kanban tool action'
+        - 'recorded voice request produces a correctly formatted card JSON'
+        - '"voice-draft"'
+        - '"repo": "ada-voice"'
+        - '"status": "queued"'
+        - '"column": "backlog"'
+      output_not_contains: ['fakeboard: unhandled']

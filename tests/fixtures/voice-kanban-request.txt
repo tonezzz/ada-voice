@@ -1,0 +1,6 @@
+Ada, make a card for this. In the ada-voice repo, add a tool that
+turns what I dictate into a proper kanban card spec instead of a vague
+note. The card is done when a recorded voice request produces a
+correctly formatted card JSON in the board queue and the integration
+test passes. Keep it in the local dev environment, don't push or
+deploy.
