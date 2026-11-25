@@ -12,6 +12,10 @@ Usage:
   --url defaults to $ADA_LIVE_URL or ws://127.0.0.1:8002/ws
   --api-key defaults to $ADA_API_KEY (matched against ADA_API_KEYS server-side)
 
+Top-level `seed_evict:` deletes stale documents before seeding; a 404 is
+fine. Use it for old pages on the same topic as the fixture — otherwise
+the model may read the stale page instead of the seed.
+
 Top-level `seed:` writes fixtures into MDDB before any turn or preflight:
 
   seed:
@@ -44,6 +48,10 @@ Turn expectations (all optional, all must pass):
   result_contains_any: [s, ...]  at least one substring appears in a result
   response_contains: [s, ...]  each substring appears in the spoken transcript
   response_contains_any: [s, ...]  at least one substring appears (paraphrase-tolerant)
+  response_contains_all_any: [[alts], ...]
+                               each group must contain at least one of its
+                               alternates — e.g. both a day AND a pump
+                               detail without pinning the language
   response_nonempty: true      any spoken transcript at all
   timeout_s: N                 per-turn hard timeout (default 90)
   settle_s: N                  quiet period after last response (default 5)
@@ -523,6 +531,12 @@ def check_turn(events: list[dict], expect: dict) -> list[str]:
         failures.append(
             f"response_contains_any: none of {any_subs} in transcript ({transcript[:160]!r})"
         )
+    for group in expect.get("response_contains_all_any") or []:
+        alts = group if isinstance(group, (list, tuple)) else [group]
+        if not any(str(a).lower() in transcript.lower() for a in alts):
+            failures.append(
+                f"response_contains_all_any: none of {list(alts)} "
+                f"in transcript ({transcript[:160]!r})")
     for sub in expect.get("response_not_contains") or []:
         if sub.lower() in transcript.lower():
             failures.append(f"response_not_contains: {sub!r} leaked into transcript")
@@ -1580,6 +1594,40 @@ def _voice_file_for(value: str) -> Path:
     return Path.home() / ".config" / "ada" / f"voice-{v}.json"
 
 
+def run_seed_evictions(spec: dict, mddb_url: str, verbose: bool) -> list[str]:
+    """Delete stale fixtures BEFORE seeding, so an old page on the same
+    topic cannot answer a probe in place of the seeded one."""
+    import urllib.request
+
+    def post(path: str, payload: dict) -> Any:
+        req = urllib.request.Request(
+            f"{mddb_url}{path}",
+            data=json.dumps(payload).encode(),
+            headers={"content-type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+
+    fails: list[str] = []
+    for item in spec.get("seed_evict") or []:
+        col = item.get("collection")
+        key = item.get("key")
+        if not col or not key:
+            fails.append(f"seed_evict: collection/key required: {item}")
+            continue
+        langs = item.get("langs") or [item.get("lang") or "en"]
+        for lang in langs:
+            try:
+                post("/delete", {"collection": col, "key": key, "lang": lang})
+                if verbose:
+                    print(f"  seed_evict: {col}/{key} ({lang})")
+            except Exception as exc:
+                # 404 means there was nothing stale to remove — fine.
+                if "404" not in str(exc):
+                    fails.append(f"seed_evict: {col}/{key} ({lang}): {exc}")
+    return fails
+
+
 def seed_payload(item: dict) -> dict:
     """Build the /v1/add body for one seed document.
 
@@ -1812,7 +1860,8 @@ async def main() -> int:
     # model failure hidden inside a "recall" turn.
     mddb_url = (os.environ.get("MDDB_BASE_URL")
                 or "http://127.0.0.1:11023/v1").rstrip("/")
-    seed_fails = run_seed(spec, mddb_url, args.verbose)
+    evict_fails = run_seed_evictions(spec, mddb_url, args.verbose)
+    seed_fails = evict_fails + run_seed(spec, mddb_url, args.verbose)
     if seed_fails:
         for f in seed_fails:
             print(f"  {f}")
@@ -2003,7 +2052,8 @@ async def main() -> int:
                         expects_speech = any(
                             expect.get(k) for k in
                             ("response_nonempty", "response_contains",
-                             "response_contains_any"))
+                             "response_contains_any",
+                             "response_contains_all_any"))
                         if (not transcript_now.strip()
                                 and expects_speech and text is not None):
                             print("      empty turn — retrying once")
