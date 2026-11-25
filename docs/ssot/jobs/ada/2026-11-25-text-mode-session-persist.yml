@@ -1,0 +1,49 @@
+# SSOT Job: text-mode sessions never call conversation.persist()
+
+date: 2026-11-25
+title: >
+  OpenRouterTextProvider.close() now persists the conversation —
+  restores session-summary/report/extract inflow for text lanes
+domain: ada
+job: text-mode-session-persist
+cards: [ada-voice-text-mode-sessions-never-call-e007bd]
+refs: [ADA-1400]
+parent_cards: [ada-session-summary-inflow-stalled]
+host: tony-macbook (dispatch worktree ada-voice-wt-text-mode-persist)
+summary: >
+  Root cause confirmed and fixed. OpenRouterTextProvider.close() only set
+  _closed and cancelled _pending — it never invoked
+  conversation.persist(), unlike GeminiLiveProvider.close()
+  (realtime_provider.py:6712). Every text-mode session (?mode=text,
+  ADA_TEXT_ONLY_CALLERS, channels in ADA_TEXT_ONLY_CHANNELS default
+  telegram,tg,line; ada-ha-tony drop-in adds chat,web) wrote its
+  transcript archive + the MDDB session-end marker but produced NO
+  kind=session-summary doc, NO reports/*.json, NO extract
+  candidates/actions. That is the entire recall-summary inflow gap
+  parent card ada-session-summary-inflow-stalled measured: last
+  ada-ha-recall-summary-* docs tony 10-03, dev 10-09, kk 10-13,
+  kk-dev 10-14, michael 10-17; zero LiteLLM tool=session_summary /
+  session_report calls since 2026-10-17 15:19 UTC; ~480 extract drafts
+  unreviewed.
+
+root_cause:
+  - "backend/openrouter_provider.py close(): set _closed + cancelled _pending; no persist call — the provider was added for text lanes (ada-text-mode-sessions) after persist() was wired only into the Live provider's close path"
+  - "pwa_server.py /ws teardown already calls conversation.add_user for text turns and _mark_session_end writes the session-end marker — only the persist() leg was missing, so transcripts existed but never fed _update_summary() (session doc, report files, extract candidates/actions, daily rollup)"
+
+changes:
+  - "backend/openrouter_provider.py: close() is now idempotent (early return when _closed — prevents double-persist on teardown paths that close twice) and fires `asyncio.create_task(self.conversation.persist())` when a conversation is attached — same fire-and-forget shape as GeminiLiveProvider.close() so ws teardown is not blocked on MDDB/NotebookLM"
+  - "tests/test_openrouter_provider.py: +test_close_persists_conversation_once (persist invoked exactly once across two close() calls) and +test_close_without_conversation (conversation=None closes cleanly)"
+
+design_notes:
+  - "Full persist(), not a slim variant: the NotebookLM add_text_source leg is already gated on client.configured and failure-safe (returns None on error); channel is already recorded on the conversation so summaries/rollups can distinguish voice vs telegram/line/chat/web surfaces. no_persist scenario sessions still early-return inside persist() — tests/scenarios unaffected."
+  - "Turn population verified before the fix: pwa_server /ws handler calls conversation.add_user() for type:text chat turns and image turns, and the provider calls conversation.add_assistant() on replies — conversation._turns is populated, so persist() will not early-return on empty sessions."
+  - "Degraded-fallback provider (pwa_server.py:~1449, OpenRouterTextProvider without tools) also gets persist for free — it is constructed with the same conversation object."
+
+deploy:
+  - "NOT deployed by this dispatch (rails: no push). Merge dispatch/text-mode-session-persist to main on tony-dell edit point, push, then on idc03 run deploy-ada.sh — it drains live /ws sessions (ADA_DRAIN_S) and runs tool-lint + pytest gates before restart."
+  - "After deploy, verify: end a telegram/line/?mode=text session, then check MDDB ada-ha-recall-summary-<instance> for a new kind=session-summary doc and reports/*.json for the session; LiteLLM SpendLogs should show tool=session_summary/session_report calls resume."
+  - "Backfill: sessions since ~2026-10-17 have durable transcript archives (durable_transcript appends per turn) — a replay/backfill job could regenerate summaries for the gap if wanted; not in scope here."
+
+gates:
+  pytest: "tests/test_openrouter_provider.py 15 passed; tests/test_text_lane_routing.py 8 passed"
+  tool_lint: "clean (69 warnings, none new)"
