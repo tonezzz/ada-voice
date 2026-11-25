@@ -1400,6 +1400,16 @@ async def fetch_headlines(mddb: MddbClient) -> list[dict[str, str]]:
     return picks
 
 
+# Bench-only: skip stale-prone history injection (recent-sessions summary,
+# cross-channel tails, headlines, prime-flagged facts) while KEEPING the
+# authoritative identity note, CMS catalog and persona style. Needed by the
+# kk-cms-only experiment: a full ADA_SESSION_PRIME=0 also removes the CMS
+# catalog, so the model never thinks to look at its pages. Off by default.
+def prime_skip_history() -> bool:
+    return os.environ.get("ADA_PRIME_SKIP_HISTORY", "0") in (
+        "1", "true", "yes", "on")
+
+
 CMS_CATALOG_PRIME = os.environ.get(
     "ADA_CMS_CATALOG_PRIME", "").strip().lower() in ("1", "true", "yes")
 CMS_CATALOG_MAX = int(os.environ.get("ADA_CMS_CATALOG_MAX", "40"))
@@ -1484,13 +1494,15 @@ async def session_prime_text(
             "and do not address anyone by name unless a speaker-"
             "identification event confirms who is speaking."
         )
-    if summary and not (directive and (away_seconds or 0) < 3600):
+    if summary and not prime_skip_history() \
+            and not (directive and (away_seconds or 0) < 3600):
         parts.append(f"Recent sessions: {summary.strip()}")
     # Unified voice+chat history (card ada-reads-text-chat): recent turns
     # from this owner's other channels — live sibling sessions and/or the
     # persisted shared tail. Always allowed through: it is capped by age,
     # so it is never stale thread content like bank facts can be.
-    if str(channel_context or "").strip():
+    # ADA_PRIME_SKIP_HISTORY suppresses it for the CMS-only bench.
+    if str(channel_context or "").strip() and not prime_skip_history():
         parts.append(
             "Your other chat channels (the voice session, text chat and "
             "relays share one history — you can see these messages and "
@@ -1498,7 +1510,7 @@ async def session_prime_text(
             + channel_context.strip())
     # L0 hot headlines — fresh report/digest one-liners. Skipped on short
     # reconnects like facts; announced_at stamping means they surface once.
-    if not (directive and (away_seconds or 0) < 3600):
+    if not prime_skip_history() and not (directive and (away_seconds or 0) < 3600):
         try:
             heads = await asyncio.wait_for(fetch_headlines(mddb), timeout=8.0)
         except Exception as exc:
@@ -1543,7 +1555,7 @@ async def session_prime_text(
     # First session or long gap: facts still prime cold-start awareness.
     facts: list[str] = []
     rules: list[str] = []
-    if not (directive and (away_seconds or 0) < 3600):
+    if not prime_skip_history() and not (directive and (away_seconds or 0) < 3600):
         # Opt-in facts: docs flagged prime:true surface at every session
         # start regardless of bank fill order — device-name mappings and
         # other high-traffic facts that would otherwise need a tool call.

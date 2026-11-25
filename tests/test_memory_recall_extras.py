@@ -93,6 +93,28 @@ class PrimeTests(unittest.IsolatedAsyncioTestCase):
             await memory_ops.session_prime_text(fake, reg, summary=None)
         )
 
+    async def test_skip_history_keeps_cms_catalog_and_identity(self):
+        from unittest import mock
+        fake = FakeMddb()
+        fake._coll("ada-cms-pages")["p1"] = {
+            "key": "p1", "content_md": "",
+            "meta": {"status": ["active"], "title": ["Page one"],
+                     "summary": ["a page"]},
+        }
+        reg = build_registry("tony")
+        with patch.dict(os.environ, {"ADA_PRIME_SKIP_HISTORY": "1"}), \
+                mock.patch.object(memory_ops, "CMS_CATALOG_PRIME", True):
+            text = await memory_ops.session_prime_text(
+                fake, reg, summary="OLD SUMMARY",
+                channel_context="OLD CHAT TAIL",
+                person_entity="person.tony")
+        self.assertNotIn("OLD SUMMARY", text)
+        self.assertNotIn("OLD CHAT TAIL", text)
+        self.assertNotIn("Recent sessions:", text)
+        self.assertIn("Your CMS pages", text)
+        self.assertIn("p1", text)
+        self.assertIn("(system) You are talking to", text)
+
     async def test_prime_disabled_by_env(self):
         fake = FakeMddb()
         reg = build_registry("tony")
