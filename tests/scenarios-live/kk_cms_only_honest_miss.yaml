@@ -20,6 +20,7 @@ turns:
       # successful calls (see tests/test_scenario_live_harness.py).
       no_successful_calls_except:
         - set_facial_expression
+        - ada_persona  # style prime kept by design, not a memory source
         - cms_read
         - cms_get_page
         - cms_list_pages
