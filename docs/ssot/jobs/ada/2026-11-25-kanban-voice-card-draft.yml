@@ -1,0 +1,95 @@
+# SSOT Job: kanban action='draft' + schema-validated 'file' — voice
+# request -> well-formed card spec.
+# Card: ada-tool-voice-request-well-formed-kanba-56ba9f (ADA-1202).
+# Dispatch 20261125-152559 on tony-macbook, branch
+# dispatch/20261125-152559-implement-the-ada-tool-capabil.
+
+title: >-
+  Dictated voice request drafts a dispatch-quality kanban card; file
+  validates the full card schema before POST /card
+subtitle: >-
+  backend/tools.d/kanban.py gains action='draft' (transcript -> validated
+  spec payload, no write) and action='file' accepts spec/verify/
+  done_when/tags/card_action/queue behind the board card schema.
+
+planning:
+  goal: |
+    Tony dictates a request to Ada; she should produce a
+    dispatch-quality card (goal, surface/host, sequence, hard limits,
+    verify steps — the OPS-1187 brief shape), show him the draft, and on
+    his yes file it to the board — not a vague one-line note.
+  scope: |
+    Delivered (ada-voice repo only; deploy via deploy-ada.sh on idc03,
+    NOT done here per dispatch rules):
+      - kanban action='draft' request=<transcript>: title from the
+        first sentence, goal-first spec template, verify default,
+        tags=[voice-draft], column=backlog, priority=medium, and a
+        suggested card_action={type:dispatch, repo} when the text names
+        a known whitelist repo (chaba/ada-voice/sunsynk-card). Returns
+        {ok, draft, missing, next_safe_action}; secondary-safe read.
+      - kanban action='file' extended: spec/brief/verify/metric/report/
+        text/note, done_when alias -> verify, tags (<=10), column
+        (validated against the five standard columns), caller id=,
+        card_action envelope validated key-by-key against the
+        board-api ACTION_KEYS mirror (_CARD_ACTION_KEYS, kept in sync
+        with opencode/ada_mcp.py _ENVELOPE_ACTION_KEYS), queue=true
+        behind the standard confirm gate (confirmed/confirm_token).
+      - _build_card_body() is the single assemble+validate path shared
+        by draft and file — the "well-formed against Chaba board
+        schemas" constraint lives there.
+      - tool_guide.yml kanban entry documents draft -> confirm -> file.
+    Explicitly NOT done:
+      - LLM-side spec enrichment — the model writes the real spec from
+        conversation; the tool validates shape and files. draft's
+        template is a floor, not the ceiling.
+      - deploy/restart, board-api changes (chaba repo untouched).
+  success_criteria:
+    - 'tests/test_kanban_voice_draft.py: recorded transcript fixture ->
+      draft -> file(confirmed, queue=true) -> FakeBoard card with
+      column=backlog, action.status=queued, spec/verify/envelope intact'
+    - 'tests/scenarios/kanban_voice_card.yaml green in the offline suite'
+    - 'scripts/tool-lint.py clean; pytest tests/ -x -q green'
+  risks:
+    - 'ACTION_KEYS mirror can drift from chaba board-api — the runner
+      re-validates envelopes at claim anyway (fails closed).'
+    - 'file now always sends column=backlog explicitly and refuses
+      non-standard columns — boards with extra columns need a follow-up.'
+  resources:
+    - board contract: backend/board_client.py; FakeBoard in
+      tests/scenario_engine.py is the offline board-api stand-in
+    - action-key mirror: opencode/ada_mcp.py _ENVELOPE_ACTION_KEYS
+    - transcript fixture: tests/fixtures/voice-kanban-request.txt
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-25"
+  steps:
+    - id: 1
+      label: "draft + file schema in kanban.py"
+      status: done
+      notes: "commit 0839548 on the dispatch branch; 1998 tests pass,
+        tool-lint clean"
+    - id: 2
+      label: "integration test (recorded voice -> queued card JSON)"
+      status: done
+      notes: "test_kanban_voice_draft.py + kanban_voice_card.yaml +
+        voice-kanban-request.txt fixture"
+
+invoke:
+  tool:
+    - "kanban action='draft' request=<voice transcript>"
+    - "kanban action='file' title= spec= verify= card_action= queue=true confirmed=true"
+
+env:
+  ADA_BOARD_API_URL: >-
+    board-api base — backend/board_client.py default; unchanged by
+    this work
+
+verification:
+  - "python3 scripts/tool-lint.py  # clean"
+  - ".venv/bin/python -m pytest tests/ -x -q  # 1998 passed, 4 skipped"
+  - "post-deploy e2e on ada-dev: dictate a request -> Ada calls
+    kanban action='draft', reads the spec back, files on Tony's yes;
+    card appears in backlog with spec/verify/action envelope"
