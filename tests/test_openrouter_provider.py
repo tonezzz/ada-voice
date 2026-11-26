@@ -307,3 +307,36 @@ def test_queue_context_note(provider):
         "role": "system",
         "parts": [{"text": "(system) mirror: sibling turn"}]}
     assert provider._pending is None
+
+
+@pytest.mark.asyncio
+async def test_close_persists_conversation_once():
+    """close() must invoke conversation.persist() like
+    GeminiLiveProvider.close() — text-mode sessions were the inflow gap
+    that starved recall-summary/extract feeds
+    (card ada-voice-text-mode-sessions-never-call-e007bd)."""
+    calls = []
+
+    class FakeConversation:
+        async def persist(self):
+            calls.append(1)
+
+    p = OpenRouterTextProvider(
+        session_id="t-close", channel="telegram",
+        conversation=FakeConversation())
+    await p.close()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert calls == [1]
+    # Idempotent: a second close must not double-persist.
+    await p.close()
+    await asyncio.sleep(0)
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_close_without_conversation(provider):
+    """Providers built without a conversation (unit tests, probes)
+    close cleanly."""
+    provider.conversation = None
+    await provider.close()

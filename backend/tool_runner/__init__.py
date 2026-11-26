@@ -120,6 +120,11 @@ class ToolRunner(
                 or self.session_caller_ha_person
                 or self.session_caller_name)
 
+    @property
+    def current_channel(self) -> str | None:
+        """The channel for this in-flight provider tool call."""
+        return _CALLER_CHANNEL.get()
+
     def _current_speaker(self) -> str | None:
         """Session-scoped identified speaker — the ContextVar set by
         execute() wins (a session with NO identified speaker passes None,
@@ -254,7 +259,8 @@ class ToolRunner(
                       speaker: Any = _IDENTITY_UNSET,
                       speaker_session: Any = _IDENTITY_UNSET,
                       owner: Any = _IDENTITY_UNSET,
-                      session: Any = _IDENTITY_UNSET) -> Any:
+                      session: Any = _IDENTITY_UNSET,
+                      channel: Any = _IDENTITY_UNSET) -> Any:
         # Retired names from the tool consolidation resolve to their
         # canonical action= tool first — the alias table is the contract,
         # phonetic normalization below is just typo repair. The alias's
@@ -318,6 +324,10 @@ class ToolRunner(
             _CALLER_SESSION.set(session)
             if session is not _IDENTITY_UNSET else None
         )
+        _channel_token = (
+            _CALLER_CHANNEL.set(channel)
+            if channel is not _IDENTITY_UNSET else None
+        )
         try:
             return await self._execute_gated(
                 name, call_args, ident, method=method, dyn_spec=dyn_spec,
@@ -341,6 +351,8 @@ class ToolRunner(
                 _CALLER_OWNER.reset(_owner_token)
             if _sess_token is not None:
                 _CALLER_SESSION.reset(_sess_token)
+            if _channel_token is not None:
+                _CALLER_CHANNEL.reset(_channel_token)
 
     @property
     def _dynamic_tools(self) -> tools_loader.ToolRegistry:
@@ -377,6 +389,12 @@ class ToolRunner(
         synth = self._storm_check(name)
         if synth is not None:
             return synth
+        # Per-tool daily spend cap (card ada-spend-guardrails): an
+        # over-cap tool short-circuits like the storm breaker — the
+        # model gets an actionable error, gates and method never run.
+        budget_hit = tool_budget.check(name)
+        if budget_hit is not None:
+            return budget_hit
         # Lazy-schema validation (card ada-lazy-tool-schemas): cold tools
         # ship name+blurb+empty params on the wire, so args are checked
         # against the real declaration HERE — before any gate can mint a
@@ -437,10 +455,12 @@ class ToolRunner(
                     call_args.get("status") or call_args.get("safety")))
             # ada_ops absorbed five meta tools (tools-merge-meta-voice) with
             # mixed postures — the name carries ada_outcome's blocked seat,
-            # but action='usage' was an open read and 'research' was never
-            # secondary-blocked, so those stay reachable on a guest turn.
+            # but action='usage'/'budget' were open reads and 'research'
+            # was never secondary-blocked, so those stay reachable on a
+            # guest turn.
             ops_read = (
-                name == "ada_ops" and action in ("usage", "research"))
+                name == "ada_ops"
+                and action in ("usage", "budget", "research"))
             # tools-merge-tasks-status carve-outs: tasks action='list' is
             # the absorbed tasks_list (a free read) and a plain chat_send
             # (no photo=/doc= flow) was never secondary-blocked — only the

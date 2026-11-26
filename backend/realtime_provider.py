@@ -1982,7 +1982,7 @@ def _builtin_declarations() -> list[dict[str, Any]]:
             # research run in the background and speak their results.
             "name": "ada_ops",
             "description": (
-                "Ops/meta — outcome|usage|health|check|research|report|acl_explain "
+                "Ops/meta — outcome|usage|budget|health|check|research|report|acl_explain "
                 "— see tool_guide; 'report' returns report freshness and starts a "
                 "background refresh (answer cached numbers now, fresh lands next)."
             ),
@@ -1992,8 +1992,8 @@ def _builtin_declarations() -> list[dict[str, Any]]:
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["outcome", "usage", "health", "check", "research", "report", "acl_explain"],
-                        "description": "outcome=record a result on a memory/check; usage=token/cost report; health=memory-db vector health; check=purchase verification (background); research=multi-round web research (background); report=system report freshness + live refresh (node=name or default system-report, depth=leaf|subtree|full); acl_explain=why an identity can/can't act — needs entity_id= and/or bank= (+tool= for a bank write), identity= to check someone else.",
+                        "enum": ["outcome", "usage", "budget", "health", "check", "research", "report", "acl_explain"],
+                        "description": "outcome=record a result on a memory/check; usage=token/cost report; budget=per-tool daily spend caps + remaining budgets; health=memory-db vector health; check=purchase verification (background); research=multi-round web research (background); report=system report freshness + live refresh (node=name or default system-report, depth=leaf|subtree|full); acl_explain=why an identity can/can't act — needs entity_id= and/or bank= (+tool= for a bank write), identity= to check someone else.",
                     },
                     "node": {
                         "type": "string",
@@ -2018,7 +2018,7 @@ def _builtin_declarations() -> list[dict[str, Any]]:
                     },
                     "source": {
                         "type": "string",
-                        "enum": ["all", "live", "posture", "clutter"],
+                        "enum": ["all", "live", "posture", "clutter", "gemini_aux"],
                         "description": "action=usage: which usage source to report; 'all' aggregates everything.",
                     },
                     "reset": {
@@ -3279,7 +3279,9 @@ class GeminiLiveProvider(RealtimeProvider):
             "guess an object's identity from an ambiguous or blurred view; briefly "
             "ask the user to hold it steady or move it closer instead."
             " When the user asks about token usage, API usage, or what a session "
-            "costs, call ada_ops action='usage' and answer from its numbers."
+            "costs, call ada_ops action='usage' and answer from its numbers. "
+            "For per-tool daily budgets and remaining spend, call "
+            "ada_ops action='budget'."
             " You have Home Assistant device control through several tools: "
             "get_home_state to check occupancy and the state of the configured home plugs "
             "(or a single entity with entity_id=, one HA domain with domain=, or the "
@@ -4516,7 +4518,7 @@ class GeminiLiveProvider(RealtimeProvider):
         kw = dict(identity=(owner or self.current_speaker_ha_person),
                   speaker=self.current_speaker_ha_person,
                   speaker_session=self.speaker_session, owner=owner,
-                  session=self.session_id)
+                  session=self.session_id, channel=self.channel)
         try:
             if t == "tv":
                 out = await self.tool_runner.execute(
@@ -6086,7 +6088,8 @@ class GeminiLiveProvider(RealtimeProvider):
                                         speaker=self.current_speaker_ha_person,
                                         speaker_session=self.speaker_session,
                                         owner=owner,
-                                        session=self.session_id)
+                                        session=self.session_id,
+                                        channel=self.channel)
                                     # Contract (tool-error-contract):
                                     # execute() already returns the
                                     # canonical {ok: bool, ...} dict —

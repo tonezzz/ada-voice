@@ -328,7 +328,10 @@ ada_ops: >-
   — updates the doc's confidence; get key= from ada_memory_search or a
   check result first; bank-gated write. 'usage' token/cost report
   (source=all|live|posture|clutter; reset=true zeroes counters — only
-  when asked). 'health' memory-db health (collection= narrows). 'check'
+  when asked). 'budget' per-tool daily spend readout — today's est USD
+  per tool, configured daily caps, and remaining budget (UTC day;
+  caps via ADA_TOOL_DAILY_CAP_<TOOL> or manifest daily_cap_usd).
+  'health' memory-db health (collection= narrows). 'check'
   verifies a product/listing against stored criteria + live web
   (product=, url=, mode=quick|deep) — background ~30-60s. 'research'
   multi-round web research (topic=, depth=standard|deep) — background
@@ -566,8 +569,17 @@ kanban: >-
   (column=, limit= filters) for finding card ids and open requests;
   'read' one card full detail (id=) or the report-linked card
   (report=<slug>). 'comment' posts text= on id= (prefix '[opinion]' for
-  report takes — the durable record of a report opinion). 'file' creates
-  a backlog card (title=, note=, priority=). 'ask' raises a board
+  report takes — the durable record of a report opinion). 'draft'
+  turns a dictated request (request=, the verbatim voice transcript)
+  into a validated card spec — title, spec, verify/done_when, tags,
+  priority, suggested card_action dispatch envelope — with NO board
+  write; show Tony the draft, then on his yes 'file' it. 'file'
+  creates a card (title=, note=, spec=, verify=/done_when=, tags=,
+  card_action= dispatch envelope, priority=, column= backlog default,
+  optional caller id=); every field is validated against the board
+  card schema and malformed envelopes are refused. file queue=true
+  arms dispatch rails on creation — Tony's yes required
+  (confirmed=true or confirm_token). 'ask' raises a board
   request to Tony (id=, ask=). 'respond' answers a card's open request
   (id= + request_id= + answer=, owner-only — the board logs it under
   'tony'). 'move' (id= + column=) follows Ada's authority: backlog→doing
@@ -736,56 +748,38 @@ trip_calendar: >-
   link, and then confirmed='yes' is required. page_snapshot renders the
   page to a PNG when the room prefers a picture.
 
-place_report: >-
-  Maps link or place name in -> public CMS page out. Pass the maps link
-  verbatim as url= (short maps.app.goo.gl links expand fine); use place=
-  when the user only named a spot. ask= records their question on the
-  page. Always send public_url in the reply — that is the link they
-  asked for; the page lands on chaba.h3 within ~15min of the publisher.
-  Pages are meta.public by design: do NOT run this on someone's home
-  address or a location the user asked to keep private — answer in chat
-  instead. Publish failure is storage, not confirmation — report it
-  plainly.
-wp_post: >-
-  Boards-site writer — 'ส่งไปเว็บบอร์ด / post to my site / ลงเว็บให้หน่อย'
-  routes HERE, not cms_publish_page (that is the internal CMS).
-  Structured saves are NOT wp_post: a receipt/expense photo, 'save this
-  contact', 'remind us ...' or 'asset: X' all go to cpt_post — wp_post is
-  free-form posts only. person=
-  is the member whose page it lands on: tony|kk|nhong — ask once if it
-  is unclear who; do not guess across members. After a photo turn, pass
-  the (media_url: ...) shown in that turn as media_url= to embed it.
-  publish=false makes a draft preview for review-before-publish asks;
-  the default is to publish and answer with the returned url plus
-  tag_archive. Thai titles/bodies are fine. If ok:false mentions missing
-  credentials, say the site key isn't configured — don't retry.
-
-# tool_guide.yml snippet — append at top level
-# (<ada-voice>/backend/tool_guide.yml).
-#
-# cpt_post (2026-10-15, card line-cpt-writer-router): LINE save-asks
-# classify to a chaba-boards CPT. The model reads a receipt photo
-# in-turn (LINE images arrive as image turns) and passes the extracted
-# fields — no separate OCR step in the tool.
-
-cpt_post: >-
-  Structured save on the boards WP site — pick kind= from the ask:
-  expense for a receipt photo or 'spent 320 on fuel' (read the receipt
-  in the turn; pass amount/currency/vendor/receipt_date/paid_by —
-  currency defaults to THB), contact for 'save this contact' (name in
-  title=, phone/line_id/role=), reminder for 'remind us …' (title= +
+wp: >-
+  The boards WordPress writer (boards.surf-thailand.com) — 'ส่งไปเว็บบอร์ด
+  / post to my site / ลงเว็บให้หน่อย' routes HERE via action=, not
+  cms_publish_page/cms_edit (those are the internal miniapp CMS). Pick
+  the action first: 'post' is a free-form member post (person= is the
+  member whose page it lands on: tony|kk|nhong — ask once if unclear,
+  don't guess across members; publish=false makes a draft preview;
+  answer with the returned url plus tag_archive); 'record' is a
+  structured save — pick kind= from the ask: expense for a receipt
+  photo or 'spent 320 on fuel' (read the receipt in the turn; pass
+  amount/currency/vendor/receipt_date/paid_by — currency defaults to
+  THB), contact for 'save this contact' (name in title=,
+  phone/line_id/role=), reminder for 'remind us …' (title= +
   due_date/assignee), asset for 'asset: CR-V model X' (name in title= +
   model/serial/purchase_date/warranty_until/vendor= — attach a photo of
-  the item or its manual via media_url=). The tool builds the standard
-  title itself; records land PRIVATE (member login to view) — status=
-  'publish' only when the member wants it public. After a photo turn
-  pass the (media_url: …) shown in that turn as media_url=. person=
-  defaults to the lane's own member — kk's lane saves as kk — set it
-  only when saving for someone else. contact/asset upsert by slug:
-  re-saving the same contact UPDATES it; expenses and reminders always
-  create a new record. Free-form 'post this' asks still go to wp_post.
-  meta_written in the result lists what actually stored — if the note
-  says meta was skipped, tell the member the record saved but the
+  the item or its manual via media_url=). Records land PRIVATE (member
+  login to view) — status='publish' only when the member wants it
+  public; person= defaults to the lane's own member (kk's lane saves as
+  kk). contact/asset upsert by slug: re-saving the same contact UPDATES
+  it; expenses and reminders always create. 'place' turns a Google
+  Maps link or place name into a public place-report page — pass the
+  link verbatim as url= (maps.app.goo.gl short links expand), place=
+  when the user only named a spot, ask= records their question; always
+  send public_url in the reply (it is already live on the boards site —
+  do NOT run it on a home address or a location the user asked to keep
+  private). 'chat_page' creates/updates a member's private webchat page
+  under /chat/ — needs member= (tony|kk|nhong) and lane= (the member's
+  Ada lane public base URL, e.g. https://ada-ha.surf-thailand.com);
+  idempotent, returns the URL to chat. After a photo turn, pass the
+  (media_url: …) shown in that turn as media_url= to embed it.
+  meta_written in a record result lists what actually stored — if the
+  note says meta was skipped, tell the member the record saved but the
   fields need the plugin update; never claim fields that were dropped.
   If ok:false mentions missing credentials, the site key isn't
   configured — don't retry.
@@ -836,6 +830,22 @@ ada_opencode_dispatch: >-
   an ask you raised for this dispatch (re-read the card first). After
   dispatch: kanban status/read reports the runner verdict — report the
   outcome, never describe an unverified run as done.
+
+ada_consult: >-
+  Read-only second opinion from a stronger model — Ada asks, the
+  expert answers, Ada narrates; it is advice, never execution authority
+  and never a substitute for her own confirm gates. Text lanes only
+  (voice refuses by design — a multi-second consult cannot hold a Live
+  turn) and ada-dev only during the v1 soak; prod lanes do not declare
+  it. Pass a bounded question + curated context (context_class='curated'
+  — private transcripts and secrets are refused, and that refusal is
+  final: do not rephrase around it). consult_model picks an allowlisted
+  alias: consult-flash default, consult-pro/consult-claude for hard
+  cases (their rate card must be configured or they refuse — that is
+  intentional, not a retry cue). Until LITELLM_KEY_CONSULT is minted
+  every call refuses 'gateway and dedicated key are not configured' —
+  tell the user the expert line is not live yet; do not retry or
+  improvise an answer as if the consult ran.
 
 wiki_read: >-
   Reads ONE wiki page by exact title — get titles from wiki_search or a
@@ -890,3 +900,30 @@ map_embed: >-
   kind='static' shows both. kind=interactive returning ok:false with
   needs_key is an env gap, not a call error — re-call kind='static' or
   send open_url; never narrate a map the caller can't see.
+ada_capabilities: >-
+  The "what can you do" read path — overview answers list capability
+  groups from the deploy-time tools snapshot; pass topic=<tool|family|
+  group> for detail on one area (e.g. topic="home_search" or
+  topic="home control"). It reports the DECLARED surface from the last
+  deploy snapshot, not live health — quote `answer` (pre-composed,
+  speakable) and the "as of <date>" line; if the snapshot is stale the
+  answer says so, relay that caveat. It never fabricates: ok:false
+  "capability list not generated" means the snapshot file is missing —
+  say the capability list isn't available right now, do not invent
+  tools. Absorbed old names still resolve in topic= (they redirect to
+  the canonical tool) but are never listed as capabilities.
+ada_fleet_jobs: >-
+  The fleet-status read path — "how are jobs / job status / what is
+  the fleet doing / are timers failing / which hosts are having
+  trouble / how much did we spend / what are the lanes doing / is the
+  dispatch queue moving" all answer from the rendered
+  fleet-jobs-report CMS page (one MDDB read, freshness-gated at 4h).
+  Pass focus=spend|timers|lanes|queue|hosts to emphasize one section;
+  omit it for the overview. Quote `answer` — it is pre-composed and
+  carries the "as of <updated>" caveat itself when the report is stale
+  (the producer may be down — relay that, do NOT recompute). An answer
+  saying the report "hasn't been generated yet" means the page is
+  missing — offer to card it. NEVER answer fleet status by scanning
+  the kanban/board-api, running psql/ssh/systemctl, or invoking the
+  fleet-jobs-report producer — the contract bans every live path on a
+  voice turn.

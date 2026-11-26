@@ -14,9 +14,11 @@ turns:
   - user: >-
       What do you remember about my plans for next week?
     expect:
-      no_calls: true
-      no_calls_except:
+      # Count successful calls only — a lane-denied memory attempt is the
+      # gate working, not a leak (tests/test_scenario_live_harness.py).
+      no_successful_calls_except:
         - set_facial_expression
+        - ada_persona  # style prime kept by design, not a memory source
         - cms_read
         - cms_get_page
         - cms_list_pages

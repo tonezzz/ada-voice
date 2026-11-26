@@ -19,6 +19,9 @@ manifest.yml:
         policy: read             # read | confirmed | owner_only
         secondary_allowed: false # deny to non-owner speakers (default)
         timeout_s: 20
+        daily_cap_usd: 0          # optional per-tool daily spend cap
+                                  # (backend/tool_budget.py; env
+                                  # ADA_TOOL_DAILY_CAP_<TOOL> overrides)
 
 A bad module must never break the backend: load errors are logged and the
 tool is skipped (its declaration is never offered to the model).
@@ -56,6 +59,7 @@ class DynamicTool:
     secondary_allowed: bool = False
     timeout_s: float = DEFAULT_TIMEOUT_S
     module: str = ""
+    daily_cap_usd: float = 0.0
 
 
 @dataclass
@@ -117,6 +121,7 @@ def _validate(name: str, cfg: dict[str, Any], mod: Any) -> DynamicTool:
         secondary_allowed=bool(cfg.get("secondary_allowed", False)),
         timeout_s=float(cfg.get("timeout_s") or DEFAULT_TIMEOUT_S),
         module=str(cfg.get("module") or name),
+        daily_cap_usd=float(cfg.get("daily_cap_usd") or 0.0),
     )
 
 
@@ -139,6 +144,15 @@ def load(tools_dir: Path | None = None) -> ToolRegistry:
         try:
             if cfg.get("enabled") is False:
                 continue
+            if "instances" in cfg:
+                instances = cfg.get("instances")
+                if not isinstance(instances, list) or not instances:
+                    raise ValueError(
+                        "instances must be a non-empty list when specified")
+                current = os.environ.get("ADA_INSTANCE_ID", "").strip()
+                if current not in {str(value).strip()
+                                   for value in instances}:
+                    continue
             mod_path = root / f"{cfg.get('module') or name}.py"
             mod = _load_module(mod_path)
             reg.tools[name] = _validate(name, cfg, mod)

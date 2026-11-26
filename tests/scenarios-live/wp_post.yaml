@@ -2,6 +2,9 @@
 # OPS-0640). Text post publishes and returns a public URL; draft-first is
 # the safety path (publish=false -> confirm -> publish). Media is
 # exercised by passing a /relay-img/arch/ URL the relay just journaled.
+# wp_post absorbed into wp action='post'
+# (ada-tool-consolidation-merge-overlapping-615ba9, 2026-11-24) — the
+# scenario keeps exercising the same asks; the canonical call is wp.
 name: wp_post
 tier: full
 turns:
@@ -9,18 +12,18 @@ turns:
       Post to kk's page on the boards site, as a draft first: title
       "Draft check" with the body "wp_post scenario draft".
     expect:
-      calls_any: [wp_post]
+      calls_any: [wp]
       timeout_s: 60
       settle_s: 10
   - user: Looks good — publish it.
     expect:
-      calls_any: [wp_post]
+      calls_any: [wp]
       timeout_s: 60
       settle_s: 10
   - user: >-
       Now post to nhong's page: title "Nhong test" with body "nhong can
       post from LINE now".
     expect:
-      calls_any: [wp_post]
+      calls_any: [wp]
       timeout_s: 60
       settle_s: 10

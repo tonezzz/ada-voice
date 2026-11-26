@@ -1,0 +1,110 @@
+# SSOT Job: deploy-ada.sh SERVICES — drop retired ada-dev, keep ada-kk-dev
+# Card: deploy-ada-sh-services-resurrects-retire-c2346b (ref ADA-1395).
+# Dispatch 20261126-212322 on tony-dell, branch
+# dispatch/20261126-212322-decision-2026-11-26-tony-keep-.
+# Tony decision 2026-11-26: keep ada-kk-dev (declared kk CMS-only bench
+# target idc03:8009); remove ONLY ada-dev from SERVICES.
+
+title: >-
+  Every ada-voice deploy restarted the retired ada-dev lab twin;
+  SERVICES now drops ada-dev and keeps ada-kk-dev for the kk
+  CMS-only bench lane
+subtitle: >-
+  scripts/deploy-ada.sh SERVICES default loses the `ada-dev` token
+  (canon, this branch) and the installed copy on idc03
+  ~/.local/bin/deploy-ada.sh is edited in place with a timestamped
+  sibling backup. Same pattern as eaf4eba (ada-pi-pwa retirement).
+
+planning:
+  goal: |
+    deploy-ada.sh's `systemctl --user restart $SERVICES` (and the
+    /api/health drain loop) must never touch ada-dev again, while
+    ada-kk-dev — the live kk CMS-only bench target on idc03:8009 —
+    stays in the restart set so bench runs always execute current
+    code.
+  scope: |
+    Delivered:
+      - scripts/deploy-ada.sh (repo canon): SERVICES default drops
+        `ada-dev ` — commit c1eae8c on the dispatch branch.
+      - idc03 ~/.local/bin/deploy-ada.sh: timestamped backup
+        deploy-ada.sh.bak-20261126-214010, then in-place sed of the
+        SERVICES line only (diff vs checkout canon = exactly line 33).
+    Explicitly NOT done:
+      - ada-dev.service itself left active/running (disabled unit;
+        stopping it is a separate retirement decision).
+      - idc02's installed deploy-ada.sh untouched (staging host,
+        out of card scope).
+      - No deploy-ada.sh run — verification is static + unit-level.
+  success_criteria:
+    - 'SERVICES expansion on idc03 lists 8 units, no ada-dev,
+      ada-kk-dev present, all active'
+    - 'ada-kk-dev restarts cleanly and /api/health :8009 ok'
+    - 'kk-bench-env.py --profile kk-cms-only --check exits 0 on idc03'
+    - 'next deploy leaves ada-dev ActiveEnterTimestamp unchanged'
+  risks:
+    - 'Self-drift gate: installed copy now differs from the canon in
+      idc03''s checkout until the dispatch branch lands on the ref
+      idc03 fetches (dell local main) and the checkout ff''s — the
+      next deploy-ada.sh run exits at gate 0 with "deploy script
+      drifted from canonical — reinstall it" until then. Verified
+      live: rc=1 before any mutation.'
+    - 'dell local main (5da3cc0) and GitHub origin/main (f91b763)
+      diverged 3/3 — idc03 deploys gate on dell''s main, which lacks
+      the ada_capabilities 2b snapshot section. Pre-existing;
+      flagged on the card.'
+  resources:
+    - "prior art: eaf4eba exclude retired PWA unit from deploys"
+    - "bench tool: chaba scripts/ada/kk-bench-env.py (bench_profiles.kk-cms-only -> host idc03, env ada-kk-dev.env, port 8009, service ada-kk-dev.service)"
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-26"
+  steps:
+    - id: 1
+      label: "recon"
+      status: done
+      notes: "idc03 installed == checkout canon (9970B, dell-main
+        version); worktree canon is origin/main version (11777B, +2b
+        tools-snapshot block); ada-dev active running but
+        is-enabled=disabled, last start 18:24 +07 = the resurrect
+        pattern; ada-kk-dev healthy :8009, lane kk-dev, 0 sessions"
+    - id: 2
+      label: "canon edit + commit"
+      status: done
+      notes: "c1eae8c on dispatch branch — SERVICES line only,
+        bash -n clean"
+    - id: 3
+      label: "idc03 installed edit"
+      status: done
+      notes: "cp -p backup deploy-ada.sh.bak-20261126-214010, sed
+        '/^SERVICES=/s/ ada-dev / /', bash -n clean, diff vs canon =
+        line 33 only"
+    - id: 4
+      label: "verify"
+      status: done
+      notes: "restart-set expansion proof; ada-kk-dev real restart +
+        health 11s; kk-bench-env --check OK; drift-gate probe rc=1
+        pre-mutation as expected"
+
+invoke:
+  tool:
+    - "ssh -o ProxyJump=none idc03 (dell's configured ProxyJump
+      tony-omen is refused: 'channel 0 open failed administratively
+      prohibited' — direct tailnet ssh works)"
+    - "python3 scripts/ada/kk-bench-env.py --profile kk-cms-only
+      --check  (run on idc03 ~/CascadeProjects/chaba)"
+
+env:
+  ADA_SERVICES: >-
+    deploy-ada.sh override; default now excludes ada-dev. Setting it
+    per-invocation can re-add ada-dev if ever needed.
+
+verification:
+  - "ssh -o ProxyJump=none idc03 'grep ^SERVICES= ~/.local/bin/deploy-ada.sh'"
+  - "ssh -o ProxyJump=none idc03 'systemctl --user show ada-dev.service -p ActiveEnterTimestamp --value'
+    # must still read 'Thu 2026-11-26 18:24:39 +07' after next deploy"
+  - "ssh -o ProxyJump=none idc03 'cd ~/CascadeProjects/chaba && python3 scripts/ada/kk-bench-env.py --profile kk-cms-only --check'"
+  - "post-merge unblock on idc03: git -C ~/CascadeProjects/ada-voice fetch origin && git merge --ff-only origin/main;
+    if drift persists, install -m 0755 scripts/deploy-ada.sh ~/.local/bin/deploy-ada.sh (canon already lacks ada-dev)"

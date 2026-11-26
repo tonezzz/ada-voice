@@ -1,0 +1,45 @@
+# boards-wp merge regression
+# (ada-tool-consolidation-merge-overlapping-615ba9, 2026-11-24): the four
+# boards-WordPress writers collapsed into wp(action=...) — wp_post ->
+# action='post', cpt_post -> action='record' (kind= carries the CPT),
+# place_report -> action='place', wp_chat_page -> action='chat_page'.
+# The absorbed names survive as tool_runner._ALIASES rows, hidden from
+# the declared surface; cms_publish_page/cms_edit are a different sink
+# (MDDB miniapp CMS) and must NOT be called for boards asks. Live-side
+# this scenario checks the canonical wp calls still fire for the
+# absorbed intents:
+#   member post   — wp action='post'
+#   structured    — wp action='record' kind='contact'
+#   maps link     — wp action='place'
+#   webchat page  — wp action='chat_page'
+name: tool_merge_wp
+tier: full
+turns:
+  - user: >-
+      Post a quick note to tony's page on the boards site — title
+      "Merge check" and body "wp merge regression post".
+    expect:
+      calls_any: [wp]
+      timeout_s: 60
+      settle_s: 10
+  - user: >-
+      Save this contact on the boards site for kk: Somchai, phone
+      081-234-5678, he's the plumber.
+    expect:
+      calls_any: [wp]
+      timeout_s: 60
+      settle_s: 10
+  - user: >-
+      This place looks interesting — make me a report page for it:
+      https://maps.app.goo.gl/abc123 — I'm wondering if it's still open.
+    expect:
+      calls_any: [wp]
+      timeout_s: 90
+      settle_s: 10
+  - user: >-
+      Set up kk's webchat page on the boards site — her lane is
+      https://ada-ha.surf-thailand.com, keep it private.
+    expect:
+      calls_any: [wp]
+      timeout_s: 60
+      settle_s: 10
