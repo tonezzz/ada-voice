@@ -41,6 +41,25 @@ def _meta_str(meta: dict[str, Any], name: str, default: str = "") -> str:
     return str(v) if v is not None else default
 
 
+# Language tags for CMS variants — BCP-47-ish ('en', 'th', 'de',
+# 'de-de', 'zh-hant'). MDDB keys docs by (collection, slug, lang) and
+# the store accepts any tag; the old ("en","th") whitelist here and in
+# the tool schema was the only gate (card ...-37f8a0).
+_CMS_LANG_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$")
+
+
+def _cms_lang(lang: Any, default: str = "en") -> str:
+    """Normalize a CMS language tag: strip/lowercase, fall back to
+    `default` when empty, reject anything that isn't a plausible
+    BCP-47-ish tag so junk never lands as a doc lang."""
+    tag = str(lang or "").strip().lower() or default
+    if not _CMS_LANG_RE.match(tag):
+        raise ValueError(
+            f"invalid lang {lang!r}: expected a language tag like "
+            "'en', 'th', or 'de' (e.g. 'de-de', 'zh-hant')")
+    return tag
+
+
 # Public static lane — cms-publish-site.py renders public-flagged pages to
 # surf-thailand.com/<tenant>/<slug>.html (ssot.cms.yml). Tenant comes
 # from ADA_CMS_PUBLIC_BASE when set (per-instance env), else derived from
@@ -335,18 +354,47 @@ class CmsMixin:
     async def cms_get_page(
         self, slug: str, lang: str = "en"
     ) -> dict[str, Any]:
-        """Fetch one page's content by slug + language; falls back to 'en'
-        when the requested variant doesn't exist."""
+        """Fetch one page's content by slug + language; falls back
+        through en/th when the requested variant doesn't exist."""
         key = self._cms_slug(slug)
-        lang = (lang or "en").strip().lower()
+        lang = _cms_lang(lang)
         doc = await self.mddb.get_document(CMS_COLLECTION, key, lang)
         fallback = False
         if not doc:
-            # symmetric lang fallback — household lanes write th-only pages
-            # (trip reorg 2026-10-13) that en-default reads must still find.
-            other = "en" if lang != "en" else "th"
-            doc = await self.mddb.get_document(CMS_COLLECTION, key, other)
-            fallback = bool(doc)
+            # variant fallback — household lanes write th-only pages
+            # (trip reorg 2026-10-13) that en-default reads must still
+            # find; any other tag (de, zh, …) tries en then th.
+            for other in ("en", "th"):
+                if other == lang:
+                    continue
+                doc = await self.mddb.get_document(
+                    CMS_COLLECTION, key, other)
+                if doc:
+                    fallback = True
+                    break
+        if not doc:
+            # Last resort: the slug may exist ONLY in an exotic variant
+            # (a de-only page) — en/th can't reach it, so discover the
+            # slug's langs via meta.slug and serve the first hit rather
+            # than reporting not-found. fallback=True marks it honest.
+            try:
+                variants = await self.mddb.search_documents(
+                    CMS_COLLECTION,
+                    filter_meta={"slug": [key]}, limit=10)
+            except Exception:
+                variants = []
+            others = sorted({
+                str(d.get("lang") or "")
+                for d in variants or []
+                if isinstance(d, dict) and d.get("lang")})
+            for olang in others:
+                if olang in ("en", "th") or olang == lang:
+                    continue
+                doc = await self.mddb.get_document(
+                    CMS_COLLECTION, key, olang)
+                if doc:
+                    fallback = True
+                    break
         if not doc:
             # ok:False, not a silent None — Ada opined on a page she never
             # got because a miss read as ok:True/output:None (2026-10-08,
@@ -361,14 +409,20 @@ class CmsMixin:
         public = _meta_str(doc.get("meta"), "public").lower() in \
             ("true", "yes", "1")
         if not public:
-            # per-lang flag asymmetry: the en variant may be flagged public
-            # while this th read is not — check the sibling before telling
-            # her there is no public_url (she guessed /kk/ once, 2026-10-12).
-            sibling = await self.mddb.get_document(
-                CMS_COLLECTION, key, "th" if lang == "en" else "en")
-            public = bool(sibling) and \
-                _meta_str(sibling.get("meta"), "public").lower() in \
-                ("true", "yes", "1")
+            # per-lang flag asymmetry: one variant may be flagged public
+            # while this read is not — check the other common variants
+            # before telling her there is no public_url (she guessed /kk/
+            # once, 2026-10-12).
+            for sib in ("en", "th"):
+                if sib == lang:
+                    continue
+                sibling = await self.mddb.get_document(
+                    CMS_COLLECTION, key, sib)
+                if sibling and _meta_str(
+                        sibling.get("meta"), "public").lower() in (
+                            "true", "yes", "1"):
+                    public = True
+                    break
         if public:
             _pb = _cms_public_base()
             if _pb:
@@ -392,22 +446,22 @@ class CmsMixin:
         confidence: str = "",
         public: str = "",
     ) -> dict[str, Any]:
-        """Create or update a miniapp page. Upserts by (slug, lang) — 'en'
-        and 'th' variants of the same slug coexist; the viewer toggles.
+        """Create or update a miniapp page. Upserts by (slug, lang) —
+        language variants of the same slug coexist; the viewer toggles.
         summary/domain/fresh_for feed reports-index: a one-line brief Ada
         can answer from without cms_get_page, the grouping domain, and a
         staleness hint ('1h', '6h', '1d') the index flags when exceeded."""
         slug = self._cms_slug(slug)
         fmt = (format or "markdown").strip().lower()
-        lang = (lang or "en").strip().lower()
+        lang = _cms_lang(lang)
         # The model tends to bake the language into the slug
         # (gold-report-th + Thai content stored as 'en') — split it.
+        # Kept th-only on purpose: generalizing to any '-xx' suffix
+        # false-positives on English slugs ending in valid lang codes
+        # ('as-is', 'tie-in', 'check-it'); other langs pass lang=.
         if lang == "en" and slug.endswith("-th"):
             slug = slug[:-3]
             lang = "th"
-        if lang not in ("en", "th"):
-            raise ValueError(
-                f"invalid lang {lang!r}: expected 'en' or 'th'")
         if fmt not in CMS_FORMATS:
             raise ValueError(
                 f"invalid format {format!r}: expected one of {sorted(CMS_FORMATS)}"
@@ -620,12 +674,20 @@ class CmsMixin:
         so it needs no confirmation. Optionally refreshes the page's
         one-line summary shown in reports-index."""
         slug = self._cms_slug(slug)
-        lang = (lang or "en").strip().lower()
+        lang = _cms_lang(lang)
         if not (note or "").strip():
             raise ValueError("note is required")
         doc = await self.mddb.get_document(CMS_COLLECTION, slug, lang)
-        if doc is None and lang != "en":
-            doc = await self.mddb.get_document(CMS_COLLECTION, slug, "en")
+        if doc is None:
+            # variant fallback — a note aimed at a missing variant
+            # annotates the page's en (then th) doc instead of failing.
+            for other in ("en", "th"):
+                if other == lang:
+                    continue
+                doc = await self.mddb.get_document(
+                    CMS_COLLECTION, slug, other)
+                if doc is not None:
+                    break
         if not isinstance(doc, dict):
             return {"status": "not_found", "slug": slug,
                     "error": "no such page — use cms_publish_page to create it"}
@@ -776,6 +838,7 @@ class CmsMixin:
         if op not in self.CMS_EDIT_OPS:
             raise ValueError(
                 f"invalid op {op!r}: expected one of {self.CMS_EDIT_OPS}")
+        lang = _cms_lang(lang)
         doc = await self.mddb.get_document(CMS_COLLECTION, slug, lang)
         if not isinstance(doc, dict):
             return {"status": "not_found", "slug": slug}
@@ -1051,11 +1114,17 @@ class CmsMixin:
         if langs is not None:
             if not isinstance(langs, list) or not langs:
                 raise ValueError("langs must be a non-empty list")
-            bad = [l for l in langs if str(l) not in ("en", "th")]
+            norm, bad = [], []
+            for l in langs:
+                try:
+                    norm.append(_cms_lang(l))
+                except ValueError:
+                    bad.append(str(l))
             if bad:
                 raise ValueError(
-                    f"invalid langs {bad!r}: supported are 'en' and 'th'")
-            out["langs"] = [str(l) for l in langs]
+                    f"invalid langs {bad!r}: expected language tags like "
+                    "'en', 'th', or 'de'")
+            out["langs"] = norm
         if parent is not None:
             out["parent"] = self._cms_slug(parent) if str(parent).strip() else None
         if children is not None:

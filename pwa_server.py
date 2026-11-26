@@ -3014,8 +3014,9 @@ async def cms_list_pages(request: Request, limit: int = 500) -> dict:
 
 @app.get("/api/cms/pages/{slug}")
 async def cms_get_page(request: Request, slug: str, lang: str = "en") -> dict:
-    """Fetch one miniapp page's content by slug (+ ?lang=th for the Thai
-    variant; falls back to en). Read-only, key-gated."""
+    """Fetch one miniapp page's content by slug (+ ?lang=<tag> for a
+    variant — en/th/de/…; falls back to en then th). Read-only,
+    key-gated."""
     _cms_read_gate(request)
     try:
         page = await tool_runner.cms_get_page(slug, lang)

@@ -370,6 +370,102 @@ class CmsToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(meta["updated"][0])
         self.assertTrue(meta["timeline"][0].endswith("published: Pool notes"))
 
+    async def test_publish_accepts_arbitrary_lang(self):
+        # lang is any BCP-47-ish tag now — 'de' (and friends) publish like
+        # en/th did; the store was never the gate (card ...-37f8a0).
+        with self.assertRaises(PermissionError):
+            await self.runner.execute(
+                "cms_publish_page",
+                {"slug": "pool-notes", "title": "Pool", "lang": "DE",
+                 "content": "# Pool\nmit Chlor", **_PAGE_META},
+            )
+        # register used 'DE', resubmit 'de' — the pending key normalizes
+        # case so the confirm still lands.
+        result = await self.runner.execute(
+            "cms_publish_page",
+            {"slug": "pool-notes", "title": "Pool", "lang": "de",
+             "content": "# Pool\nmit Chlor", "confirmed": True,
+             **_PAGE_META},
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["lang"], "de")
+        args, _ = _page_call(self.runner, "pool-notes")
+        self.assertEqual(args[:3], ("ada-cms-pages", "pool-notes", "de"))
+
+    async def test_publish_rejects_malformed_lang(self):
+        with self.assertRaises(PermissionError):
+            await self.runner.execute(
+                "cms_publish_page",
+                {"slug": "pool-notes", "title": "Pool", "lang": "bad lang!",
+                 "content": "# hi", **_PAGE_META},
+            )
+        out = await self.runner.execute(
+            "cms_publish_page",
+            {"slug": "pool-notes", "title": "Pool", "lang": "bad lang!",
+             "content": "# hi", "confirmed": True, **_PAGE_META},
+        )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error_type"], "ValueError")
+        self.assertIn("invalid lang", out["error"])
+
+    async def test_get_page_falls_back_for_arbitrary_lang(self):
+        # A 'de' read of an en-only page lands on the en doc via the
+        # en→th fallback chain, flagged fallback=True.
+        self.runner.mddb.get_document.side_effect = (
+            lambda col, key, lang="en", **kw: {
+                "key": key, "lang": lang, "contentMd": f"# {lang}",
+                "meta": {"slug": [key], "title": [key],
+                         "format": ["markdown"]},
+            } if lang == "en" else None)
+        page = await self.runner.execute(
+            "cms_read", {"action": "get", "key": "pool-notes", "lang": "de"})
+        self.assertEqual(page["lang"], "en")
+        self.assertTrue(page["fallback"])
+        # …and a real 'de' doc wins over the fallback.
+        self.runner.mddb.get_document.side_effect = (
+            lambda col, key, lang="en", **kw: {
+                "key": key, "lang": lang, "contentMd": f"# {lang}",
+                "meta": {"slug": [key], "title": [key],
+                         "format": ["markdown"]},
+            } if lang in ("en", "de") else None)
+        page = await self.runner.execute(
+            "cms_read", {"action": "get", "key": "pool-notes", "lang": "de"})
+        self.assertEqual(page["lang"], "de")
+        self.assertNotIn("fallback", page)
+        # …and a de-ONLY page is still reachable: en/th miss, meta.slug
+        # discovery finds the 'de' variant and serves it flagged.
+        self.runner.mddb.search_documents.return_value = [
+            {"key": "pool-notes", "lang": "de"}]
+        self.runner.mddb.get_document.side_effect = (
+            lambda col, key, lang="en", **kw: {
+                "key": key, "lang": lang, "contentMd": "# Pool DE",
+                "meta": {"slug": [key], "title": [key],
+                         "format": ["markdown"]},
+            } if lang == "de" else None)
+        page = await self.runner.execute(
+            "cms_read", {"action": "get", "key": "pool-notes"})
+        self.assertEqual(page["lang"], "de")
+        self.assertTrue(page["fallback"])
+        self.runner.mddb.search_documents.assert_any_await(
+            "ada-cms-pages", filter_meta={"slug": ["pool-notes"]},
+            limit=10)
+
+    async def test_note_update_accepts_arbitrary_lang(self):
+        self.runner.mddb.get_document.side_effect = (
+            lambda col, key, lang="en", **kw: {
+                "key": key, "lang": lang, "contentMd": "# Flood",
+                "meta": {"slug": [key], "title": [key]},
+            } if lang == "de" else None)
+        out = await self.runner.execute(
+            "cms_edit",
+            {"action": "note", "slug": "flood-report", "lang": "de",
+             "note": "noch steigend"})
+        self.assertEqual(out["status"], "noted")
+        # the write lands on the doc's own lang, not the requested tag
+        args, _ = _page_call(self.runner, "flood-report")
+        self.assertEqual(args[:3],
+                         ("ada-cms-pages", "flood-report", "de"))
+
     async def test_publish_rejects_bad_slug_and_format(self):
         # Missing report-meta fails at the schema gate before confirmation
         # registers — same early-exit the old ValueError gate enforced.
@@ -724,11 +820,12 @@ class CmsAutomationTests(unittest.IsolatedAsyncioTestCase):
             "cms_automation",
             {"action": "set", "slug": "flood-report", "confirmed": True,
              "interval_min": 60, "max_items": 5, "since_hours": 48,
-             "require": "น้ำ|flood", "langs": ["en", "th"],
+             "require": "น้ำ|flood", "langs": ["en", "th", "de"],
              "feeds": [["bkk", "https://news.google.com/rss/x"]],
              "parent": "flood-report-nongdon"})
         body = json.loads(self.runner.mddb.add_document.call_args[0][3])
         self.assertEqual(body["interval_min"], 60)
+        self.assertEqual(body["langs"], ["en", "th", "de"])
         self.assertEqual(body["feeds"], [["bkk", "https://news.google.com/rss/x"]])
         self.assertEqual(body["parent"], "flood-report-nongdon")
 
@@ -741,7 +838,7 @@ class CmsAutomationTests(unittest.IsolatedAsyncioTestCase):
                     {"action": "set", "slug": "flood-report", "confirmed": True,
                      "feeds": [["x", "ftp://nope"]]},
                     {"action": "set", "slug": "flood-report", "confirmed": True,
-                     "langs": ["de"]}):
+                     "langs": ["bad_lang"]}):
             out = await self.runner.execute("cms_automation", bad)
             self.assertFalse(out["ok"])
             self.assertEqual(out["error_type"], "ValueError")
