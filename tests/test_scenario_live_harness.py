@@ -64,7 +64,8 @@ def test_seed_payload_defaults() -> None:
     })
     assert body["lang"] == "en"
     assert body["meta"] == {}
-    assert body["content_md"] == "seeded body"
+    assert body["contentMd"] == "seeded body"
+    assert "content_md" not in body
     norm = sl.seed_payload({
         "collection": "c", "key": "k", "meta": {"kind": "report",
                                                 "tags": ["a", "b"]},

@@ -1638,11 +1638,13 @@ def seed_payload(item: dict) -> dict:
     for key, value in (item.get("meta") or {}).items():
         vals = value if isinstance(value, (list, tuple)) else [value]
         meta[str(key)] = [str(v) for v in vals]
+    # MDDB /v1/add expects the camelCase field — `content_md` silently
+    # stores an empty body (cms-report-add.py pins the same contract).
     return {
         "collection": item.get("collection"),
         "key": item.get("key"),
         "lang": item.get("lang") or "en",
-        "content_md": item.get("content_md") or item.get("content") or "",
+        "contentMd": item.get("content_md") or item.get("content") or "",
         "meta": meta,
     }
 
