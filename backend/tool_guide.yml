@@ -879,6 +879,27 @@ host_status: >-
   For fleet-wide DevNest queue/lane overview (not one named host) use
   nest_status instead; for any one host's health, disk or workload use
   this tool.
+# tool_guide.yml snippet — append at top level (backend/tool_guide.yml)
+
+map_embed: >-
+  Map builder for pages and chat — POI pins and/or a driving route in,
+  a ready snippet out. Pass stops as places=[{name,lat,lon}, ...] (a
+  bare name/address works; lat/lon only matters for the keyless image),
+  a route as route={origin,destination,waypoints,mode}, and pick kind=
+  'interactive' (iframe — needs GOOGLE_MAPS_API_KEY, renders on the
+  tailnet CMS viewer) or 'static' (frozen image — works keyless via
+  OpenStreetMap and is the right choice for meta.public pages and
+  LINE/TG, since the public renderer escapes iframes/images into
+  links). The result's markdown field is the block to hand to
+  cms_publish_page/cms_edit — never retype the URLs. open_url always
+  works with no key and opens the same map in Google Maps — offer it
+  whenever the page surface can't show the map itself. Several places
+  with no route chain into a directions map (that's the only way the
+  embed API shows them all — the warning in the result says so); a
+  route plus extra places pins only the route's stops on interactive —
+  kind='static' shows both. kind=interactive returning ok:false with
+  needs_key is an env gap, not a call error — re-call kind='static' or
+  send open_url; never narrate a map the caller can't see.
 ada_capabilities: >-
   The "what can you do" read path — overview answers list capability
   groups from the deploy-time tools snapshot; pass topic=<tool|family|

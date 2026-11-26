@@ -168,7 +168,12 @@ tools:
     policy: read
     secondary_allowed: true
     timeout_s: 15
-  # "what can you do" read path — card ada-capabilities-verb-wiring;
+  map_embed:
+    module: map_embed
+    policy: read
+    secondary_allowed: true
+    timeout_s: 60
+# "what can you do" read path — card ada-capabilities-verb-wiring;
   # contract chaba docs/kb/ada-tools-verb-contract.md. Answers from the
   # deploy-shipped snapshot backend/data/ada-tools-snapshot.json.
   ada_capabilities:
