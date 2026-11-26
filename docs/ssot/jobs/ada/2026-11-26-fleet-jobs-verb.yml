@@ -1,0 +1,130 @@
+# SSOT Job: ada_fleet_jobs — "how are jobs" report-verb read path
+# Card: ada-voice-fleet-jobs-verb (ref ADA-0041; producer card
+# fleet-jobs-report-and-ada-verb). Dispatch
+# 20261126-210303 on idc02, branch
+# dispatch/20261126-210303-implement-a-report-verb-tool-i.
+
+title: >-
+  Ada answers "how are jobs / what is the fleet doing" from the
+  rendered fleet-jobs-report CMS page — one MDDB read, freshness-gated,
+  never live-computed
+subtitle: >-
+  backend/tools.d/ada_fleet_jobs.py consumes chaba's
+  docs/kb/ada-report-verb-contract.md consumer side: POST /get on
+  ada-cms-pages/fleet-jobs-report (lang en) -> {contentMd, meta}, then
+  meta.updated vs meta.fresh_for (4h). Producer: fleet-jobs-report job
+  on idc03 every 4h (ssot.jobs.yml) via board-api POST /report.
+
+planning:
+  goal: |
+    Fleet-status voice asks must be answered from the rendered
+    artifact only — sub-second, deterministic, honest about staleness.
+    The contract bans every live path on a voice turn: no aggregator,
+    no board-api /cards or /queue scan, no psql/ssh/systemctl, no
+    dispatch/sub-agent.
+  scope: |
+    Delivered (ada-voice repo only; deploy via deploy-ada.sh on
+    idc03, NOT done here per dispatch rules):
+      - tools.d/ada_fleet_jobs.py: DECLARATION (focus= optional);
+        mddb via runner.context.mddb facade (runner.mddb fallback for
+        bare fakes); one get_document(ada-cms-pages,
+        fleet-jobs-report, en); freshness gate reusing
+        backend/report_meta.py first()/fresh_for_seconds() (4h
+        fallback when fresh_for absent/unparseable).
+      - Fresh -> 2-4 sentence digest: meta.summary leads (producer's
+        own one-liner), parsed health sentence (failing/late timer
+        counts + names across ## Host: sections, stale runner
+        heartbeats), LiteLLM 24h spend when rows exist. Stale -> same
+        body prefixed "As of <updated UTC>" + producer-may-be-down
+        flag. Missing page / unreachable store / raised read ->
+        ok:true generated:false "hasn't been generated yet" + offer
+        to card it. Unparseable meta.updated -> answer + "treat this
+        as unverified". No mddb (guest mode) -> ok:false.
+      - focus= aliases -> spend|timers|lanes|queue|hosts section
+        answers; unknown focus falls back to overview.
+      - Parser tolerates BOTH page generations: current
+        ('## Runner Fleet', '### Timer States - ok..failing..off' +
+        bad-timer table, lane/spend tables) and the 2026-11-20 layout
+        ('## Live Queue' Pos/Card table, emoji 🟢🟡🔴⬛ counts,
+        'Attention timers' names) — verified live against the real
+        fetched page.
+      - manifest.yml row: policy=read, secondary_allowed=true,
+        timeout_s=10; tool_guide.yml error-path entry;
+        ada_capabilities _GROUPS gains ada_fleet_jobs under
+        'kanban, jobs & ops' (was heading to misc).
+      - tests/test_ada_fleet_jobs.py (14 tests, fake-mddb fixtures —
+        fresh/stale/missing/unreachable/empty/unparseable + all six
+        focus modes + legacy layout) +
+        tests/scenarios-live/fleet_jobs.yaml (tier: smoke, needs_tools)
+        — coverage_debt untouched.
+    Explicitly NOT done:
+      - chaba-side producer changes (fleet-jobs-report job already
+        live on idc03, page already in ada-cms-pages).
+      - deploy/restart — deploy-ada.sh runs on idc03 by operator.
+  success_criteria:
+    - '"Ada, how are jobs" answers from the page in one MDDB read'
+    - 'scripts/tool-lint.py clean; scenario-schema-check 0 violations;
+      pytest tests/ -x -q green (2042 passed, 8 skipped)'
+    - 'fresh/stale/missing gate verified by no-network adapter tests
+      AND live-fire against the real fetched page (stale path fired:
+      page updated 2026-11-20 > 4h)'
+  risks:
+    - 'Page format drift: parser is regex-tolerant across both known
+      generations; a third layout degrades to meta.summary + health
+      sentence rather than fabricating.'
+    - 'Producer down >4h: answers carry the "as of" prefix + may-be-
+      down flag per contract; report-watch/inbox owns the escalation.'
+  resources:
+    - contract: chaba docs/kb/ada-report-verb-contract.md
+    - producer: chaba scripts/fleet-jobs-report.py,
+      docs/ssot/infrastructure/ssot.jobs.yml (id: fleet-jobs-report,
+      host idc03, every 4h)
+    - prior art: backend/tools.d/ada_capabilities.py (verb-wiring
+      pattern), backend/report_meta.py (fresh_for_seconds)
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-26"
+  steps:
+    - id: 1
+      label: "contract + real page recon"
+      status: done
+      notes: "read chaba contract + card spec; fetched the live
+        ada-cms-pages/fleet-jobs-report doc from MDDB :11028 (idc02) —
+        confirmed meta.updated/fresh_for=4h/summary and both section
+        layouts"
+    - id: 2
+      label: "implement tool + wiring"
+      status: done
+      notes: "ada_fleet_jobs.py + manifest + tool_guide + scenario +
+        capabilities group entry"
+    - id: 3
+      label: "gates"
+      status: done
+      notes: "tool-lint clean (73 declared, 67 scenario-covered);
+        scenario-schema-check 213 files 0 violations; pytest 2042
+        passed 8 skipped (venv borrowed from
+        ~/CascadeProjects/ada-voice/.venv)"
+    - id: 4
+      label: "live-fire"
+      status: done
+      notes: "real fetched page through run(): stale gate fired
+        correctly ('As of 2026-11-20 13:10 UTC ... producer may be
+        down'); all six focus modes produced speakable answers"
+
+invoke:
+  tool:
+    - "ada_fleet_jobs (no args) — fleet/jobs overview digest"
+    - "ada_fleet_jobs focus=spend|timers|lanes|queue|hosts — section"
+
+env: {}
+
+verification:
+  - "python3 scripts/tool-lint.py  # clean"
+  - "python3 scripts/scenario-schema-check.py  # 0 violations"
+  - ".venv/bin/python -m pytest tests/ -x -q  # 2042 passed"
+  - "post-deploy: ask Ada 'how are jobs' on ada-ha-tony — answer cites
+    the page's updated stamp; stale page -> 'as of <updated>' +
+    producer-may-be-down flag"

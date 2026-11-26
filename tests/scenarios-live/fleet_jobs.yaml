@@ -1,0 +1,26 @@
+# ada_fleet_jobs — live acceptance for the "how are jobs" report-verb
+# (card ada-voice-fleet-jobs-verb; contract chaba
+# docs/kb/ada-report-verb-contract.md). The ask must route to the
+# ada_fleet_jobs drop-in and answer from the rendered
+# ada-cms-pages/fleet-jobs-report page — a freshness-gated digest,
+# never a live board-api/psql/ssh/systemctl compute. needs_tools skips
+# lanes where the tool isn't declared; a missing page surfaces as the
+# contract's "hasn't been generated yet" answer (still ok:true), so
+# response_nonempty is the check that the read path ran at all.
+name: fleet_jobs
+tier: smoke
+transport: text
+needs_tools: [ada_fleet_jobs]
+turns:
+  - user: "Ada, how are the jobs doing?"
+    expect:
+      calls_any: ["ada_fleet_jobs"]
+      response_nonempty: true
+      timeout_s: 60
+      settle_s: 8
+  - user: "And are any timers failing right now?"
+    expect:
+      calls_any: ["ada_fleet_jobs"]
+      response_nonempty: true
+      timeout_s: 60
+      settle_s: 8
