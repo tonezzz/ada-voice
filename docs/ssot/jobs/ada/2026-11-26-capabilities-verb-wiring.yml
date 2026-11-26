@@ -1,0 +1,126 @@
+# SSOT Job: ada_capabilities — "what can you do" read path
+# Card: ada-capabilities-verb-wiring (ref ADA-0020; contract card
+# ada-tools-command-reference part 2, ADA-1285).
+# Dispatch 20261126-192654 on tony-dell, branch
+# dispatch/20261126-192654-repo-work-ada-voice-wire-the-a. Relands
+# dispatch/20261124-212337 (merge held on missing pytest evidence,
+# OPS-1191 host-capability gate — code was already contract-clean).
+
+title: >-
+  Ada answers "what can you do" from the deploy-shipped tools
+  snapshot — deterministic, sub-50ms, never fabricated
+subtitle: >-
+  backend/tools.d/ada_capabilities.py consumes chaba's generated
+  docs/kb/ada-tools-commands.json (transported by deploy-ada.sh step
+  2b to backend/data/ada-tools-snapshot.json) per the producer/
+  consumer split in chaba docs/kb/ada-tools-verb-contract.md (schema 1).
+
+planning:
+  goal: |
+    When Tony asks Ada what she can do, the answer must come from the
+    generated snapshot — one cached file read + fixed template, no
+    network, no model calls, no live manifest re-parse. Canonical
+    names only: absorbed _ALIASES names route but are never listed.
+  scope: |
+    Delivered (ada-voice repo only; deploy via deploy-ada.sh on
+    idc03, NOT done here per dispatch rules):
+      - tools.d/ada_capabilities.py: DECLARATION (229-char blurb,
+        optional topic=); mtime-keyed loader keyed on
+        (path, mtime_ns) — same pattern as
+        tool_runner/common.py::_tool_guide, picks up deploy-time file
+        swaps without restart; ADA_TOOLS_SNAPSHOT env override.
+      - Overview template per contract: "I have N capabilities — M
+        core + K add-on tools — as of <head_date>." + 10 deterministic
+        groups (family/name-prefix, first-match, misc fallback) +
+        "Ask me about a specific tool or area for details."
+      - Detail mode topic= resolves: exact tool -> absorbed-alias
+        redirect -> area/group label -> merge-family key -> unique
+        name substring -> honest ok:false with hint.
+      - Failure modes per contract: missing/corrupt -> ok:false
+        "capability list not generated"; source.behind>0 or
+        generated_at>30d -> answer continues with stale caveat
+        (snapshot fields only, byte-deterministic) + logger.warning;
+        schema!=1 -> refuse with version note.
+      - manifest.yml row: policy=read, secondary_allowed=true,
+        timeout_s=5; tool_guide.yml error-path entry.
+      - deploy-ada.sh step 2b (after ff-merge, before gates): copies
+        $CHABA_REPO/docs/kb/ada-tools-commands.json (default
+        ~/CascadeProjects/chaba, CHABA_REPO override) to
+        backend/data/ada-tools-snapshot.json via mkstemp+os.replace,
+        schema-1 validated; missing/invalid source warns, never
+        blocks. backend/data/ is gitignored — runtime artifact only.
+      - tests/test_ada_capabilities.py (14 tests, fixture snapshot)
+        + tests/scenarios-live/capabilities.yaml (tier: smoke,
+        needs_tools) — leaves coverage_debt at creation.
+      - docs/kb/ada-tools-snapshot.md transport runbook.
+    Explicitly NOT done:
+      - chaba-side producer changes (scripts/ada/
+        tools-commands-catalog.py already emits schema 1).
+      - deploy/restart — deploy-ada.sh runs on idc03 by operator.
+  success_criteria:
+    - '"Ada, what can you do" answers from the snapshot <50ms,
+      deterministic (verified 3.7ms cold / 0.7ms warm on the real
+      chaba snapshot: 68 caps — 37 core + 31 add-on)'
+    - 'scripts/tool-lint.py clean; scenario-schema-check 0 violations;
+      pytest tests/ -x -q green (2032 passed, 4 skipped)'
+    - 'deploy step ships the snapshot (step 2b in deploy-ada.sh)'
+  risks:
+    - 'Snapshot drift: chaba catalog lags ada-voice main between
+      producer runs — mitigated by source.behind stale caveat in the
+      answer itself.'
+    - 'Group mapping is heuristic (family/prefix); new tools land in
+      misc until _GROUPS is extended — cosmetic, not a failure.'
+  resources:
+    - contract: chaba docs/kb/ada-tools-verb-contract.md (schema 1)
+    - producer output: chaba docs/kb/ada-tools-commands.json
+    - prior attempt branch: origin/dispatch/20261124-212337-*
+      (commit cb7a0351, cherry-picked as 1e11f11)
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-26"
+  steps:
+    - id: 1
+      label: "recover + rebase prior dispatch work"
+      status: done
+      notes: "cherry-pick cb7a0351 onto origin/main b9395fe — clean,
+        no conflicts across 17 intervening commits"
+    - id: 2
+      label: "contract re-verification"
+      status: done
+      notes: "gh api fetch of chaba contract + live snapshot JSON —
+        schema/fields/templates/failure modes all match consumer"
+    - id: 3
+      label: "gates"
+      status: done
+      notes: "tool-lint clean (66 scenario-covered, +1); schema-check
+        212 files 0 violations; pytest 2032 passed 4 skipped (venv
+        borrowed from ~/CascadeProjects/ada-voice/.venv, py3.14)"
+    - id: 4
+      label: "live-fire"
+      status: done
+      notes: "real chaba snapshot copied to gitignored
+        backend/data/; overview 3.7ms cold, tool/family/group/alias/
+        unknown detail modes verified"
+
+invoke:
+  tool:
+    - "ada_capabilities (no args) — grouped overview"
+    - "ada_capabilities topic=<tool|family|group|alias> — detail"
+
+env:
+  ADA_TOOLS_SNAPSHOT: >-
+    override path for tests/staging; default
+    backend/data/ada-tools-snapshot.json
+  CHABA_REPO: >-
+    deploy-ada.sh override for the chaba checkout that holds
+    docs/kb/ada-tools-commands.json (default ~/CascadeProjects/chaba)
+
+verification:
+  - "python3 scripts/tool-lint.py  # clean"
+  - "python3 scripts/scenario-schema-check.py  # 0 violations"
+  - ".venv/bin/python -m pytest tests/ -x -q  # 2032 passed"
+  - "post-deploy: ask Ada 'what can you do' on ada-ha-tony — answer
+    cites snapshot head_date + stale caveat when behind>0"

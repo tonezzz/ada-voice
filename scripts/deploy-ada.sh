@@ -72,6 +72,46 @@ else
     log "merged $pre -> $post"
 fi
 
+# --- 2b. tools snapshot transport (card ada-capabilities-verb-wiring) ---
+# chaba's catalog producer emits docs/kb/ada-tools-commands.json; the
+# ada_capabilities tool consumes it as backend/data/ada-tools-snapshot.json
+# — single transport, one direction, never recomputed live (contract:
+# chaba docs/kb/ada-tools-verb-contract.md). A missing/invalid source or
+# a schema the consumer doesn't speak degrades the tool to ok:false —
+# warn loudly but never block the deploy on it.
+CHABA_REPO="${CHABA_REPO:-$HOME/CascadeProjects/chaba}"
+SNAP_SRC="$CHABA_REPO/docs/kb/ada-tools-commands.json"
+SNAP_DST="backend/data/ada-tools-snapshot.json"
+if [[ -f "$SNAP_SRC" ]]; then
+    if ! python3 - "$SNAP_SRC" "$SNAP_DST" <<'PYEOF'
+import json, os, sys, tempfile
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    with open(src, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict) or data.get("schema") != 1:
+        raise ValueError(
+            "unsupported snapshot "
+            f"(schema={data.get('schema') if isinstance(data, dict) else type(data).__name__})")
+except Exception as exc:
+    print(f"[deploy] WARN: tools snapshot unreadable ({exc}) — keeping previous", file=sys.stderr)
+    sys.exit(0)
+os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst) or ".",
+                           prefix=".ada-tools-snapshot.")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(data, fh)
+os.replace(tmp, dst)
+n = len(data.get("tools") or [])
+print(f"[deploy] tools snapshot synced: {n} tool rows -> {dst}")
+PYEOF
+    then
+        log "WARN: tools snapshot sync errored — ada_capabilities answers ok:false until fixed"
+    fi
+else
+    log "WARN: $SNAP_SRC missing — ada_capabilities will answer ok:false"
+fi
+
 # --- 3a. mass-delete gate on the merged diff ------------------------------
 # The pause lands AFTER the merge, so a rerun would see pre==post and slip
 # past — persist the warn in .git/ and hold it until DEPLOY_FORCE=1 clears.

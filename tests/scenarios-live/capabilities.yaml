@@ -1,0 +1,30 @@
+# ada_capabilities — live acceptance for the "what can you do" read path
+# (card ada-capabilities-verb-wiring; contract chaba
+# docs/kb/ada-tools-verb-contract.md). The overview ask must route to the
+# ada_capabilities drop-in and answer from the deploy-time snapshot
+# (backend/data/ada-tools-snapshot.json, shipped by deploy-ada.sh) — a
+# count line + grouped areas, never a guessed list. The detail turn checks
+# topic= routing on a named tool. needs_tools skips lanes where the tool
+# isn't declared; a missing snapshot surfaces as ok:false (the contract's
+# honest failure), which fails result_contains — that IS the check that
+# the deploy shipped the file.
+name: capabilities
+tier: smoke
+transport: text
+needs_tools: [ada_capabilities]
+turns:
+  - user: "Ada, what can you do?"
+    expect:
+      calls_any: ["ada_capabilities"]
+      result_contains_any: ['"ok": true', '"answer"']
+      response_nonempty: true
+      timeout_s: 60
+      settle_s: 8
+  - user: >-
+      Before we continue — from your own capability list, what does the
+      kanban tool do?
+    expect:
+      calls_any: ["ada_capabilities"]
+      response_nonempty: true
+      timeout_s: 60
+      settle_s: 8
