@@ -1488,7 +1488,9 @@ def _builtin_declarations() -> list[dict[str, Any]]:
             "name": "vcast_gesture",
             "description": (
                 "Enable/disable gesture control on a vcast display — mode='room' "
-                "(wake-on-motion), 'hand' (hand tracking), 'off'."
+                "(wake-on-motion), 'hand' (YOLO hand-pointer: the display uplinks "
+                "camera frames and a server-side hand detector drives the cursor; "
+                "the result reports detector health), 'off'."
             ),
             "behavior": types.Behavior.NON_BLOCKING,
             "parameters_json_schema": {

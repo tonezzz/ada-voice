@@ -174,8 +174,10 @@ chat_send: >-
   it into the document archive (confirmation-gated).
 
 vcast_gesture: >-
-  mode='room' = wake-on-motion, 'hand' = MediaPipe hand tracking on
-  capable displays, 'off' stops. The display reports real capability in
+  mode='room' = wake-on-motion, 'hand' = YOLO hand-pointer (display uplinks
+  camera frames; a server-side hand detector emits the cursor — result
+  carries detector online/sink health, warn when nothing consumes the
+  uplink), 'off' stops. The display reports real capability in
   its state — a denied camera or unbuilt mode answers honestly.
 
 gesture_controls: >-
