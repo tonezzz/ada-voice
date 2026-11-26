@@ -1,0 +1,142 @@
+# SSOT Job: CMS tools accept arbitrary language tags (lang=de et al.)
+# Card: open-ada-cms-tool-lang-arg-beyond-en-th-37f8a0. Follow-up to
+# chaba-side support-german-language-variants-on-cms-69ef23. Dispatch
+# 20261126-234627 on idc02, branch
+# dispatch/20261126-234627-follow-up-to-support-german-la.
+
+title: >-
+  ada-voice CMS tools (cms_publish_page / cms_read / cms_edit) accept
+  any BCP-47-ish language tag — the en/th wall was the tool schema
+  enum + runner whitelists, never the MDDB store
+subtitle: >-
+  Three gate layers widened together: declaration enums in
+  realtime_provider.py, the ("en","th") whitelists in
+  tool_runner/cms.py, and the automate langs knob. Read path gained a
+  generalized en→th fallback plus meta.slug variant discovery so
+  de-only pages stay reachable.
+
+planning:
+  goal: |
+    After the chaba-side change made the store + readers lang-agnostic,
+    ada-voice still presented en/th only: the model-facing schema
+    enum, the server-side enum check in _validate_call_args, and the
+    runner's own ("en","th") ValueError whitelists. Widen all of them
+    to arbitrary tags with backward compatibility (en/th behavior
+    identical) and verify a live lang=de round-trip.
+  scope: |
+    Delivered (ada-voice repo only; deploy via deploy-ada.sh on
+    idc03, NOT done here per dispatch rules):
+      - backend/tool_runner/cms.py: new _CMS_LANG_RE +
+        _cms_lang() — strip/lower, empty→'en', reject non-tag junk
+        (^[a-z]{2,3}(-[a-z0-9]{2,8})*$). Applied in cms_publish_page
+        (replacing the ("en","th") ValueError), cms_get_page,
+        cms_note_update, _cms_edit_sections, and the automate langs
+        knob (per-item normalize; bad items still ValueError).
+      - cms_get_page fallback chain generalized: requested → en → th
+        (identical for en/th requests), then a LAST-RESORT
+        meta.slug discovery via search_documents so a de-ONLY page is
+        still served (fallback=True marks it). Sibling public-flag
+        check now scans both en and th variants.
+      - cms_note_update fallback generalized the same way (en request
+        on a th-only page now annotates th — was not_found before;
+        nothing that worked breaks).
+      - backend/realtime_provider.py: removed enum:["en","th"] from
+        lang on cms_read/cms_publish_page/cms_edit and from langs
+        items on cms_edit automate; descriptions now say "any tag
+        like 'en'/'th'/'de'". CMS_INSTRUCTIONS wording updated
+        ("language variants of one slug coexist for any tag").
+      - backend/tool_runner/__init__.py: cms_publish_page pending-
+        confirm key normalizes lang case ('DE'=='de') so register/
+        resubmit casing drift can't strand a confirm.
+      - The '-th' slug-suffix derivation hack deliberately kept
+        th-only: generalizing to any '-xx' suffix false-positives on
+        English slugs ending in valid lang codes ('as-is'→is,
+        'tie-in'→in, 'check-it'→it). Other langs pass lang=.
+      - tests/test_tool_runner.py: +4 tests (arbitrary-lang publish
+        incl. case-drift confirm, malformed-tag rejection, de read
+        fallback + de-only discovery, note on de variant); automation
+        knob test now asserts langs:[en,th,de] lands and bad tags
+        still fail.
+      - tests/scenarios-live/cms_translate.yaml: German probe section
+        rewritten — 'de' is legal now; asserts a real
+        cms_publish_page call + 'lang': 'de*' in the tool_result
+        (phantom-claim watch kept); cleanup deletes de/de-de too.
+      - pwa_server.py: /api/cms/pages/{slug} docstring updated.
+    Explicitly NOT done:
+      - pwa/cms/index.html viewer still has a hardcoded EN/ไทย
+        toggle — a de page is reachable via ?lang=de / API but has no
+        viewer button (frontend follow-up if wanted).
+      - cms_note_update has no exotic-variant discovery (en→th only);
+        writes stay explicit.
+      - deploy/restart — deploy-ada.sh runs on idc03 by operator.
+  success_criteria:
+    - 'scripts/tool-lint.py clean; scenario-schema-check 0 violations;
+      pytest tests/ -x -q green (2046 passed, 8 skipped)'
+    - 'live lang=de publish/read round-trip verified against the real
+      ada-cms-pages MDDB store (publish→read de→read default→note→
+      malformed-tag reject→delete; probe slug devin-langprobe-20261126
+      removed afterwards)'
+  risks:
+    - 'Model may still bake "-de" into the slug instead of passing
+      lang=de (the -th hack only covers th) — page lands as an en doc
+      named "x-de"; cms_translate.yaml smoke now asserts the lang tag
+      in tool_result so drift is visible.'
+    - 'Variant discovery picks alphabetically-first exotic lang when a
+      slug has several non-en/th variants — deterministic, flagged
+      fallback=True.'
+    - 'Lang tags are lowercased before storage — a chaba writer that
+      stored "de-DE" verbatim would not match a "de-de" read (store
+      treats lang as an opaque key part).'
+  resources:
+    - prior art: "chaba integrations/ada-voice/backend/
+      cms-slug-derivation.patch (referenced by card; chaba repo —
+      store/readers already lang-agnostic)"
+    - store: "MDDB ada-cms-pages on :11027 (CMS split instance)"
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-26"
+  steps:
+    - id: 1
+      label: "gate-layer recon"
+      status: done
+      notes: "gate was BOTH layers, not wording: enum [en,th] in
+        realtime_provider declarations (enforced server-side by
+        _validate_call_args → SchemaError) AND runner whitelists in
+        tool_runner/cms.py (publish ValueError + automate langs) —
+        CMS_INSTRUCTIONS was descriptive only"
+    - id: 2
+      label: "widen + fallback"
+      status: done
+      notes: "_cms_lang() validator everywhere lang is accepted;
+        en→th→discover fallback on reads; pending-key case normalize"
+    - id: 3
+      label: "gates"
+      status: done
+      notes: "tool-lint clean (74 declared); scenario-schema-check
+        214 files 0 violations; pytest 2046 passed 8 skipped"
+    - id: 4
+      label: "live round-trip"
+      status: done
+      notes: "real ada-cms-pages store: publish de (confirm
+        handshake) → stored_verified → read lang=de → default read
+        discovered de-only variant (fallback=True) → note →
+        'bad lang!' rejected ValueError → delete verified gone"
+
+invoke:
+  tool:
+    - "cms_publish_page lang=<any BCP-47-ish tag> — e.g. 'de', 'de-de', 'zh-hant'"
+    - "cms_read action='get' key=<slug> lang=<tag> — falls back en→th→exotic discovery"
+    - "cms_edit action='note' slug=<slug> lang=<tag>"
+
+env: {}
+
+verification:
+  - "python3 scripts/tool-lint.py  # clean"
+  - "python3 scripts/scenario-schema-check.py  # 0 violations"
+  - ".venv/bin/python -m pytest tests/ -x -q  # 2046 passed, 8 skipped"
+  - "post-deploy: cms_publish_page a disposable slug lang=de →
+    cms_read action='get' lang=de returns the German content;
+    cms_translate.yaml live scenario exercises the full voice path"

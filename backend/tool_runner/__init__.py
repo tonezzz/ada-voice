@@ -1281,8 +1281,11 @@ class ToolRunner(
                 # publish path itself validates and rejects with ValueError.
                 slug = str(args.get("slug") or "")
             # Keyed by slug:lang — confirming an EN publish does not unlock
-            # a different-language variant of the same slug.
-            pkey = f"{slug}:{args.get('lang') or 'en'}"
+            # a different-language variant of the same slug. Normalize the
+            # tag the way the publish path does ('DE' == 'de') so a casing
+            # drift between register and resubmit can't strand the confirm.
+            plang = str(args.get("lang") or "en").strip().lower() or "en"
+            pkey = f"{slug}:{plang}"
             pending = getattr(self, "_cms_pending", None)
             if pending is None:
                 pending = self._cms_pending = {}

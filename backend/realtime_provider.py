@@ -148,7 +148,7 @@ CMS_INSTRUCTIONS = (
     "action='get' reads one by key (its page slug) — get reaches any slug you "
     "know even when list truncates, "
     "cms_publish_page creates or fully replaces a page (slugs are lowercase, e.g. 'pool-notes'; "
-    "en/th variants coexist — publish the user's language plus the other when asked), "
+    "language variants of one slug coexist for any tag — en, th, de, … — publish the user's language plus the other when asked), "
     "cms_edit action='note' appends a timeline note to an existing page without replacing content, and "
     "cms_edit action='delete' removes one. "
     "Every publish must carry the report meta contract — summary (a one-line brief of the gist, "
@@ -2367,8 +2367,7 @@ def _builtin_declarations() -> list[dict[str, Any]]:
                     },
                     "lang": {
                         "type": "string",
-                        "enum": ["en", "th"],
-                        "description": "get: page language variant (default en; falls back to en when missing).",
+                        "description": "get: page language variant — any tag like 'en'/'th'/'de' (default en; falls back to en then th when missing).",
                     },
                     "limit": {
                         "type": "integer",
@@ -2408,8 +2407,7 @@ def _builtin_declarations() -> list[dict[str, Any]]:
                     },
                     "lang": {
                         "type": "string",
-                        "enum": ["en", "th"],
-                        "description": "Language variant to publish (default en). 'en' and 'th' variants of the same slug coexist — the viewer has a language toggle.",
+                        "description": "Language variant to publish — any tag like 'en'/'th'/'de' (default en). Variants of the same slug coexist — the viewer has a language toggle.",
                     },
                     "summary": {
                         "type": "string",
@@ -2483,8 +2481,7 @@ def _builtin_declarations() -> list[dict[str, Any]]:
                     },
                     "lang": {
                         "type": "string",
-                        "enum": ["en", "th"],
-                        "description": "note: language variant to annotate (default en).",
+                        "description": "note: language variant to annotate — any tag like 'en'/'th'/'de' (default en).",
                     },
                     "op": {
                         "type": "string",
@@ -2527,8 +2524,8 @@ def _builtin_declarations() -> list[dict[str, Any]]:
                     },
                     "langs": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["en", "th"]},
-                        "description": "automate set: which language variants to update.",
+                        "items": {"type": "string"},
+                        "description": "automate set: which language variants to update — any tags like 'en'/'th'/'de'.",
                     },
                     "parent": {
                         "type": "string",
