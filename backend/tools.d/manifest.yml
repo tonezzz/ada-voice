@@ -182,3 +182,11 @@ tools:
     secondary_allowed: false
     timeout_s: 180
     instances: [ada-dev]
+  # "how are jobs" report-verb — card ada-voice-fleet-jobs-verb; contract
+  # chaba docs/kb/ada-report-verb-contract.md. One MDDB /get on the
+  # rendered fleet-jobs-report page + freshness gate; never live-computes.
+  ada_fleet_jobs:
+    module: ada_fleet_jobs
+    policy: read
+    secondary_allowed: true
+    timeout_s: 10

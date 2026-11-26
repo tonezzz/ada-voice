@@ -89,7 +89,7 @@ _GROUPS = (
     ("kanban, jobs & ops",
      {"kanban", "devin", "devin_read", "meta_voice_ops"},
      {"nest_status", "host_status", "ada_sweep", "ada_opencode",
-      "ada_opencode_dispatch", "ada_ops"},
+      "ada_opencode_dispatch", "ada_ops", "ada_fleet_jobs"},
      ("kanban", "devin", "nest_status", "host_status", "ada_sweep",
       "ada_opencode", "ada_ops")),
     ("docs, CMS & knowledge",

@@ -891,3 +891,18 @@ ada_capabilities: >-
   say the capability list isn't available right now, do not invent
   tools. Absorbed old names still resolve in topic= (they redirect to
   the canonical tool) but are never listed as capabilities.
+ada_fleet_jobs: >-
+  The fleet-status read path — "how are jobs / job status / what is
+  the fleet doing / are timers failing / which hosts are having
+  trouble / how much did we spend / what are the lanes doing / is the
+  dispatch queue moving" all answer from the rendered
+  fleet-jobs-report CMS page (one MDDB read, freshness-gated at 4h).
+  Pass focus=spend|timers|lanes|queue|hosts to emphasize one section;
+  omit it for the overview. Quote `answer` — it is pre-composed and
+  carries the "as of <updated>" caveat itself when the report is stale
+  (the producer may be down — relay that, do NOT recompute). An answer
+  saying the report "hasn't been generated yet" means the page is
+  missing — offer to card it. NEVER answer fleet status by scanning
+  the kanban/board-api, running psql/ssh/systemctl, or invoking the
+  fleet-jobs-report producer — the contract bans every live path on a
+  voice turn.
