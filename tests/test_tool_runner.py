@@ -3917,6 +3917,96 @@ class DisplayMergeAliasTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(DEVIN_CONFIRMED_TOOLS, {"devin"})
 
 
+class VcastGestureDetectorTests(unittest.IsolatedAsyncioTestCase):
+    """vcast_gesture mode='hand' honesty (2026-11-26): the display only
+    uplinks camera frames — the server-side YOLO hand-pointer
+    (yolo-gesture.service, GET /pointer) is what emits cursor msgs.
+    When it is down or its sinks can't reach the screen, the tool must
+    say so instead of reporting a bare ok."""
+
+    async def asyncSetUp(self):
+        self.runner = ToolRunner(AsyncMock(), instance_id="test")
+        self.runner._banks = _hermetic_registry()
+        self.pubbed = []
+
+        def fake_vcast(path, payload=None):
+            if path == "/pub":
+                self.pubbed.append(payload)
+                return {"ok": True, "delivered": 1}
+            if path == "/displays":
+                return {"screens": [{
+                    "screen": 1, "connected": True,
+                    "state": "gesture-hand", "state_detail": "",
+                    "panes": 1}]}
+            return {"captures": {}}
+
+        patcher = patch.object(
+            ToolRunner, "_vcast_api", staticmethod(fake_vcast))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _detector(self, **kw):
+        base = {"engine": "yolo-hand-pointer", "online": True,
+                "enabled": True, "sinks": ["vcast:auto"]}
+        base.update(kw)
+        patcher = patch.object(
+            ToolRunner, "_yolo_pointer_status",
+            staticmethod(lambda: base))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_hand_online_covering_sink_is_clean(self):
+        self._detector(sinks=["vcast:auto"])
+        out = await self.runner.vcast_gesture(1, "hand")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["detector"]["engine"], "yolo-hand-pointer")
+        self.assertNotIn("warning", out)
+
+    async def test_hand_offline_detector_warns(self):
+        self._detector(online=False, error="refused")
+        out = await self.runner.vcast_gesture(1, "hand")
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["detector"]["online"])
+        self.assertIn("detector is unreachable", out["warning"])
+
+    async def test_hand_detector_without_sinks_warns(self):
+        self._detector(enabled=False, sinks=[])
+        out = await self.runner.vcast_gesture(1, "hand")
+        self.assertIn("POINTER_SINK", out["warning"])
+
+    async def test_hand_detector_wrong_screen_warns(self):
+        # Pinned to another screen — and a ws:// relay sink feeds
+        # gesture-relay screens, never this vcast room.
+        for sinks in (["vcast:5"], ["ws://relay:8794/ws?role=controller"]):
+            with self.subTest(sinks=sinks):
+                self._detector(sinks=sinks)
+                out = await self.runner.vcast_gesture(1, "hand")
+                self.assertIn("do not reach screen 1", out["warning"])
+
+    async def test_hand_pinned_sink_matching_screen_is_clean(self):
+        self._detector(sinks=["vcast:1"])
+        out = await self.runner.vcast_gesture(1, "hand")
+        self.assertNotIn("warning", out)
+
+    async def test_off_and_room_skip_detector_probe(self):
+        calls = []
+        patcher = patch.object(
+            ToolRunner, "_yolo_pointer_status",
+            staticmethod(lambda: calls.append(1) or {}))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        out = await self.runner.vcast_gesture(1, "off")
+        self.assertNotIn("detector", out)
+        out = await self.runner.vcast_gesture(1, "room")
+        self.assertNotIn("detector", out)
+        self.assertEqual(calls, [])
+
+    async def test_invalid_mode_still_rejected(self):
+        out = await self.runner.vcast_gesture(1, "teleport")
+        self.assertIn("mode must be off|room|hand", out["error"])
+        self.assertEqual(self.pubbed, [])
+
+
 class GevTourTests(unittest.IsolatedAsyncioTestCase):
     """gev_command's tour= branch — named flyover tours must be
     discoverable and return an executable card. The tours lived only

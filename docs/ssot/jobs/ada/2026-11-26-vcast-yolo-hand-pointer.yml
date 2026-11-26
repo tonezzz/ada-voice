@@ -1,0 +1,158 @@
+# SSOT Job: vcast gesture — YOLO hand-pointer audit + detector-health honesty.
+# Card: rebuild-gesture-control-using-yolo-83cf4a (OPS-1436). Dispatch
+# 20261126-130417, runner tony-macbook, repo ada-voice.
+#
+# The card asks to "replace MediaPipe hand tracking with a YOLO-based
+# hand/gesture detection model in the client display app". Investigation
+# showed the replacement already exists end-to-end in the chaba repo
+# (stacks/web/public/apps + experiments/ultralytics-yolo-ha) — this job
+# records the audit, the model evaluation, the live-state gap found, and
+# the ada-voice-side honesty fix that keeps Ada from claiming a dead
+# pipeline works.
+
+title: >-
+  vcast gesture control — MediaPipe->YOLO replacement audit; hand mode
+  now reports detector-backend health instead of bare ok
+subtitle: >-
+  The vcast 'hand' gesture mode was already YOLO end-to-end (display
+  uplink -> yolo-gesture.service hand_yolov8n -> {type:gesture} msgs).
+  Live audit 2026-11-26: the detector service is down on every host, so
+  hand mode published frames nobody consumed while vcast_gesture still
+  answered ok. The tool now probes GET /pointer on the detector and
+  warns when it is unreachable, sinkless, or routed to another screen.
+
+planning:
+  goal: |
+    Replace MediaPipe hand tracking with YOLO for the display/vcast
+    client: evaluate browser/edge-suitable models, integrate the
+    inference pipeline, map gestures to display commands, keep latency
+    real-time, verify detection + screen control.
+  scope: |
+    Audited (all in chaba repo, NOT ada-voice — this dispatch is
+    confined to the ada-voice worktree):
+      - stacks/web/public/apps/vcast/index.html — gesture {mode:hand}
+        BUILT: camera uplink ~300ms, cursor from pushed gesture msgs,
+        dwell 700ms = click, two hands = grab->pane zoom, corner QR ->
+        /apps/gesture/?s=N&engine=yolo.
+      - stacks/web/public/apps/gesture/index.html — wand with two
+        engines: mediapipe (default, on-device Hand/Face/Pose
+        landmarker) and yolo (bare camera uplink to input-bridge
+        /frame screen=0 token=gesture-N at ~3.3fps).
+      - experiments/ultralytics-yolo-ha/server.py — pointer mode:
+        hand_yolov8n.pt single-class 'hand' detector, box centre =
+        pointer (X mirror-flip), >=2 hands 3 frames = fist_start grab,
+        gone edge > POINTER_GONE_MS, sinks vcast:N | vcast:auto |
+        ws://relay | http POST; GET /pointer debug endpoint.
+      - yolo-gesture.service — systemd template (port 8785), moved
+        idc03 -> tony-omen 2026-10-20 with park mode (skips inference
+        when no fresh gesture-N uplink).
+      - In-browser ONNX eval (card explore-yolo-for-gesture-control-
+        in-apps-8e27eb, merged chaba master 2026-11-26 as 41ef17d2ac90):
+        /apps/eye/?det=yolo runs YOLO26n HaGRID 12-class gesture model
+        fully in-browser via vendored onnxruntime-web@1.31.1 (WebGPU EP
+        preferred, WASM fallback). Headless-Chrome verified; CPU-wasm
+        bench p50 ~419ms/2.4fps vs MediaPipe ~103-116ms/~9fps (~4x
+        slower); int8 dynamic-quant rejected (6.5x slower).
+    Delivered in ada-voice:
+      - backend/tool_runner/screens.py — _yolo_pointer_status() probes
+        ADA_YOLO_POINTER_URL (default http://tony-omen.taila0626a.ts.net:8785)
+        GET /pointer; vcast_gesture(mode='hand') now returns a detector
+        block {engine, online, enabled, sinks, present, grabbing,
+        last_error} and warns when the detector is unreachable,
+        POINTER_SINK-empty, or its sinks can't reach the target screen
+        (vcast:<N> pinned or vcast:auto only — ws:// feeds gesture-relay,
+        not vcast rooms).
+      - backend/realtime_provider.py + backend/tool_guide.yml —
+        vcast_gesture description corrected: 'hand' is the YOLO
+        hand-pointer, not MediaPipe.
+      - tests/test_tool_runner.py — VcastGestureDetectorTests (7 tests:
+        covering/offline/sinkless/wrong-screen/pinned-match/probe-skip/
+        invalid-mode).
+    Explicitly NOT done:
+      - any edit to chaba (gesture/vcast app source, yolo-gesture
+        service) — different repo, outside this worktree
+      - restarting yolo-gesture.service on tony-omen (host ops, not a
+        code change; flagged on the card)
+      - deploy/push (forbidden for this dispatch)
+  success_criteria:
+    - 'mode=hand result carries detector health; unreachable detector
+      produces an explicit warning instead of silent ok'
+    - 'sink routing honesty: vcast:auto / vcast:<screen> pass clean;
+      vcast:<other>, ws://, empty sinks warn'
+    - 'off/room modes unchanged — no probe, no detector key'
+    - 'tool-lint clean; test_tool_runner suite green'
+  risks:
+    - 'ADA_YOLO_POINTER_URL default points at tony-omen:8785 — the unit
+      moved hosts once already (idc03->omen 2026-10-20); env override is
+      the repoint path'
+    - 'probe adds up to ~2s to a mode=hand call (to_thread, 2s timeout)'
+  resources:
+    - "detector: chaba experiments/ultralytics-yolo-ha/server.py
+      (hand_yolov8n.pt, POINTER_SINK, GET /pointer)"
+    - "client: chaba stacks/web/public/apps/{vcast,gesture}/"
+    - "eval: chaba dispatch-wt-20261125-201656 (merged 41ef17d2ac90)"
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-26"
+  steps:
+    - id: 1
+      label: "locate the MediaPipe surface"
+      status: done
+      notes: "not in ada-voice — vcast/gesture apps + yolo service live
+        in chaba (stacks/web/public/apps, experiments/ultralytics-yolo-ha);
+        desk-companion frontend already on shared YOLO pose stream"
+    - id: 2
+      label: "audit live deployment state"
+      status: done
+      notes: "wand ?engine=yolo + vcast hand mode deployed; yolo-gesture
+        service DOWN everywhere (omen:8785 refused, idc03 disabled,
+        mn01 unreachable, /apps/yolo/api 502); gesture-relay idc02:8794
+        alive with 0 controllers"
+    - id: 3
+      label: "detector-health honesty in vcast_gesture"
+      status: done
+      notes: "_yolo_pointer_status + sink-coverage check + warnings;
+        schema/guide text corrected MediaPipe->YOLO"
+    - id: 4
+      label: "gates"
+      status: done
+      notes: "7 new unit tests green; test_tool_runner 299 passed;
+        tool-lint clean"
+
+verification:
+  - cmd: 'pytest tests/test_tool_runner.py -k VcastGesture'
+    result: '7 passed, 2 subtests passed'
+  - cmd: 'pytest tests/test_tool_runner.py -x -q'
+    result: '299 passed'
+  - cmd: 'python3 scripts/tool-lint.py'
+    result: 'clean — 71 declared tools, cap 115'
+  - cmd: 'curl http://tony-omen.taila0626a.ts.net:8785/pointer'
+    result: 'connection refused — detector offline (expected; warning path exercised by unit tests)'
+  - cmd: 'curl https://idc02.taila0626a.ts.net:8794/health'
+    result: '{ok:true, controllers:0, screens:0} — gesture-relay alive, idle'
+
+artifacts:
+  code:
+    - backend/tool_runner/screens.py
+    - backend/realtime_provider.py
+    - backend/tool_guide.yml
+  tests:
+    - tests/test_tool_runner.py
+  docs:
+    - docs/ssot/jobs/ada/2026-11-26-vcast-yolo-hand-pointer.yml
+
+followups:
+  - "ops: restart yolo-gesture.service on tony-omen (unit file
+    experiments/ultralytics-yolo-ha/yolo-gesture.service in chaba;
+    WorkingDirectory=~/CascadeProjects/chaba/experiments/ultralytics-yolo-ha)
+    — or repoint ADA_YOLO_POINTER_URL if it lands elsewhere"
+  - "chaba-side: /apps/gesture/ still defaults engine=mediapipe for
+    direct wand use; flip default or retire MediaPipe bundle once the
+    YOLO path proves out on-device"
+  - "sibling backlog cards already track the remaining tracks:
+    rebuild-v-cast-gesture-control-with-yolo-6cfa19 (ONNX Web vs
+    server-side streaming eval) and vcast-gesture-control-with-yolo-
+    detectio-bd5d28 (device-load motivation)"

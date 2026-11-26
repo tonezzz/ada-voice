@@ -836,12 +836,50 @@ class ScreensMixin:
                          + (f" ({last_err.get('error')})"
                             if last_err else "")}
 
+    @staticmethod
+    def _yolo_pointer_status() -> dict[str, Any]:
+        """Probe the server-side YOLO hand-pointer (yolo-gesture.service —
+        experiments/ultralytics-yolo-ha server.py, GET /pointer). Hand mode
+        on a vcast display only uplinks camera frames; THIS service turns
+        them into {type:gesture,x,y,...} msgs, so 'hand' is dead weight
+        while it is down (2026-11-26: unit offline on every host)."""
+        import urllib.request
+        base = os.environ.get(
+            "ADA_YOLO_POINTER_URL",
+            "http://tony-omen.taila0626a.ts.net:8785").rstrip("/")
+        try:
+            with urllib.request.urlopen(base + "/pointer", timeout=2) as r:
+                body = json.load(r)
+        except Exception as exc:
+            return {"engine": "yolo-hand-pointer", "online": False,
+                    "url": base, "error": str(exc)[:160]}
+        return {"engine": "yolo-hand-pointer", "online": True, "url": base,
+                "enabled": bool(body.get("enabled")),
+                "sinks": body.get("sinks") or [],
+                "present": body.get("present"),
+                "grabbing": body.get("grabbing"),
+                "last_error": body.get("last_error")}
+
+    @staticmethod
+    def _detector_covers_screen(sinks: list, screen: int) -> bool:
+        """True when a POINTER_SINK entry can deliver gesture msgs to this
+        vcast screen: vcast:<N> pinned, or vcast:auto (routes by the
+        gesture-<N> uplink token the wand carries). ws:// sinks feed the
+        gesture-relay screens, not vcast rooms."""
+        for s in sinks or []:
+            s = str(s)
+            if s == "vcast:auto" or s == f"vcast:{screen}":
+                return True
+        return False
+
     async def vcast_gesture(self, screen: int | None = None,
                             mode: str = "off") -> dict[str, Any]:
         """Toggle gesture control on a vcast display — publishes a
         {type:gesture, mode} command into the screen's room. The display
         acks via its reported state (gesture:<mode> on success, an
-        error state if the camera or mode is unavailable)."""
+        error state if the camera or mode is unavailable). mode='hand'
+        additionally reports the YOLO hand-pointer backend's health —
+        the display only uplinks frames; the detector makes the cursor."""
         import asyncio
         if screen is None:
             return {"error": "screen required — call "
@@ -871,6 +909,26 @@ class ScreensMixin:
                 res["screen_detail"] = s.get("state_detail")
         except Exception:
             pass
+        if mode == "hand":
+            det = await asyncio.to_thread(self._yolo_pointer_status)
+            res["detector"] = det
+            if not det.get("online"):
+                res["warning"] = ((res.get("warning") or "") +
+                                  " hand mode is on but the YOLO hand "
+                                  "detector is unreachable — the display "
+                                  "uplinks frames nobody turns into "
+                                  "pointer msgs; start yolo-gesture.service "
+                                  "or set ADA_YOLO_POINTER_URL").strip()
+            elif not det.get("enabled") or not det.get("sinks"):
+                res["warning"] = ((res.get("warning") or "") +
+                                  " detector is up but POINTER_SINK is "
+                                  "empty — it will not emit gesture msgs"
+                                  ).strip()
+            elif not self._detector_covers_screen(det["sinks"], screen):
+                res["warning"] = ((res.get("warning") or "") +
+                                  f" detector sinks {det['sinks']} do not "
+                                  f"reach screen {screen} — the cursor "
+                                  "will not move on this display").strip()
         return res
 
     @staticmethod
