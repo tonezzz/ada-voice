@@ -200,7 +200,8 @@ _SNAPSHOT_TTL = 20.0
 _snapshot_cache: dict[str, tuple[float, Any]] = {}
 
 
-def _get_json_cached(path: str, ttl: float = _SNAPSHOT_TTL) -> Any:
+def _get_json_cached(path: str, ttl: float = _SNAPSHOT_TTL,
+                     timeout: float | None = None) -> Any:
     """Short-lived cache for board reads so one workflow reuses snapshots."""
     now = time.monotonic()
     hit = _snapshot_cache.get(path)
@@ -209,7 +210,8 @@ def _get_json_cached(path: str, ttl: float = _SNAPSHOT_TTL) -> Any:
     for key, (expires, _) in list(_snapshot_cache.items()):
         if expires <= now:
             _snapshot_cache.pop(key, None)
-    payload = _get_json(path)
+    payload = (_get_json(path) if timeout is None
+               else _get_json(path, timeout=timeout))
     _snapshot_cache[path] = (now + ttl, payload)
     return payload
 
@@ -227,9 +229,12 @@ def _cards_payload(payload: Any) -> list[dict[str, Any]]:
     return [c for c in rows if isinstance(c, dict)]
 
 
-def _compact_cards() -> list[dict[str, Any]]:
+def _compact_cards(timeout: float | None = None) -> list[dict[str, Any]]:
     """Minimal card index (~200KB) for id/ref/title resolution."""
-    return _cards_payload(_get_json_cached("/cards?compact=1&limit=1000"))
+    path = "/cards?compact=1&limit=1000"
+    payload = (_get_json_cached(path) if timeout is None
+               else _get_json_cached(path, timeout=timeout))
+    return _cards_payload(payload)
 
 
 def _board_cards() -> list[dict[str, Any]]:
@@ -257,7 +262,8 @@ def _cards() -> list[dict[str, Any]]:
 _HYDRATE_COMMS_TAIL = 8
 
 
-def _fetch_card_full(card_id: Any) -> dict[str, Any] | None:
+def _fetch_card_full(card_id: Any,
+                     timeout: float | None = None) -> dict[str, Any] | None:
     """Fetch one card's safe fields with a bounded comms tail."""
     if card_id in (None, ""):
         return None
@@ -265,7 +271,9 @@ def _fetch_card_full(card_id: Any) -> dict[str, Any] | None:
         f"/cards?id={urllib.parse.quote(str(card_id), safe='')}"
         f"&fields={_CARD_FULL_FIELDS}&comms_tail={_HYDRATE_COMMS_TAIL}&limit=1"
     )
-    rows = _cards_payload(_get_json_cached(path, ttl=60.0))
+    payload = (_get_json_cached(path, ttl=60.0) if timeout is None
+               else _get_json_cached(path, ttl=60.0, timeout=timeout))
+    rows = _cards_payload(payload)
     return rows[0] if rows else None
 
 
@@ -1363,34 +1371,30 @@ def _context_card(reference: str, deadline: float) -> dict[str, Any]:
     Uses the compact board projection to map id/ref/title to a card id, then
     fetches only the fields `_safe_card` needs. This avoids the legacy full
     `/cards` dump inside an MCP request budget.
+
+    Goes through the shared snapshot helpers (`_compact_cards`,
+    `_fetch_card_full`) instead of raw `_get_json` so a pack issued right
+    after other board reads reuses warm snapshots — during a board-api
+    slow spell the uncached refetches used to burn the whole 8s pack
+    deadline and drop the card leg (idc02 smoke flake, 2026-11-27).
     """
     needle = reference.strip()
     if not needle:
         raise ValueError("card reference is required")
     lowered = needle.lower()
-    fields = "id,ref,title,column,priority,updated,brief,spec,action,requests,comms"
 
     def remaining() -> float:
         return max(0.5, deadline - time.monotonic())
 
-    def fetch_by_id(card_id: Any) -> dict[str, Any] | None:
-        if card_id in (None, ""):
-            return None
-        payload = _get_json(
-            f"/cards?id={urllib.parse.quote(str(card_id), safe='')}&limit=1"
-            f"&fields={fields}&comms_tail={_HYDRATE_COMMS_TAIL}",
-            timeout=remaining(),
-        )
-        rows = payload.get("cards") if isinstance(payload, dict) else []
-        return rows[0] if rows and isinstance(rows[0], dict) else None
+    # /cards?id= matches the card `id` only, never `ref` — probing it with
+    # a ref-shaped needle (ADA-1110, OPS-0222, ...) is a guaranteed miss
+    # that still costs a fetch inside the deadline.
+    if not re.match(r"^[A-Za-z]+-\d+$", needle):
+        exact = _fetch_card_full(needle, timeout=remaining())
+        if exact is not None:
+            return exact
 
-    exact_id = fetch_by_id(needle)
-    if exact_id is not None:
-        return exact_id
-
-    compact = _get_json("/cards?compact=1&limit=1000", timeout=remaining())
-    rows = compact.get("cards") if isinstance(compact, dict) else []
-    rows = [row for row in rows if isinstance(row, dict)]
+    rows = _compact_cards(timeout=remaining())
     exact = [
         row for row in rows
         if lowered in {str(row.get("id") or "").lower(), str(row.get("ref") or "").lower()}
@@ -1403,7 +1407,7 @@ def _context_card(reference: str, deadline: float) -> dict[str, Any]:
     candidate = exact[0] if exact else (titled[0] if titled else None)
     if candidate is None:
         raise LookupError(f"no board card matched {reference!r}")
-    return fetch_by_id(candidate.get("id")) or candidate
+    return _fetch_card_full(candidate.get("id"), timeout=remaining()) or candidate
 
 
 def build_plan(card: dict[str, Any]) -> dict[str, Any]:

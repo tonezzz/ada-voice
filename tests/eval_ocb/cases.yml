@@ -45,22 +45,26 @@
     tools_used: [ada_context_pack]
     max_elapsed_s: 15
 
+# Fixture card refs below must be LIVE board cards — once a card is
+# archived it drops out of /cards and every card-tool case fails
+# (ADA-0172/ADA-0174 rot, 2026-11-27; smoke moved to ADA-1110 same day).
+
 - id: card-status-real-ref
-  prompt: "status of ADA-0172"
+  prompt: "status of ADA-1110"
   tools:
     - tool: ada_status
-      args: {card_reference: "ADA-0172"}
+      args: {card_reference: "ADA-1110"}
   expect:
-    answer_contains: ["ada-ocb-board-read-latency", "ADA-0172"]
+    answer_contains: ["ada-smoke-regressions-20261107", "ADA-1110"]
     answer_contains_any: [["review", "column"]]
     tools_used: [ada_status]
     max_elapsed_s: 10
 
 - id: card-context-pack
-  prompt: "give me the work context for ADA-0174"
+  prompt: "give me the work context for ADA-1110"
   tools:
     - tool: ada_card_context
-      args: {card_reference: "ADA-0174", max_files: 4}
+      args: {card_reference: "ADA-1110", max_files: 4}
   expect:
     answer_contains: ["regression", "pack_markdown"]
     answer_contains_any: [["mutations_performed"]]
@@ -99,10 +103,10 @@
     max_elapsed_s: 15
 
 - id: preflight-gates-readonly
-  prompt: "preflight ADA-0172 without dispatching"
+  prompt: "preflight ADA-1110 without dispatching"
   tools:
     - tool: ada_preflight
-      args: {card_reference: "ADA-0172", selection_confirmation: "ADA-0172"}
+      args: {card_reference: "ADA-1110", selection_confirmation: "ADA-1110"}
   expect:
     answer_contains: ["start_check", "dispatch_check", "required_fields"]
     answer_contains_any: [["verifier", "missing_fields"]]
