@@ -1,0 +1,113 @@
+# SSOT Job: ada-ocb-smoke ADA-0172 fixture + runner-agent redeploy on idc02
+# Card: timer-alert-idc02-ada-ocb-smoke.
+# Dispatch 20261127-083400 on idc02 itself, branch
+# dispatch/20261127-083400-investigate-the-failure-of-ada (ada-voice).
+
+
+title: >-
+  ada-ocb-smoke.service failed hourly on a stale ADA-0172 card fixture
+  (0 live hits -> find_card fallback matched ~160 cards); fixture
+  repointed to ADA-1110 upstream and hot-applied on idc02. runner-agent
+  on idc02 verified at manifest pin 38d84bc.
+
+subtitle: >-
+  scripts/ocb-smoke.py committed on the dispatch branch (02e8365) with
+  the proven 11-25/11-26 hotfix ported upstream: ADA-0172 -> ADA-1110
+  plus a per-check `limit` override (15s) for the MDDB-fanout checks.
+  Live idc02 checkout carries the identical bytes as a hotfix until the
+  dispatch merge lands and the checkout ff's.
+
+planning:
+  goal: |
+    Stop the hourly ada-ocb-smoke.service exit-code failures on idc02
+    and leave ~/.local/bin/runner-agent matching the chaba repo source
+    and the runner-tooling manifest pin.
+  scope: |
+    Delivered:
+      - ada-voice scripts/ocb-smoke.py fix committed as 02e8365 on the
+        dispatch branch (not pushed; dispatcher merges).
+      - idc02 ~/CascadeProjects/ada-voice pulled ff-only to origin/main
+        (0a5dbd8, was 8 behind) and scripts/ocb-smoke.py overwritten
+        with the committed bytes (sha256 594aa5df...) — shows ` M`
+        until the merge lands, then self-cleans.
+      - idc02 ~/.local/bin/runner-agent re-installed via
+        `install -m 0755` from ~/CascadeProjects/chaba
+        scripts/board/runner-agent.py; sha256 38d84bc073da... ==
+        origin/master file == manifest pin (post-ed66bfb178).
+    Explicitly NOT done:
+      - chaba checkout on idc02 left 29 behind origin/master — the
+        hourly chaba-repo-sync.timer owns it; runner-agent.py content
+        is identical HEAD vs origin/master so nothing was lost.
+      - No push of the dispatch branch (dispatch close-out merges).
+  success_criteria:
+    - 'ada-ocb-smoke.service manual start exits 0, all 6 checks PASS,
+      benchmark doc written to ada-ha-scenario-reports'
+    - 'next hourly timer run (09:00 +07) also exits 0'
+    - '~/.local/bin/runner-agent sha256 == manifest pin == repo source'
+  risks:
+    - 'idc02 ada-voice checkout carries a dirty scripts/ocb-smoke.py
+      until the dispatch branch merges AND someone pulls. A pull
+      BEFORE the merge is safe (incoming does not touch the file); a
+      pull AFTER the merge sees identical bytes and cleans itself.'
+    - 'If the dispatch branch is rejected, the idc02 hotfix remains —
+      service stays green but the fixture rot recurs on any future
+      checkout reset (this is the third recurrence of that pattern).'
+  resources:
+    - 'proven hotfix bytes: idc02 scripts/ocb-smoke.py.bak-retry-20261126-175859
+      (find_card + context_pack limit=15, ADA-1110) — ported verbatim'
+    - 'fixture card: chaba docs/ssot/kanban/cards/ada-smoke-regressions-20261107.yml
+      (ref ADA-1110, col=done)'
+    - 'chaba commit ed66bfb178 bumped runner-tooling pin to 38d84bc at
+      08:38 +07 mid-session — the fleet-wide tool-pin drift self-healed'
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-27"
+  steps:
+    - id: 1
+      label: "recon"
+      status: done
+      notes: "journal showed hourly FAIL on find_card ADA-0172
+        (LookupError, matched 159->160 cards) cascading into
+        ada_context_pack + ada_preflight. Card comms showed the same
+        fixture was hot-fixed 11-25/11-26 but reverted twice — never
+        committed. runner-agent installed == chaba checkout file, but
+        manifest pin (4ed3afdb) != file sha (38d84bc): commit
+        5df508399d changed runner-agent.py without bumping the pin."
+    - id: 2
+      label: "pin drift resolved upstream"
+      status: done
+      notes: "chaba origin/master gained ed66bfb178 at 08:38 +07
+        bumping the pin to 38d84bc — matches file everywhere; sync
+        warn and fleet-health tool-pin drift clear on next reads."
+    - id: 3
+      label: "ocb-smoke fix commit"
+      status: done
+      notes: "02e8365 on dispatch branch — byte-identical to the proven
+        .bak-retry-20261126-175859; `ocb-smoke.py --dry-run` all 6
+        PASS (find_card 0.65s, context_pack 7.7s < 15s budget)."
+    - id: 4
+      label: "idc02 deploy + verify"
+      status: done
+      notes: "ada-voice checkout ff'd to 0a5dbd8; ocb-smoke.py
+        overwritten with committed bytes; runner-agent re-installed
+        (sha256 38d84bc073da...). `systemctl --user start
+        ada-ocb-smoke.service` -> Result=success, all PASS,
+        benchmark/ocb-smoke-20261127-084720 written."
+
+invoke:
+  tool:
+    - "journalctl --user -u ada-ocb-smoke.service (on idc02)"
+    - "scripts/ocb-smoke.py --dry-run  (read-only; skips MDDB write)"
+    - "systemctl --user start ada-ocb-smoke.service  (manual oneshot,
+      same as the hourly timer)"
+
+verification:
+  - "journalctl --user -u ada-ocb-smoke.service --since '1 hour ago'
+    # next timer tick must show Result=success"
+  - "sha256sum ~/.local/bin/runner-agent
+    # must equal 38d84bc073da382f26f66e01591345b51c94d46022d01543c7fc45a22a22f692"
+  - "git -C ~/CascadeProjects/ada-voice status -s scripts/ocb-smoke.py
+    # ' M' until dispatch merge + pull, then clean"
