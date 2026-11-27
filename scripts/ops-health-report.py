@@ -6,7 +6,7 @@ Checks: mddb http+vector, ada-ha-tony ws, jev-student (8778), open-jev-4b on idc
 systemone, embed proxy. Counts systemd restart churn (restarts in 24h —
 the crash-loop signal a single is-active check misses).
 """
-import json, os, subprocess, sys, time, urllib.request
+import http.client, json, os, subprocess, sys, time, urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,9 +14,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend.report_meta import validate_report_meta  # noqa: E402
 from backend.mddb_client import is_cms_collection  # noqa: E402
 
-MDDB = "http://idc03.taila0626a.ts.net:11023/v1"
+MDDB = os.environ.get(
+    "MDDB_BASE_URL", "http://idc03.taila0626a.ts.net:11023/v1").rstrip("/")
 MDDB_CMS = os.environ.get(
     "MDDB_CMS_URL", "http://100.102.134.91:11027/v1").rstrip("/")
+# MEM-1507: health opens before /v1 write routes are live (~84-104s after an
+# OOM restart). Gate on /v1/stats and retry keyed writes with bounded backoff.
+WRITE_TIMEOUT = float(os.environ.get("MDDB_HTTP_WRITE_TIMEOUT", "120"))
+ROUTE_WAIT_S = float(os.environ.get("MDDB_ROUTE_WAIT_S", "120"))
+TRANSIENT_HTTP = (urllib.error.URLError, TimeoutError, ConnectionError,
+                  http.client.HTTPException)
+RETRYABLE_STATUS = {404, 429, 502, 503, 504}
 NOW = datetime.now().astimezone()
 
 def probe(name, fn):
@@ -110,11 +118,48 @@ for s in svc_rows:
     lines.append(f"| {s['unit']} | {s['active']} | {s['restarts_24h']}{s['flag']} |")
 md = "\n".join(lines)
 
+def wait_for_routes(base):
+    """GET /v1/stats only succeeds once mddb's full API is listening."""
+    deadline = time.time() + ROUTE_WAIT_S
+    while True:
+        try:
+            if get(base + "/stats", timeout=5) is not None:
+                return True
+        except urllib.error.HTTPError:
+            pass
+        except TRANSIENT_HTTP:
+            pass
+        left = deadline - time.time()
+        if left <= 0:
+            return False
+        print(f"mddb /v1 routes not ready at {base}; waiting {min(5, left):.0f}s",
+              file=sys.stderr)
+        time.sleep(min(5, left))
+
+
 def post(path, payload):
     base = MDDB_CMS if is_cms_collection(str(payload.get("collection", ""))) else MDDB
-    req = urllib.request.Request(base + path, data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json"})
-    return json.loads(urllib.request.urlopen(req, timeout=60).read())
+    if not wait_for_routes(base):
+        raise RuntimeError(f"mddb /v1 routes not ready within {ROUTE_WAIT_S}s "
+                           f"at {base}; refusing POST {path}")
+    for attempt in range(1, 4):
+        req = urllib.request.Request(base + path, data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=WRITE_TIMEOUT) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRYABLE_STATUS or attempt == 3:
+                raise
+            print(f"POST {path} HTTP {exc.code}; attempt {attempt}/3",
+                  file=sys.stderr)
+        except TRANSIENT_HTTP as exc:
+            if attempt == 3:
+                raise
+            print(f"POST {path} {type(exc).__name__}; attempt {attempt}/3",
+                  file=sys.stderr)
+        time.sleep(2 ** attempt)
+    raise RuntimeError(f"POST {path} exhausted retries")
 
 ts = NOW.strftime("%Y%m%d-%H%M%S")
 meta = {"kind": ["report"], "domain": ["health"], "suite": ["ops-health"],
