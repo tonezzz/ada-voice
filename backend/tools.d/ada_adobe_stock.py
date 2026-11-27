@@ -33,7 +33,7 @@ import httpx
 PICKER = os.environ.get("ADA_ADOBE_PICKER",
                         "http://100.68.142.13:8777")
 CAMPAIGN = "AS-2026-11-05-REMOTE-WORK-001"
-_TIMEOUT = 30.0
+_TIMEOUT = 60.0
 _DECISIONS = ("keep", "reject", "revise")
 
 DECLARATION = {
