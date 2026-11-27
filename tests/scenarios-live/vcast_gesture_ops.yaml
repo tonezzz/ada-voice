@@ -5,7 +5,7 @@
 #
 # Expected tools (pending implementation):
 #   vcast_gesture(screen, mode)  mode: off | hand | room
-#     (hand=MediaPipe desk UX, room=YOLO-pose wake)
+#     (hand=YOLO hand-pointer via yolo-gesture.service, room=YOLO-pose wake)
 #   vcast_snapshot(screen)       display self-capture -> relay /frame -> image
 #     (canvas snap of the video/img element; iframe casts report
 #      uncapturable-iframe — then state-check is the fallback)

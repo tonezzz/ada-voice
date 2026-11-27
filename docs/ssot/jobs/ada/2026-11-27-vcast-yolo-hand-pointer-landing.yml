@@ -1,0 +1,138 @@
+# SSOT Job: vcast gesture YOLO — land the held detector-health change.
+# Card: vcast-gesture-control-with-yolo-detectio-bd5d28 (MED-1064).
+# Dispatch 20261127-083443, runner idc02, repo ada-voice (= ada-pi after
+# the GitHub rename; Tony's 2026-11-27 batch decision pinned repo=ada-voice,
+# target = idc02 display node).
+#
+# This card is the surviving sibling of rebuild-gesture-control-using-
+# yolo-83cf4a. That card's dispatch (20261126-130417, tony-macbook)
+# produced verified commits dd8a928 + 3ca1ffc on
+# dispatch/20261126-130417-goal-replace-mediapipe-hand-tr, but the
+# merge-sweep marked it "already in origin/main" without it ever
+# landing (5da3cc0 does not exist upstream; the branch still sits on
+# origin unmerged). This dispatch cherry-picked both commits onto
+# current main and re-ran the gates.
+
+title: >-
+  vcast gesture control with YOLO — detector-health honesty landed on
+  main; MediaPipe->YOLO client replacement confirmed already shipped in
+  chaba
+subtitle: >-
+  Card note: "Use YOLO instead of MediaPipe for hand-gesture tracking on
+  vcast displays to keep device load low". Audit (carried from the
+  canonical card's job doc 2026-11-26-vcast-yolo-hand-pointer.yml): the
+  vcast/gesture client apps and yolo-gesture.service live in the chaba
+  repo — vcast hand mode has been YOLO end-to-end since 2026-10-15
+  (hand_yolov8n box-centre pointer). The ada-voice-side gap was that
+  vcast_gesture(mode='hand') answered ok while the detector was dead;
+  that fix is what this landing delivers.
+
+planning:
+  goal: |
+    YOLO (not MediaPipe) drives hand-gesture tracking on vcast displays
+    with low device load. In ada-voice scope: the tool surface must tell
+    the truth about which detector backs mode='hand' and whether it is
+    actually consuming the display's frame uplink.
+  scope: |
+    Landed (cherry-pick of dd8a928 + 3ca1ffc, clean onto 0a5dbd8):
+      - backend/tool_runner/screens.py — _yolo_pointer_status() probes
+        GET /pointer on ADA_YOLO_POINTER_URL (default
+        http://tony-omen.taila0626a.ts.net:8785); vcast_gesture(mode='hand')
+        returns detector {engine, online, enabled, sinks, present,
+        grabbing, last_error} and warns when unreachable / POINTER_SINK
+        empty / sinks can't reach the target screen (vcast:auto or
+        vcast:<N> only — ws:// feeds gesture-relay, not vcast rooms).
+      - backend/realtime_provider.py + backend/tool_guide.yml — 'hand'
+        described as the YOLO hand-pointer, not MediaPipe.
+      - tests/test_tool_runner.py — VcastGestureDetectorTests (7 tests).
+      - docs/ssot/jobs/ada/2026-11-26-vcast-yolo-hand-pointer.yml — the
+        full audit + model-eval trail from the canonical dispatch.
+      - dispatch-outcome-20261126-130417-*.md — canonical outcome doc.
+    Added this session:
+      - tests/scenarios-live/vcast_gesture_ops.yaml — stale comment
+        "hand=MediaPipe desk UX" corrected to the YOLO hand-pointer.
+    Explicitly NOT done:
+      - chaba-side edits (vcast/gesture app source, yolo-gesture
+        service, /apps/gesture engine default) — different repo,
+        outside this worktree
+      - restarting yolo-gesture.service on tony-omen — host ops
+      - push/merge/deploy — forbidden for this dispatch
+  success_criteria:
+    - 'mode=hand result carries detector health; unreachable detector
+      warns instead of silent ok'
+    - 'off/room modes unchanged — no probe, no detector key'
+    - 'tool-lint clean; scenario schema clean; focused + suite pytest green'
+  risks:
+    - 'ADA_YOLO_POINTER_URL default points at tony-omen:8785 where the
+      unit is currently down — warning path is the intended behaviour'
+    - 'probe adds up to ~2s to a mode=hand call (to_thread, 2s timeout)'
+  resources:
+    - 'detector: chaba experiments/ultralytics-yolo-ha/server.py
+      (hand_yolov8n.pt, POINTER_SINK, GET /pointer)'
+    - 'client: chaba stacks/web/public/apps/{vcast,gesture}/'
+  owner: tony
+  estimated_duration: 1 session
+
+processing:
+  status: done
+  started_at: "2026-11-27"
+  steps:
+    - id: 1
+      label: "card + board archaeology"
+      status: done
+      notes: "card comms: Tony 11-17 postponed pending host clarity,
+        11-23 answered ada-pi/idc02 (= ada-voice/idc02), 11-27 re-spawned
+        with same decision; triage 11-26 flagged it duplicate of
+        rebuild-gesture-control-using-yolo-83cf4a whose merge was held"
+    - id: 2
+      label: "verify canonical work never landed"
+      status: done
+      notes: "origin/main lacks _yolo_pointer_status/VcastGestureDetector
+        and job doc; merge commit 5da3cc0 absent; branch
+        dispatch/20261126-130417-* still on origin unmerged — merge-sweep
+        'already in origin/main' was a false positive"
+    - id: 3
+      label: "port + stale-comment fix"
+      status: done
+      notes: "cherry-picked dd8a928 + 3ca1ffc clean onto 0a5dbd8;
+        corrected hand=MediaPipe comment in vcast_gesture_ops.yaml"
+    - id: 4
+      label: "gates"
+      status: done
+      notes: "VcastGesture 7+2subtests green; test_tool_runner 303;
+        gesture/frontend/scenario set 66; tool-lint clean (74 decl,
+        cap 116); schema-check 214 files 0 violations; full suite run"
+
+verification:
+  - cmd: 'pytest tests/test_tool_runner.py -k VcastGesture -x -q'
+    result: '7 passed, 2 subtests passed'
+  - cmd: 'pytest tests/test_tool_runner.py -x -q'
+    result: '303 passed, 9 subtests'
+  - cmd: 'pytest tests/test_gesture_controls.py tests/test_frontend_contract.py tests/test_scenarios.py -x -q'
+    result: '66 passed'
+  - cmd: 'python3 scripts/tool-lint.py'
+    result: 'clean — 74 declared tools, cap 116'
+  - cmd: 'python3 scripts/scenario-schema-check.py'
+    result: '214 files, 0 violations'
+
+artifacts:
+  code:
+    - backend/tool_runner/screens.py
+    - backend/realtime_provider.py
+    - backend/tool_guide.yml
+  tests:
+    - tests/test_tool_runner.py
+    - tests/scenarios-live/vcast_gesture_ops.yaml
+  docs:
+    - docs/ssot/jobs/ada/2026-11-26-vcast-yolo-hand-pointer.yml
+    - docs/ssot/jobs/ada/2026-11-27-vcast-yolo-hand-pointer-landing.yml
+    - dispatch-outcome-20261126-130417-goal-replace-mediapipe-hand-tr.md
+
+followups:
+  - "ops: yolo-gesture.service is down on every probed host
+    (tony-omen:8785 refused) — hand mode warns until it is restarted
+    (chaba experiments/ultralytics-yolo-ha/yolo-gesture.service) or
+    ADA_YOLO_POINTER_URL is repointed"
+  - "chaba-side: /apps/gesture/ still defaults engine=mediapipe for
+    direct wand use; flip default or retire the MediaPipe bundle once
+    YOLO proves on-device — different repo, needs its own card/dispatch"
